@@ -93,6 +93,23 @@ def sensitive_query_param_name(url: str) -> Optional[str]:
                  if value and unquote(key).lower() in _SENSITIVE_QUERY_PARAM_NAMES), None)
 
 
+def has_url_userinfo(url: str) -> bool:
+    """Return True when an HTTP(S) URL embeds credentials in its authority.
+
+    URL userinfo (``user:password@host`` or ``token@host``) is sent verbatim
+    to third-party extract/browser providers when they receive the full URL.
+    Treat any userinfo as credential-bearing rather than trying to recognize
+    particular password or token formats.
+    """
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlsplit(url.strip())
+    except ValueError:
+        return False
+    return parsed.scheme.lower() in _HTTP_SCHEMES and parsed.username is not None
+
+
 # Cloud metadata hostnames — always blocked regardless of DNS or config toggle.
 _BLOCKED_HOSTNAMES = frozenset({"metadata.google.internal", "metadata.goog"})
 
