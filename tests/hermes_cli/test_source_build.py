@@ -266,6 +266,25 @@ def test_update_builds_selected_products_after_one_union_preparation(source_prod
     assert not list((root / "apps/desktop").glob(".staging-*"))
 
 
+@pytest.mark.platforms("posix")
+def test_update_rebuilds_only_the_products_the_pull_made_stale(source_products):
+    """An update reads the same build receipts launch does: nothing stale, nothing rebuilt;
+    one changed product rebuilds alone."""
+    from hermes_cli.source_build import build_update_products
+
+    root, _acquired = source_products
+    build_update_products(root, desktop=False)
+    first = _events(root)
+    assert [event["step"] for event in first] == ["deps", "tui", "web"]
+
+    build_update_products(root, desktop=False)
+    assert _events(root) == first
+
+    (root / "web/changed.ts").write_text("changed web source")
+    build_update_products(root, desktop=False)
+    assert _events(root) == [*first, {"step": "web"}]
+
+
 @pytest.mark.platforms("linux")
 @pytest.mark.parametrize("step", ["tui", "web", "desktop"])
 def test_update_failure_raises_without_retries_or_replacing_live_app(source_products, step):

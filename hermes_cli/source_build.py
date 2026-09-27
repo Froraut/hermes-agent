@@ -114,20 +114,38 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
     workspaces = frontends + (("apps/desktop",) if desktop else ())
     publish_stage("Updating Node dependencies")
     prepare_source_dependencies(project_root, workspaces, env=env, explicit=True)
+    # Rebuild only what the pull made stale — the same receipts launch reads. Rebuilding
+    # all three on every update (typically none, or one, changed) turned ~1 min updates
+    # into ~3 min ones.
     if "ui-tui" in frontends:
-        publish_stage("Building the TUI")
-        build_source_tui(project_root, env=env)
-    if "web" in frontends:
-        publish_stage("Building the web UI")
-        build_source_web(project_root, env=env)
-    if desktop:
-        from hermes_cli.main_desktop import _refresh_installed_desktop_apps, build_prepared_desktop
+        from hermes_cli.main_tui_launch import _tui_need_rebuild
 
-        publish_stage("Building the desktop app")
-        build_prepared_desktop(
-            project_root / "apps/desktop", source_mode=False,
-            npm=shutil.which("npm", path=env["PATH"]), env=env, icons=project_root,
-        )
+        if _tui_need_rebuild(project_root / "ui-tui"):
+            publish_stage("Building the TUI")
+            build_source_tui(project_root, env=env)
+        else:
+            print("  ✓ TUI up to date")
+    if "web" in frontends:
+        from hermes_cli.main_web_build import _web_ui_build_needed
+
+        if _web_ui_build_needed(project_root / "web"):
+            publish_stage("Building the web UI")
+            build_source_web(project_root, env=env)
+        else:
+            print("  ✓ Web UI up to date")
+    if desktop:
+        from hermes_cli.main_desktop import (
+            _desktop_build_needed, _refresh_installed_desktop_apps, build_prepared_desktop)
+
+        desktop_dir = project_root / "apps/desktop"
+        if _desktop_build_needed(desktop_dir, project_root, source_mode=False):
+            publish_stage("Building the desktop app")
+            build_prepared_desktop(
+                desktop_dir, source_mode=False,
+                npm=shutil.which("npm", path=env["PATH"]), env=env, icons=project_root,
+            )
+        else:
+            print("  ✓ Desktop app up to date")
         # A current release/ can still sit beside a stale installed copy (an earlier
         # update rebuilt but never installed); healing must not wait for the next build.
         _refresh_installed_desktop_apps(project_root / "apps/desktop")
