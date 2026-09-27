@@ -1508,8 +1508,15 @@ $savedConsoleInputMode = if ($script:ConsoleInput) { [HermesHandoff.ConsoleInput
 try {
     New-Item -ItemType Directory -Path $LogDir -Force -ErrorAction SilentlyContinue | Out-Null
     Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
+    # Each hand-off appends the whole update output here; roll it over before a run starts
+    # (same ceiling as update.log, one previous generation) instead of growing without bound.
+    try {
+        if ((Test-Path -LiteralPath $LogPath) -and ((Get-Item -LiteralPath $LogPath).Length -ge 5MB)) {
+            Move-Item -LiteralPath $LogPath -Destination "$LogPath.1" -Force
+        }
+    } catch {}
     Show-ProgressWindow
-    Write-HandoffLog "hand-off start: root=$InstallRoot branch=$Branch channel=$Channel desktopPid=$DesktopPid pid=$PID"
+    Write-HandoffLog "hand-off start:root=$InstallRoot branch=$Branch channel=$Channel desktopPid=$DesktopPid pid=$PID"
 
     # -- 0. Claim the update marker with OUR pid ---------------------------
     try {

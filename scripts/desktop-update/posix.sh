@@ -730,6 +730,11 @@ fi
 # command has returned; the already-running server keeps the inherited setting
 # until normal cleanup closes it.
 trap '' TERM
+# Each hand-off appends the whole `hermes update` output here; roll it over before a run starts
+# (same ceiling as update.log, one previous generation) instead of growing without bound.
+if [ -f "$LOG" ] && [ "$(wc -c < "$LOG" 2>/dev/null || echo 0)" -ge 5242880 ]; then
+  mv -f "$LOG" "$LOG.1" 2>/dev/null || true
+fi
 log "hand-off start: root=$INSTALL_ROOT branch=$BRANCH channel=$CHANNEL desktopPid=$DESKTOP_PID pid=$$"
 rm -f "$RESULT" 2>/dev/null || true
 
