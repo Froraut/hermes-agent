@@ -414,16 +414,20 @@ class TestSyncSkills:
         return stack
 
     def test_suppressed_builtin_not_reseeded(self, tmp_path):
-        """A curator-pruned built-in in the suppression list must NOT be
-        re-copied on sync — that's what makes the prune durable across updates.
+        """With curator.prune_builtins on, a curator-pruned built-in in the suppression
+        list must NOT be re-copied on sync — that's what makes the prune durable across updates.
         """
         bundled = self._setup_bundled(tmp_path)
         skills_dir = tmp_path / "user_skills"
         manifest_file = skills_dir / ".bundled_manifest"
 
         with self._patches(bundled, skills_dir, manifest_file), \
-                patch("tools.skills_sync._read_suppressed_names", return_value={"old-skill"}):
+                patch("tools.skills_sync._read_suppressed_names", return_value={"old-skill"}), \
+                patch("tools.skill_usage._prune_builtins_enabled", return_value=True), \
+                patch("tools.skill_usage._toggle_suppressed_name") as toggle:
             result = sync_skills(quiet=True)
+
+        toggle.assert_not_called()
 
         # old-skill is suppressed → skipped, not copied.
         assert "old-skill" in result["suppressed"]
@@ -432,6 +436,27 @@ class TestSyncSkills:
         # The non-suppressed bundled skill is still copied normally.
         assert "new-skill" in result["copied"]
         assert (skills_dir / "category" / "new-skill" / "SKILL.md").exists()
+
+    def test_builtin_pruned_under_the_old_default_comes_back_when_pruning_is_off(self, tmp_path):
+        """Built-in pruning is opt-in: with curator.prune_builtins off, a suppression entry left by the
+        old default must not strand the skill. Its manifest entry survived the prune and the copy is
+        archived, which used to read as "user deleted it" even when the suppression was ignored."""
+        bundled = self._setup_bundled(tmp_path)
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+        skills_dir.mkdir()
+        manifest_file.write_text("old-skill:0123456789abcdef0123456789abcdef\n")
+
+        with self._patches(bundled, skills_dir, manifest_file), \
+                patch("tools.skills_sync._read_suppressed_names", return_value={"old-skill"}), \
+                patch("tools.skill_usage._prune_builtins_enabled", return_value=False), \
+                patch("tools.skill_usage._toggle_suppressed_name") as toggle:
+            result = sync_skills(quiet=True)
+
+        assert "old-skill" in result["copied"]
+        assert "old-skill" not in result["suppressed"]
+        assert (skills_dir / "old-skill" / "SKILL.md").read_text() == "# Old"
+        toggle.assert_called_once_with("old-skill", add=False)
 
     def test_fresh_install_copies_all_and_records_origin_hashes(self, tmp_path):
         bundled = self._setup_bundled(tmp_path)

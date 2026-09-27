@@ -156,6 +156,26 @@ def _read_suppressed_names() -> set:
         return names
 
 
+def _prune_builtins_enabled() -> bool:
+    """``curator.prune_builtins``; when the config reader is unavailable, keep honoring suppression."""
+    try:
+        from tools.skill_usage import _prune_builtins_enabled as enabled
+
+        return enabled()
+    except Exception:
+        return True
+
+
+def _lift_suppression(names: List[str]) -> None:
+    """Drop re-seeded built-ins from the curator suppression list (the single writer lives in skill_usage)."""
+    try:
+        from tools.skill_usage import _toggle_suppressed_name
+    except Exception:
+        return
+    for name in names:
+        _toggle_suppressed_name(name, add=False)
+
+
 def _write_manifest(entries: Dict[str, str]):
     """Atomic v2 write, preserving an existing file's mode/owner (not mkstemp's 0600)."""
     from hermes_constants import mkdir_under_hermes_home
@@ -409,15 +429,26 @@ def sync_skills(quiet: bool = False) -> dict:
     if essential_only:
         bundled_skills = [(name, src) for name, src in bundled_skills if name in ESSENTIAL_SKILLS]
     suppressed = _read_suppressed_names()
+    # Built-in pruning is opt-in (curator.prune_builtins) and archive_skill only suppresses a built-in while it
+    # is on. With it off, an entry is left over from the old default (pruning on for everyone): honoring it
+    # stranded the skill for good — archived, skipped here, and refused by `curator restore`.
+    honor_suppression = bool(suppressed) and _prune_builtins_enabled()
+    lifted: List[str] = []
     external_index = _build_external_skill_index()
     st = _SyncState(manifest=_read_manifest(), quiet=quiet)
 
     for skill_name, skill_src in bundled_skills:
-        # Curator-pruned built-ins must not resurrect on every update; essentials are exempt.
-        if skill_name in suppressed and skill_name not in ESSENTIAL_SKILLS:
-            st.suppressed.append(skill_name)
-            continue
         dest = _compute_relative_dest(skill_src, bundled_dir)
+        if skill_name in suppressed:
+            # Curator-pruned built-ins must not resurrect on every update; essentials are exempt.
+            if honor_suppression and skill_name not in ESSENTIAL_SKILLS:
+                st.suppressed.append(skill_name)
+                continue
+            # Re-seeding: the entry kept from before the prune would otherwise read as "user deleted it".
+            if not dest.exists():
+                st.manifest.pop(skill_name, None)
+            if not honor_suppression:
+                lifted.append(skill_name)
         bundled_hash = _dir_hash(skill_src)
         # Recoveries run BEFORE classification so a missing dest isn't misread as user-deleted.
         _recover_orphan_backup(dest)
@@ -448,9 +479,10 @@ def sync_skills(quiet: bool = False) -> dict:
         bundled_dir,
         {_compute_relative_dest(src, bundled_dir).parent for _, src in bundled_skills} if essential_only else None)
     _write_manifest(st.manifest)
+    _lift_suppression(lifted)
     return {
         "copied": st.copied, "updated": st.updated, "skipped": st.skipped, "user_modified": st.user_modified,
-        "cleaned": cleaned, "suppressed": st.suppressed, "relocated": st.relocated,
+        "cleaned": cleaned, "suppressed": st.suppressed, "unsuppressed": lifted, "relocated": st.relocated,
         "total_bundled": len(bundled_skills),
         "optional_provenance_backfilled": _backfill_optional_provenance(quiet=quiet),
         "shadowed_by_external": st.shadowed_by_external,
