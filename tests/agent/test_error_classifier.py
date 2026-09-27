@@ -2132,6 +2132,35 @@ class TestBodyCarriedStatus:
         assert result.should_fallback is True
 
 
+def _llama_server_template_raise(message):
+    """llama-server's HTTP 500 for a chat template ``raise_exception`` (shape from a live Qwen 3.8 GGUF)."""
+    body = {"error": {"code": 500, "type": "server_error", "message": (
+        "\n------------\nWhile executing CallExpression at line 49, column 28 in source:\n"
+        "...{{- raise_exception('...' ~ reason...\n        ^\nError: Jinja Exception: " + message)}}
+    return MockAPIError(f"Error code: 500 - {body}", status_code=500, body=body)
+
+
+class TestTemplateRaiseAs5xx:
+    """A chat template's ``raise_exception`` relayed as HTTP 500 refuses every retry of the same
+    request, so it must not take the transient server-error ladder."""
+
+    def test_reasoning_effort_refusal_takes_the_one_shot_reasoning_recovery(self):
+        e = _llama_server_template_raise(
+            "Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.")
+        result = classify_api_error(e, provider="custom", model="qwen3.8-flash")
+        assert result.reason == FailoverReason.reasoning_mandatory
+        assert result.retryable is True and result.should_fallback is False
+
+    @pytest.mark.parametrize("message, reason", [
+        ("Conversation roles must alternate user/assistant/user/assistant/...", FailoverReason.role_alternation),
+        ("System message must be at the beginning.", FailoverReason.format_error),
+    ])
+    def test_other_template_refusals_are_not_transient(self, message, reason):
+        result = classify_api_error(_llama_server_template_raise(message), provider="custom", model="local")
+        assert result.reason == reason
+        assert result.reason != FailoverReason.server_error
+
+
 class TestStreamingRenderFormatError:
     """Status-less Jinja render failures (LM Studio / llama.cpp) fail over; see #62662."""
 

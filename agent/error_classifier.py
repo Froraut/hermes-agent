@@ -613,6 +613,24 @@ _400_TAIL_RULES = _OVERFLOW_AS_5XX_RULES + (
 # fails mid-stream (#62662). Deterministic for the request, so fall back instead of retrying.
 _STREAM_RENDER_ERROR_PATTERNS = ("error rendering", "rendering prompt", "jinja template", "jinja render")
 
+# llama.cpp's llama-server relays a chat template's own ``raise_exception(...)`` as HTTP 500
+# ``server_error`` ("While executing CallExpression ... Jinja Exception: <message>"). The template
+# refuses this request's shape and will refuse every retry of it, so the transient 5xx ladder only
+# burns minutes before the turn fails. Route it by what the template refused instead.
+_TEMPLATE_RAISE_PATTERNS = ("jinja exception", "raise_exception(")
+# Qwen 3.8 templates whitelist xhigh/medium/low ("Unexpected reasoning effort high. Supported
+# types are ...") — the one-shot reasoning recovery resends without the effort (template default).
+_TEMPLATE_REASONING_PATTERNS = ("reasoning effort", "reasoning_effort", "reasoningeffort")
+
+
+def _template_raise_verdict(msg: str) -> Verdict:
+    if any(p in msg for p in _TEMPLATE_REASONING_PATTERNS):
+        return _V_REASONING_MANDATORY
+    if any(p in msg for p in _ROLE_ALTERNATION_PATTERNS):
+        return _V_ROLE_ALTERNATION
+    return _V_FORMAT_ERROR
+
+
 # Status-less message path, head (before usage-limit disambiguation).
 _MESSAGE_HEAD_RULES = ((_MEMORY_CEILING_PATTERNS, _V_OVERLOADED),
                        (_PAYLOAD_TOO_LARGE_PATTERNS, _V_PAYLOAD_TOO_LARGE),
@@ -1075,6 +1093,8 @@ def _status_429(c: _Ctx) -> Verdict:
 
 
 def _status_5xx(c: _Ctx) -> Verdict:
+    if any(p in c.msg for p in _TEMPLATE_RAISE_PATTERNS):
+        return _template_raise_verdict(c.msg)
     # Request-validation errors as 5xx (codex.nekos.me) fail fast instead of
     # retry-flooding — unless the parameter was injected server-side.
     validation = any(p in c.msg for p in _REQUEST_VALIDATION_PATTERNS) or c.code in _5XX_VALIDATION_CODES
