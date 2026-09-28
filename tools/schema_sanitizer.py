@@ -60,21 +60,58 @@ def _rename_property_keys(props: dict, path: str) -> dict[str, str]:
 
 def unrename_tool_args(params_schema: Any, args: Any) -> Any:
     """Map sanitized keys in model-emitted args back to wire names. ``params_schema`` is the
-    ORIGINAL registry schema; recurses into objects/array items; unknown keys pass through."""
-    props = params_schema.get("properties") if isinstance(params_schema, dict) else None
-    if not isinstance(props, dict) or not isinstance(args, dict):
-        return args
-    reverse = {v: k for k, v in _rename_property_keys(props, "<unrename>").items()}
+    ORIGINAL registry schema. Walks everywhere ``_sanitize_node`` renames: ``properties``,
+    ``items``, ``additionalProperties``, local ``$ref`` targets (``$defs``/``definitions``) and
+    ``allOf``/``anyOf``/``oneOf`` branches; unknown keys pass through."""
+    return _unrename_value(params_schema, args, params_schema)
+
+
+def _unrename_candidates(schema: Any, root: Any, seen: frozenset = frozenset()) -> list[dict]:
+    """*schema* plus the local ``$ref`` targets and combinator branches that also describe the
+    same value, flattened. ``seen`` holds the refs already followed (cycle guard)."""
+    if not isinstance(schema, dict):
+        return []
+    found = [schema]
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and (ref == "#" or ref.startswith("#/")) and ref not in seen:
+        target: Any = root
+        for part in ref[2:].split("/") if ref != "#" else ():
+            part = part.replace("~1", "/").replace("~0", "~")
+            target = target.get(part) if isinstance(target, dict) else None
+        found += _unrename_candidates(target, root, seen | {ref})
+    for key in ("allOf", "anyOf", "oneOf"):
+        branches = schema.get(key)
+        for branch in branches if isinstance(branches, list) else ():
+            found += _unrename_candidates(branch, root, seen)
+    return found
+
+
+def _unrename_value(schema: Any, value: Any, root: Any) -> Any:
+    candidates = _unrename_candidates(schema, root)
+    if isinstance(value, list):
+        items = next((c["items"] for c in candidates if isinstance(c.get("items"), dict)), None)
+        return [_unrename_value(items, item, root) for item in value] if items else value
+    if not isinstance(value, dict):
+        return value
+    # {model-facing key: (wire key, subschema)} per candidate; the branch whose sanitized keys
+    # best match the value wins a shared key (stable sort keeps schema order on ties).
+    maps = []
+    for cand in candidates:
+        props = cand.get("properties")
+        if isinstance(props, dict):
+            renames = _rename_property_keys(props, "<unrename>")
+            maps.append({renames.get(k, k): (k, v) for k, v in props.items()})
+    maps.sort(key=lambda m: -len(m.keys() & value.keys()))
+    lookup: dict = {}
+    for m in maps:
+        for model_key, entry in m.items():
+            lookup.setdefault(model_key, entry)
+    extra = next((c["additionalProperties"] for c in candidates
+                  if isinstance(c.get("additionalProperties"), dict)), None)
     out = {}
-    for key, value in args.items():
-        orig = reverse.get(key, key)
-        sub = props.get(orig) if isinstance(props.get(orig), dict) else {}
-        if isinstance(value, dict) and sub:
-            value = unrename_tool_args(sub, value)
-        elif isinstance(value, list) and isinstance(sub.get("items"), dict):
-            value = [unrename_tool_args(sub["items"], item) if isinstance(item, dict) else item
-                     for item in value]
-        out[orig] = value
+    for key, item in value.items():
+        orig, sub = lookup.get(key, (key, extra))
+        out[orig] = _unrename_value(sub, item, root)
     return out
 
 

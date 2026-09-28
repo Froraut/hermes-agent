@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import copy
 
+import pytest
+
 from tools.schema_sanitizer import (
     sanitize_tool_schemas,
     strip_pattern_and_format,
@@ -282,12 +284,63 @@ def test_strip_responses_mixed_formats():
 # in the tools array 400s the whole request on Anthropic/Bedrock/Vertex/Azure.
 # ---------------------------------------------------------------------------
 
-from tools.schema_sanitizer import sanitize_property_key
+from tools.schema_sanitizer import sanitize_property_key, unrename_tool_args
 
 
 def test_sanitize_property_key_empty_falls_back():
     assert sanitize_property_key("~~~") == "___"
     assert sanitize_property_key("") == "param"
+
+
+_BAD_MODEL = {"type": "object", "properties": {"issue_class~neq": {"type": "string"}},
+              "required": ["issue_class~neq"]}
+
+
+@pytest.mark.parametrize("params, bad_key, wire_args", [
+    pytest.param({"type": "object", "properties": {"rows": {"type": "array", "items": {
+        "type": "object", "properties": {"a b": {"type": "string"}}}}}},
+        "a b", {"rows": [{"a b": "x"}]}, id="properties-items"),
+    pytest.param({"type": "object", "properties": {"filter": {"$ref": "#/$defs/F"}},
+                  "required": ["filter"], "$defs": {"F": _BAD_MODEL}},
+        "issue_class~neq", {"filter": {"issue_class~neq": "x"}}, id="ref-defs"),
+    pytest.param({"type": "object", "properties": {"filter": {
+        "anyOf": [{"$ref": "#/definitions/F"}, {"type": "null"}], "default": None}},
+                  "definitions": {"F": {"type": "object", "properties": {"a b": {"type": "string"}}}}},
+        "a b", {"filter": {"a b": "x"}}, id="optional-ref"),
+    pytest.param({"type": "object", "properties": {"q": {"anyOf": [
+        {"type": "string"}, {"type": "object", "properties": {"x:y": {"type": "string"}}}]}}},
+        "x:y", {"q": {"x:y": "v"}}, id="union-branch"),
+    pytest.param({"type": "object", "properties": {"m": {"type": "object", "additionalProperties": {
+        "type": "object", "properties": {"k@1": {"type": "integer"}}}}}},
+        "k@1", {"m": {"row": {"k@1": 5}}}, id="additional-properties"),
+])
+def test_unrename_tool_args_restores_keys_wherever_sanitizer_renamed(params, bad_key, wire_args):
+    """Round trip: the model only sees the sanitized key, and the MCP server must get its own
+    key back — nested models ($ref), union branches and additionalProperties included."""
+    sent = sanitize_tool_schemas([_tool("t", copy.deepcopy(params))])[0]["function"]["parameters"]
+    model_key = sanitize_property_key(bad_key)
+    assert repr(model_key) in str(sent) and repr(bad_key) not in str(sent)
+
+    def to_model(value):
+        if isinstance(value, dict):
+            return {model_key if k == bad_key else k: to_model(v) for k, v in value.items()}
+        return [to_model(v) for v in value] if isinstance(value, list) else value
+
+    assert unrename_tool_args(params, to_model(wire_args)) == wire_args
+
+
+def test_unrename_tool_args_terminates_on_recursive_refs():
+    params = {"type": "object", "properties": {"root": {"$ref": "#/$defs/Node"},
+                                               "loop": {"$ref": "#/$defs/A"}},
+              "$defs": {"Node": {"type": "object", "properties": {
+                  "node id": {"type": "string"},
+                  "children": {"type": "array", "items": {"$ref": "#/$defs/Node"}}}},
+                  "A": {"$ref": "#/$defs/B"}, "B": {"allOf": [{"$ref": "#/$defs/A"}]}}}
+    model_args = {"root": {"node_id": "1", "children": [{"node_id": "2", "children": []}]},
+                  "loop": {"node_id": "untouched"}}
+    assert unrename_tool_args(params, model_args) == {
+        "root": {"node id": "1", "children": [{"node id": "2", "children": []}]},
+        "loop": {"node_id": "untouched"}}
 
 
 # ---------------------------------------------------------------------------
