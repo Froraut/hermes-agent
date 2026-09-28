@@ -12,8 +12,11 @@ import json
 import logging
 import os
 import re
+import socket
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from typing import Optional
 from gateway.platforms._shared import profile_scoped as _profile_scoped
@@ -166,14 +169,39 @@ def redact_outbound(text: str) -> str:
     return _EMAIL_RE.sub("[redacted-email]", redact_for_egress(text))
 
 
-# Blocked even in localhost-only mode — a remote peer must not make us probe internal services
-# (link-local/AWS metadata, RFC1918, unspecified, IPv6 link-local/ULA). Loopback only in localhost mode.
-_BLOCKED_PREFIXES = ("169.254.", "127.", "10.", *(f"172.{i}." for i in range(16, 32)), "192.168.",
-                     "0.0.0.0", "::1", "fe80:", "fc00:", "fd00:")
+def _literal_ip(hostname: str):
+    """IP the host string already is, including the integer and hex forms ``inet_aton`` accepts.
+
+    ``ipaddress`` only parses dotted quad and textual IPv6. ``urllib`` later asks
+    ``getaddrinfo``, which accepts ``2852039166`` and ``0x7f000001`` as IPv4.
+    """
+    try:
+        return ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    try:
+        return ipaddress.IPv4Address(socket.inet_aton(hostname))
+    except OSError:
+        return None
+
+
+def _ip_allowed(ip, *, localhost_mode: bool) -> bool:
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if ip.is_loopback:
+        return bool(localhost_mode)
+    if ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+        return False
+    return True
 
 
 def is_safe_callback_url(url: str, *, localhost_mode: Optional[bool] = None) -> bool:
-    """True when a push callback URL is http(s) and not internal/private/loopback."""
+    """True when a push callback URL is http(s) and not internal/private/loopback.
+
+    Hostnames are resolved. One internal address, or a name that does not resolve,
+    rejects the URL: a metadata A record must not pass because the text looked public.
+    """
     if localhost_mode is None:
         localhost_mode = localhost_only()
     try:
@@ -183,19 +211,36 @@ def is_safe_callback_url(url: str, *, localhost_mode: Optional[bool] = None) -> 
     hostname = (parsed.hostname or "") if parsed and parsed.scheme in ("http", "https") else ""
     if not hostname:
         return False
-    hostname_lower = hostname.lower()
-    if hostname_lower == "localhost":
+    if hostname.lower() == "localhost":
         return localhost_mode
-    for prefix in _BLOCKED_PREFIXES:
-        if hostname_lower.startswith(prefix.lower()):
-            return bool(localhost_mode and prefix in ("127.", "::1"))
+    literal = _literal_ip(hostname)
+    if literal is not None:
+        return _ip_allowed(literal, localhost_mode=localhost_mode)
     try:
-        ip = ipaddress.ip_address(hostname)
-        if ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved:
-            return bool(localhost_mode and ip.is_loopback)
-    except ValueError:
-        pass  # a hostname, not an IP
-    return True
+        infos = socket.getaddrinfo(hostname, None)
+    except OSError:
+        return False
+    addresses = []
+    for info in infos:
+        try:
+            addresses.append(ipaddress.ip_address(info[4][0]))
+        except ValueError:
+            return False
+    if not addresses:
+        return False
+    return all(_ip_allowed(ip, localhost_mode=localhost_mode) for ip in addresses)
+
+
+def callback_opener(*, localhost_mode: bool) -> urllib.request.OpenerDirector:
+    """POST opener that re-checks each redirect. A public URL must not bounce onto metadata."""
+
+    class _RecheckRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if not is_safe_callback_url(newurl, localhost_mode=localhost_mode):
+                raise urllib.error.HTTPError(newurl, code, "unsafe redirect", headers, fp)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    return urllib.request.build_opener(_RecheckRedirect)
 
 
 def audit(direction: str, peer: str, task_id: str, summary: str) -> None:
