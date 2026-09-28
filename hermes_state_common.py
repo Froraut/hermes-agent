@@ -56,6 +56,25 @@ def escape_like(text: str) -> str:
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _sql_casefold(value: Any) -> Any:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    return value.casefold() if isinstance(value, str) else value
+
+
+def casefold_sql(expr: str) -> str:
+    """SQL for *expr* casefolded like ``str.casefold()`` (compare with a casefolded needle):
+    SQLite's LOWER()/LIKE fold ASCII only, so "Обновление" never matched "обновление". The BLOB
+    cast hands the function raw bytes: a row with invalid UTF-8 folds with U+FFFD instead of
+    failing the whole statement (sqlite3 cannot decode it into a str argument)."""
+    return f"hermes_casefold(CAST({expr} AS BLOB))"
+
+
+def register_sql_functions(conn) -> None:
+    """SQL functions SessionDB queries call; registered on every connection SessionDB opens."""
+    conn.create_function("hermes_casefold", 1, _sql_casefold, deterministic=True)
+
+
 _PREVIEW_CONTENT_SQL = "REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' ')"
 _PREVIEW_SCAFFOLDED_SQL = f"m.content LIKE '{SKILL_SCAFFOLD_SQL_LIKE}'"
 _SQL_WHITESPACE = "CHAR(9) || CHAR(10) || CHAR(13) || CHAR(32)"
