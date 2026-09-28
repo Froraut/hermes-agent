@@ -183,15 +183,16 @@ def _read_hub_installed_names() -> Set[str]:
     return set()
 
 
-def _prune_builtins_enabled() -> bool:
-    """``curator.prune_builtins`` (default False); lazy config import keeps this module importable during update/sync."""
+def _prune_builtins_enabled(*, on_error: bool = False) -> bool:
+    """``curator.prune_builtins`` (default False); lazy config import keeps this module importable during update/sync.
+    ``on_error`` is the answer when the config can't be read at all (an absent setting is still False)."""
     try:
         from hermes_cli.config import load_config
         cur = load_config().get("curator")
         return bool(cur.get("prune_builtins", False)) if isinstance(cur, dict) else False
     except Exception as e:  # pragma: no cover — best-effort config read
         logger.debug("Failed to read curator.prune_builtins: %s", e)
-        return False
+        return on_error
 
 
 def read_suppressed_names() -> Set[str]:

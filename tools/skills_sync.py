@@ -157,11 +157,11 @@ def _read_suppressed_names() -> set:
 
 
 def _prune_builtins_enabled() -> bool:
-    """``curator.prune_builtins``; when the config reader is unavailable, keep honoring suppression."""
+    """``curator.prune_builtins``; when the config can't be read, keep honoring suppression."""
     try:
         from tools.skill_usage import _prune_builtins_enabled as enabled
 
-        return enabled()
+        return enabled(on_error=True)
     except Exception:
         return True
 

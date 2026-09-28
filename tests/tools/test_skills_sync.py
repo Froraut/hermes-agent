@@ -458,6 +458,24 @@ class TestSyncSkills:
         assert (skills_dir / "old-skill" / "SKILL.md").read_text() == "# Old"
         toggle.assert_called_once_with("old-skill", add=False)
 
+    def test_unreadable_config_keeps_suppressed_builtins_suppressed(self, tmp_path):
+        """A config that can't be read says nothing about curator.prune_builtins: sync must hold every
+        suppression rather than read the failure as "pruning off" and re-seed them all."""
+        bundled = self._setup_bundled(tmp_path)
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+
+        with self._patches(bundled, skills_dir, manifest_file), \
+                patch("tools.skills_sync._read_suppressed_names", return_value={"old-skill"}), \
+                patch("hermes_cli.config.load_config", side_effect=OSError("config unreadable")), \
+                patch("tools.skill_usage._toggle_suppressed_name") as toggle:
+            result = sync_skills(quiet=True)
+
+        assert "old-skill" in result["suppressed"]
+        assert "old-skill" not in result["copied"]
+        assert not (skills_dir / "old-skill").exists()
+        toggle.assert_not_called()
+
     def test_fresh_install_copies_all_and_records_origin_hashes(self, tmp_path):
         bundled = self._setup_bundled(tmp_path)
         skills_dir = tmp_path / "user_skills"
