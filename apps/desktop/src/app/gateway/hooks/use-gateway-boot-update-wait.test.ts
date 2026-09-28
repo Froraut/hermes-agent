@@ -38,6 +38,19 @@ describe('Desktop opened while an update runs', () => {
     expect(isTimeoutError(await parkEndsWithoutBackend.catch(err => err))).toBe(true)
   })
 
+  it('stops extending once the park outlasts main’s own update-wait cap', async () => {
+    const wedged = awaitBackendPastUpdateWait({
+      isCancelled: () => false,
+      isParkedForUpdate: () => true,
+      maxParkMs: 30,
+      message: 'Timed out connecting to Hermes backend',
+      pending: new Promise<string>(() => undefined),
+      timeoutMs: 5
+    })
+
+    expect(isTimeoutError(await wedged.catch(err => err))).toBe(true)
+  }, 1000)
+
   it('treats the quit-teardown rejection as a closing window, not a boot failure', () => {
     expect(
       isDesktopQuittingError(

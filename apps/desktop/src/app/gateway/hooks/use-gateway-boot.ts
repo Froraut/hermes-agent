@@ -220,32 +220,40 @@ export async function connectInitialGateway({
 
 /** Boot phase main publishes while it parks a launch behind a live update (electron/main.ts). */
 const UPDATE_WAIT_BOOT_PHASE = 'backend.update-wait'
+/** Main's own cap on that park (UPDATE_WAIT_TIMEOUT_MS in electron/main.ts). */
+const UPDATE_PARK_MAX_MS = 20 * 60 * 1000
 
 // A Desktop opened while an update runs (the window vanished for the update
 // hand-off, so users reopen it) is parked by main for up to its 20-minute
 // update wait — far past the renderer's cold-boot budget, which then failed
 // the boot with "Timed out connecting to Hermes backend" while main was still
 // correctly waiting. Keep extending the budget while main reports the park;
-// once it ends, the next budget that expires fails the boot as before.
-// Exported for tests.
+// once it ends, the next budget that expires fails the boot as before. The
+// extension is bounded by main's own cap: past it main starts the backend
+// anyway and publishes new phases, so a park still reported then means main is
+// wedged, and the boot fails instead of waiting forever. Exported for tests.
 export async function awaitBackendPastUpdateWait<T>({
   isCancelled,
   isParkedForUpdate,
+  maxParkMs = UPDATE_PARK_MAX_MS,
   message,
   pending,
   timeoutMs
 }: {
   isCancelled: () => boolean
   isParkedForUpdate: () => boolean
+  maxParkMs?: number
   message: string
   pending: Promise<T>
   timeoutMs: number
 }): Promise<T> {
+  const parkDeadline = Date.now() + maxParkMs
+
   for (;;) {
     try {
       return await withTimeout(pending, timeoutMs, message)
     } catch (err) {
-      if (!isTimeoutError(err) || !isParkedForUpdate() || isCancelled()) {
+      if (!isTimeoutError(err) || !isParkedForUpdate() || isCancelled() || Date.now() >= parkDeadline) {
         throw err
       }
     }
