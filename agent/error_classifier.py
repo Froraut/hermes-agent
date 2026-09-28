@@ -631,8 +631,12 @@ def _template_raise_verdict(msg: str) -> Verdict:
     return _V_FORMAT_ERROR
 
 
+# Shared by the 5xx handlers and the status-less path: a proxy may relabel the 500, and a
+# mid-stream refusal arrives as a bare status-less APIError (see _STREAM_RENDER_ERROR_PATTERNS).
+_TEMPLATE_RAISE_RULES = ((_TEMPLATE_RAISE_PATTERNS, _template_raise_verdict),)
+
 # Status-less message path, head (before usage-limit disambiguation).
-_MESSAGE_HEAD_RULES = ((_MEMORY_CEILING_PATTERNS, _V_OVERLOADED),
+_MESSAGE_HEAD_RULES = _TEMPLATE_RAISE_RULES + ((_MEMORY_CEILING_PATTERNS, _V_OVERLOADED),
                        (_PAYLOAD_TOO_LARGE_PATTERNS, _V_PAYLOAD_TOO_LARGE),
                        (_ROLE_ALTERNATION_PATTERNS, _V_ROLE_ALTERNATION),
                        (_STREAM_RENDER_ERROR_PATTERNS, _V_FORMAT_ERROR)) + _IMAGE_TOOL_RULES
@@ -1093,8 +1097,9 @@ def _status_429(c: _Ctx) -> Verdict:
 
 
 def _status_5xx(c: _Ctx) -> Verdict:
-    if any(p in c.msg for p in _TEMPLATE_RAISE_PATTERNS):
-        return _template_raise_verdict(c.msg)
+    template_raise = _first_match(c.msg, _TEMPLATE_RAISE_RULES)
+    if template_raise is not None:
+        return template_raise
     # Request-validation errors as 5xx (codex.nekos.me) fail fast instead of
     # retry-flooding — unless the parameter was injected server-side.
     validation = any(p in c.msg for p in _REQUEST_VALIDATION_PATTERNS) or c.code in _5XX_VALIDATION_CODES
@@ -1235,8 +1240,8 @@ _STATUS_HANDLERS: Dict[int, Callable[[_Ctx], Verdict]] = {
     403: _status_403, 404: _status_404, 408: lambda c: _V_TIMEOUT, 413: lambda c: _V_PAYLOAD_TOO_LARGE,
     422: lambda c: _classify_image_tool_422(c),
     429: _status_429, 500: _status_5xx, 502: _status_5xx,
-    503: lambda c: _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED,
-    529: lambda c: _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED,
+    503: lambda c: _first_match(c.msg, _TEMPLATE_RAISE_RULES + _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED,
+    529: lambda c: _first_match(c.msg, _TEMPLATE_RAISE_RULES + _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED,
 }
 
 

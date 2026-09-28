@@ -2160,6 +2160,17 @@ class TestTemplateRaiseAs5xx:
         assert result.reason == reason
         assert result.reason != FailoverReason.server_error
 
+    @pytest.mark.parametrize("status", [503, 529, None])
+    def test_template_refusal_is_recognized_on_other_statuses_and_status_less(self, status):
+        """A proxy can relabel llama-server's 500, and a mid-stream refusal arrives as a bare
+        status-less APIError: the refusal is just as deterministic, so none of them may retry blind."""
+        message = ("While executing CallExpression at line 49, column 28 in source:\n"
+                   "Error: Jinja Exception: Unexpected reasoning effort high. Supported types are xhigh (default), "
+                   "medium, and low.")
+        e = MockAPIError(message, status_code=status) if status else MockAPIError(message)
+        result = classify_api_error(e, provider="custom", model="qwen3.8-flash")
+        assert result.reason == FailoverReason.reasoning_mandatory
+
 
 class TestStreamingRenderFormatError:
     """Status-less Jinja render failures (LM Studio / llama.cpp) fail over; see #62662."""
