@@ -2171,6 +2171,15 @@ class TestTemplateRaiseAs5xx:
         result = classify_api_error(e, provider="custom", model="qwen3.8-flash")
         assert result.reason == FailoverReason.reasoning_mandatory
 
+    @pytest.mark.parametrize("status", [500, 503, None])
+    def test_a_context_overflow_phrase_still_wins_over_the_template_marker(self, status):
+        """The template rule only claims otherwise-generic bodies: overflow keeps compression."""
+        message = ("While executing CallExpression at line 12, column 3 in source:\n"
+                   "Error: Jinja Exception: prompt exceeds the maximum context length of 8192 tokens")
+        e = MockAPIError(message, status_code=status) if status else MockAPIError(message)
+        result = classify_api_error(e, provider="custom", model="local")
+        assert result.reason == FailoverReason.context_overflow
+
 
 class TestStreamingRenderFormatError:
     """Status-less Jinja render failures (LM Studio / llama.cpp) fail over; see #62662."""
