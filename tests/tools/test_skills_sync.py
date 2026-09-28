@@ -458,6 +458,37 @@ class TestSyncSkills:
         assert (skills_dir / "old-skill" / "SKILL.md").read_text() == "# Old"
         toggle.assert_called_once_with("old-skill", add=False)
 
+    def test_reseeded_builtin_is_no_longer_recorded_as_archived(self, tmp_path):
+        """Re-seeding also undoes the prune's usage state: `curator restore` refuses bundled skills while
+        pruning is off, so nothing else can clear an `archived` record for a skill that is back on disk.
+        The archived copy goes only when byte-identical to the bundled one; an edited copy is kept."""
+        from tools.skill_usage import load_usage
+
+        bundled = self._setup_bundled(tmp_path)
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+        archive = skills_dir / ".archive"
+        shutil.copytree(bundled / "old-skill", archive / "old-skill")
+        (archive / "new-skill").mkdir(parents=True)
+        (archive / "new-skill" / "SKILL.md").write_text("# New, edited before the prune")
+        (skills_dir / ".curator_suppressed").write_text("new-skill\nold-skill\n")
+        archived = {"state": "archived", "archived_at": "2026-09-15T11:51:50+00:00"}
+        (skills_dir / ".usage.json").write_text(json.dumps({"new-skill": archived, "old-skill": archived}))
+
+        with self._patches(bundled, skills_dir, manifest_file), \
+                patch("tools.skill_usage._skills_dir", return_value=skills_dir), \
+                patch("tools.skill_usage._prune_builtins_enabled", return_value=False):
+            result = sync_skills(quiet=True)
+            usage = load_usage()
+
+        assert sorted(result["unsuppressed"]) == ["new-skill", "old-skill"]
+        assert {name: (rec["state"], rec["archived_at"]) for name, rec in usage.items()} == {
+            "new-skill": ("active", None), "old-skill": ("active", None)}
+        assert (skills_dir / "old-skill" / "SKILL.md").read_text() == "# Old"
+        assert not (archive / "old-skill").exists()
+        assert (archive / "new-skill" / "SKILL.md").read_text() == "# New, edited before the prune"
+        assert (skills_dir / ".curator_suppressed").read_text() == ""
+
     def test_unreadable_config_keeps_suppressed_builtins_suppressed(self, tmp_path):
         """A config that can't be read says nothing about curator.prune_builtins: sync must hold every
         suppression rather than read the failure as "pruning off" and re-seed them all."""

@@ -166,14 +166,28 @@ def _prune_builtins_enabled() -> bool:
         return True
 
 
-def _lift_suppression(names: List[str]) -> None:
-    """Drop re-seeded built-ins from the curator suppression list (the single writer lives in skill_usage)."""
+def _lift_suppression(names: List[str], sources: Dict[str, Path]) -> None:
+    """Undo what the prune left behind for re-seeded built-ins (the single writers live in skill_usage): the
+    suppression entry, the ``archived`` usage record (``curator restore`` refuses bundled skills, so nothing
+    else clears it) and the ``.archive/`` copy — the latter only when byte-identical to the bundled source."""
     try:
-        from tools.skill_usage import _toggle_suppressed_name
+        from tools.skill_usage import STATE_ACTIVE, STATE_ARCHIVED, _toggle_suppressed_name, get_record, set_state
     except Exception:
         return
     for name in names:
         _toggle_suppressed_name(name, add=False)
+        if get_record(name).get("state") == STATE_ARCHIVED:
+            set_state(name, STATE_ACTIVE, require_curation_eligible=False)
+        archived = _skills_dir() / ".archive" / name  # curator archive is flat: directory name == skill name
+        if not archived.is_dir():
+            continue
+        if _dir_hash(archived, include_runtime_cache=True) != _dir_hash(sources[name], include_runtime_cache=True):
+            logger.info("Kept archived copy of re-seeded built-in %s: it differs from the bundled one", name)
+            continue
+        try:
+            _rmtree_writable(archived)
+        except Exception:
+            logger.warning("Could not remove stale archived copy %s", archived, exc_info=True)
 
 
 def _write_manifest(entries: Dict[str, str]):
@@ -479,7 +493,7 @@ def sync_skills(quiet: bool = False) -> dict:
         bundled_dir,
         {_compute_relative_dest(src, bundled_dir).parent for _, src in bundled_skills} if essential_only else None)
     _write_manifest(st.manifest)
-    _lift_suppression(lifted)
+    _lift_suppression(lifted, dict(bundled_skills))
     return {
         "copied": st.copied, "updated": st.updated, "skipped": st.skipped, "user_modified": st.user_modified,
         "cleaned": cleaned, "suppressed": st.suppressed, "unsuppressed": lifted, "relocated": st.relocated,

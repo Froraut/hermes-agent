@@ -548,8 +548,10 @@ def mark_agent_created(skill_name: str) -> None:
     _set_field(skill_name, "created_by", "agent")
 
 
-def set_state(skill_name: str, state: str) -> None:
-    """Set lifecycle state (no-op if invalid / unmanageable). Emits archived/stale/restored; active<-stale is silent."""
+def set_state(skill_name: str, state: str, *, require_curation_eligible: bool = True) -> None:
+    """Set lifecycle state (no-op if invalid / unmanageable). Emits archived/stale/restored; active<-stale is silent.
+    ``require_curation_eligible=False`` is for skills_sync re-seeding a built-in pruned under the old default:
+    with ``curator.prune_builtins`` off it is not eligible, yet its record still says archived."""
     if state not in _VALID_STATES:
         logger.debug("set_state: invalid state %r for %s", state, skill_name)
         return
@@ -561,7 +563,7 @@ def set_state(skill_name: str, state: str) -> None:
             if state != STATE_STALE:
                 rec["archived_at"] = _now_iso() if state == STATE_ARCHIVED else None
         return {"changed": previous != state, "created_by": rec.get("created_by"), "previous_state": previous}
-    facts = _mutate(skill_name, _apply, require_curation_eligible=True)
+    facts = _mutate(skill_name, _apply, require_curation_eligible=require_curation_eligible)
     if isinstance(facts, dict) and facts["changed"]:
         restored = state == STATE_ACTIVE and facts["previous_state"] == STATE_ARCHIVED
         action = "restored" if restored else {STATE_ARCHIVED: "archived", STATE_STALE: "stale"}.get(state)
