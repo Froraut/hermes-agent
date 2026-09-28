@@ -165,7 +165,10 @@ def _hook_call_identity(kwargs: Dict[str, Any]) -> Optional[str]:
     carries many tool calls, which would re-collapse the keys. ``session_id`` is the last
     resort for session-scoped events (``on_session_start``/``on_session_end`` carry neither
     id): parallel delegate children starting, or several sessions closing together, are
-    different sessions, not one event delivered twice.
+    different sessions, not one event delivered twice. This only separates calls in the
+    running gate: once a callback times out, its suppression stays keyed per callback on
+    purpose (a hung callback keeps its back-off), so every call to it is skipped for
+    ``_HOOK_TIMEOUT_SUPPRESSION_SECONDS`` whatever the session.
     """
     for field in ("tool_call_id", "turn_id", "session_id"):
         value = kwargs.get(field)
