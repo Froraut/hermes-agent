@@ -192,12 +192,16 @@ def launch_profile_scope_if_multiplexed():
     on a perfectly legitimate launch-profile read. Before activation the process env IS the launch
     profile's, so binding nothing is still correct (and keeps single-profile hosts byte-identical —
     callers assert the returned object is literally a ``nullcontext``).
+
+    The launch home is the routing home pinned at activation, never the live ``HERMES_HOME``: a
+    host that mirrors the served profile into the env var would otherwise bind the frozen launch
+    env to that profile's home.
     """
     from agent.secret_scope import is_multiplex_active
     if not is_multiplex_active():
         return contextlib.nullcontext()
-    from hermes_constants import get_process_hermes_home
-    return launch_profile_runtime_scope(get_process_hermes_home())
+    from hermes_constants import get_routing_process_hermes_home
+    return launch_profile_runtime_scope(get_routing_process_hermes_home())
 
 
 @contextlib.asynccontextmanager

@@ -18,3 +18,31 @@ def test_launch_home_follows_the_process_home_redirected_after_import():
     assert server._launch_home() == sandbox
     (sandbox / ".env").write_text("HERMES_LAUNCH_HOME_PROBE=from-sandbox\n", encoding="utf-8")
     assert launch_secret_scope(server._launch_home()).get("HERMES_LAUNCH_HOME_PROBE") == "from-sandbox"
+
+
+def test_launch_scope_binds_the_pinned_launch_home_not_a_mirrored_served_home(tmp_path, monkeypatch):
+    """An embedding host (Hermes WebUI) pins its own home with ``pin_process_hermes_home()`` and
+    mirrors each turn's profile into ``HERMES_HOME``. The launch profile's own scope (bound by the
+    Nous keepalive thread and every standalone gateway path) must still bind the pinned home:
+    resolving the live env var bound the launch env frozen at activation under profile B's home."""
+    from agent.secret_scope import get_secret, set_multiplex_active
+    from hermes_constants import get_hermes_home, pin_process_hermes_home
+    from tui_gateway.launch_profile_policy import (
+        activate_multi_profile_hosting, launch_profile_scope_if_multiplexed)
+
+    launch = tmp_path / "launch"
+    served = launch / "profiles" / "b"
+    served.mkdir(parents=True)
+    (launch / ".env").write_text("LAUNCH_FILE_KEY=launch\n", encoding="utf-8")
+    (served / ".env").write_text("SERVED_FILE_KEY=served\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(launch))
+    pin_process_hermes_home(launch)
+    activate_multi_profile_hosting()
+    try:
+        monkeypatch.setenv("HERMES_HOME", str(served))  # the host's per-turn mirror
+        with launch_profile_scope_if_multiplexed():
+            bound = (get_hermes_home(), get_secret("LAUNCH_FILE_KEY"), get_secret("SERVED_FILE_KEY"))
+    finally:
+        set_multiplex_active(False)
+        pin_process_hermes_home(None)
+    assert bound == (launch, "launch", None)

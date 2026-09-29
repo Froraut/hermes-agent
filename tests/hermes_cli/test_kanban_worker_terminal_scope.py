@@ -41,7 +41,7 @@ def test_worker_profile_scope_installs_the_assigned_profiles_terminal_policy(pro
         f"worker inherited the launch profile's terminal policy: {scope}")
 
 
-def _spawn_env_for_profile_b(monkeypatch, tmp_path):
+def _spawn_env_for_profile_b(monkeypatch, tmp_path, assignee="b"):
     """Run ``_default_spawn`` far enough to capture the worker env, never spawning anything."""
     from hermes_cli.kanban_db import Task
     from tools import process_registry
@@ -55,7 +55,7 @@ def _spawn_env_for_profile_b(monkeypatch, tmp_path):
     monkeypatch.setattr(process_registry, "systemd_user_bus_env", _capture)
 
     task = Task(
-        id="t1", title="t", body=None, assignee="b", status="claimed", priority=0,
+        id="t1", title="t", body=None, assignee=assignee, status="claimed", priority=0,
         created_by=None, created_at=0, started_at=None, completed_at=None,
         workspace_kind="dir", workspace_path=None, claim_lock=None, claim_expires=None,
         tenant=None)
@@ -101,3 +101,32 @@ def test_launch_profiles_own_worker_keeps_its_credentials(tmp_path, monkeypatch)
         kanban_db_dispatch._default_spawn(task, str(tmp_path / "ws"))
 
     assert captured and captured[0].get("OPENAI_API_KEY") == "dispatcher-launch-key"
+
+
+def test_worker_scopes_follow_the_pinned_launch_home_not_a_mirrored_env_var(
+        profile_b, tmp_path, monkeypatch):
+    """An embedding host (Hermes WebUI) pins its launch home with ``pin_process_hermes_home()`` and
+    mirrors each turn's profile into ``HERMES_HOME``. Launch identity is that pin, the same one
+    ``_default_spawn``'s scrub uses: B's worker never receives the launch profile's env-only
+    credential, and the launch profile's own worker keeps it."""
+    from agent.secret_scope import set_multiplex_active
+    from hermes_constants import pin_process_hermes_home
+    from tools.env_passthrough import clear_env_passthrough, register_env_passthrough
+    from tui_gateway.launch_profile_policy import activate_multi_profile_hosting
+
+    launch = profile_b.parent.parent
+    monkeypatch.setenv("CORP_SERVICE_TOKEN", "launch-env-only")  # systemd Environment=, no .env
+    register_env_passthrough(["CORP_SERVICE_TOKEN"])
+    pin_process_hermes_home(launch)
+    activate_multi_profile_hosting()
+    try:
+        monkeypatch.setenv("HERMES_HOME", str(profile_b))  # the host's per-turn mirror
+        served_worker = _spawn_env_for_profile_b(monkeypatch, tmp_path)
+        launch_worker = _spawn_env_for_profile_b(monkeypatch, tmp_path, assignee="default")
+    finally:
+        clear_env_passthrough()
+        set_multiplex_active(False)
+        pin_process_hermes_home(None)
+    assert "CORP_SERVICE_TOKEN" not in served_worker, (
+        "the launch profile's env-only credential reached profile B's worker")
+    assert launch_worker.get("CORP_SERVICE_TOKEN") == "launch-env-only"
