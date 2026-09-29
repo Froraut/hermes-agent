@@ -265,20 +265,22 @@ def _default_exclude(args):
 def _list_in_workspace(db, needle, want, query):
     """First ``want`` sessions (every one when negative) whose workspace key — git repo root, else
     cwd — contains ``needle`` or has it as its basename. The match runs on the projected rows, so
-    it pages until enough matches exist: filtering one LIMIT-ed page misses every match older
-    than the newest ``want`` sessions overall."""
+    filtering one LIMIT-ed page would miss every match older than the newest ``want`` sessions.
+
+    Each attempt is ONE query from the newest session (one read snapshot: a session archived,
+    deleted or created meanwhile cannot shift a match out of view, as OFFSET paging would):
+    first a recent window, then — only when that window holds too few matches — every session.
+    Compact rows: the listing never renders stored system prompts."""
     from hermes_state_sessions import workspace_key
-    matched, seen, offset, page_size = [], set(), 0, 200
-    while want < 0 or len(matched) < want:
-        page = db.list_sessions_rich(**query, limit=page_size, offset=offset)
-        offset += len(page)
-        for s in page:
-            key = (workspace_key(s) or "").lower()
-            # OFFSET paging can re-serve a row when sessions are inserted mid-scan.
-            if s["id"] not in seen and key and (needle in key or needle == os.path.basename(key.rstrip("/\\"))):
-                seen.add(s["id"])
-                matched.append(s)
-        if len(page) < page_size:
+
+    def _in_workspace(s) -> bool:
+        key = (workspace_key(s) or "").lower()
+        return bool(key) and (needle in key or needle == os.path.basename(key.rstrip("/\\")))
+
+    for window in ((max(200, want), -1) if want >= 0 else (-1,)):
+        rows = db.list_sessions_rich(**query, limit=window, compact_rows=True)
+        matched = [s for s in rows if _in_workspace(s)]
+        if window < 0 or len(rows) < window or len(matched) >= want:
             break
     return matched if want < 0 else matched[:want]
 

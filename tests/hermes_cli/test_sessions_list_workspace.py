@@ -58,3 +58,26 @@ def test_no_footer_when_every_match_is_listed(db, capsys):
 
     assert ids == ["s_b1", "s_b0"]
     assert "more not shown" not in out
+
+
+def test_a_session_archived_mid_listing_does_not_hide_a_match(db, capsys, monkeypatch):
+    # Finding old matches may take more than one read; another process archiving (or deleting)
+    # a newer session in between must not shift a match out of view.
+    projb = [(f"s_b{i}", "/w/projb") for i in range(3)]
+    proja = [(f"s_a{i}", "/w/proja") for i in range(200)]
+    _seed(db, projb + proja)
+    read = db.list_sessions_rich
+    reads = []
+
+    def read_then_archive_newest(**kwargs):
+        rows = read(**kwargs)
+        if not reads:
+            db.set_session_archived("s_a199", True)
+        reads.append(kwargs)
+        return rows
+
+    monkeypatch.setattr(db, "list_sessions_rich", read_then_archive_newest)
+
+    ids, _out = _listed(db, 20, "projb", capsys)
+
+    assert ids == ["s_b2", "s_b1", "s_b0"]
