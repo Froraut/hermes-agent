@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from typing import Any, Dict, List
+from typing import Any, Dict, List, cast
 
 import pytest
 
@@ -478,6 +478,72 @@ def test_runtime_evaluate_blocked_when_current_page_is_private(monkeypatch):
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    ("selected_url", "guard_active", "blocked"),
+    [
+        (PRIVATE_URL, True, True),
+        ("https://example.test/page", True, False),
+        (PRIVATE_URL, False, False),
+    ],
+)
+def test_target_id_guard_uses_selected_target_url(
+    monkeypatch, cdp_server, selected_url, guard_active, blocked
+):
+    cdp_server.on(
+        "Target.getTargetInfo",
+        lambda params, sid: {
+            "targetInfo": {
+                "targetId": params["targetId"],
+                "type": "page",
+                "url": selected_url,
+            }
+        },
+    )
+    cdp_server.on(
+        "Target.attachToTarget", lambda params, sid: {"sessionId": "selected-session"}
+    )
+    cdp_server.on(
+        "Runtime.evaluate",
+        lambda params, sid: {"result": {"type": "string", "value": "selected data"}},
+    )
+    monkeypatch.setattr(
+        bt_eval_policy, "_eval_ssrf_guard_active", lambda task_id: guard_active
+    )
+    monkeypatch.setattr(
+        bt_eval_policy, "_current_page_private_url", lambda task_id: None
+    )
+    monkeypatch.setattr(
+        bt_eval_policy, "_url_blocked", lambda bt, url: url == PRIVATE_URL
+    )
+
+    result = json.loads(
+        browser_cdp_tool.browser_cdp(
+            method="Runtime.evaluate",
+            params={"expression": "document.body.innerText"},
+            target_id="selected-target",
+            task_id="task-1",
+        )
+    )
+    requests = cdp_server.received()
+    methods = [request["method"] for request in requests]
+
+    assert ("error" in result) is blocked
+    if blocked:
+        assert PRIVATE_URL in result["error"]
+    else:
+        assert result["success"] is True
+        assert "Runtime.evaluate" in methods
+    target_info_requests = [
+        request for request in requests if request["method"] == "Target.getTargetInfo"
+    ]
+    assert len(target_info_requests) == int(guard_active)
+    if target_info_requests:
+        assert target_info_requests[0]["params"] == {"targetId": "selected-target"}
+        assert "sessionId" not in target_info_requests[0]
+    if blocked:
+        assert "Runtime.evaluate" not in methods
+
+
 def test_frame_id_route_blocked_when_current_page_is_private(monkeypatch):
     """frame_id routing (OOPIF via supervisor) must not bypass the guard
     applied to the stateless path — same private-page boundary either way."""
@@ -508,6 +574,95 @@ def test_frame_id_route_blocked_when_current_page_is_private(monkeypatch):
     assert PRIVATE_URL in result["error"]
     assert "private or internal address" in result["error"]
     assert supervisor_calls == []
+
+
+@pytest.mark.parametrize(
+    ("selected_url", "guard_active", "blocked"),
+    [
+        (PRIVATE_URL, True, True),
+        ("https://example.test/frame", True, False),
+        (PRIVATE_URL, False, False),
+    ],
+)
+def test_frame_id_guard_uses_selected_frame_url(
+    monkeypatch, selected_url, guard_active, blocked
+):
+    from agent import async_utils
+    from tools.browser_supervisor import CDPSupervisor, SUPERVISOR_REGISTRY
+    from tools.browser_supervisor_frames import FrameInfo
+
+    supervisor = CDPSupervisor("task-1", "ws://127.0.0.1/devtools/browser/mock")
+    supervisor._set_frame(
+        FrameInfo("top-frame", "https://ambient.test/", "", None, False, "top-session")
+    )
+    supervisor._set_frame(
+        FrameInfo(
+            "selected-frame",
+            selected_url,
+            "",
+            "top-frame",
+            True,
+            "selected-session",
+        )
+    )
+    cdp_calls = []
+
+    async def fake_cdp(method, params, *, session_id, timeout):
+        cdp_calls.append((method, params, session_id, timeout))
+        return {"result": {"result": {"type": "string", "value": "selected data"}}}
+
+    class RunningLoop:
+        def is_running(self):
+            return True
+
+    class ImmediateFuture:
+        def __init__(self, coro):
+            self.coro = coro
+
+        def result(self, timeout):
+            return asyncio.run(self.coro)
+
+    supervisor._loop = cast(Any, RunningLoop())
+    monkeypatch.setattr(supervisor, "_cdp", fake_cdp)
+    monkeypatch.setattr(SUPERVISOR_REGISTRY, "get", lambda task_id: supervisor)
+    monkeypatch.setattr(
+        async_utils,
+        "safe_schedule_threadsafe",
+        lambda coro, loop: ImmediateFuture(coro),
+    )
+    monkeypatch.setattr(
+        bt_eval_policy, "_eval_ssrf_guard_active", lambda task_id: guard_active
+    )
+    monkeypatch.setattr(
+        bt_eval_policy, "_current_page_private_url", lambda task_id: None
+    )
+    monkeypatch.setattr(
+        bt_eval_policy, "_url_blocked", lambda bt, url: url == PRIVATE_URL
+    )
+
+    result = json.loads(
+        browser_cdp_tool.browser_cdp(
+            method="Runtime.evaluate",
+            params={"expression": "document.body.innerText"},
+            frame_id="selected-frame",
+            task_id="task-1",
+        )
+    )
+
+    assert ("error" in result) is blocked
+    if blocked:
+        assert PRIVATE_URL in result["error"]
+        assert cdp_calls == []
+    else:
+        assert result["success"] is True
+        assert cdp_calls == [
+            (
+                "Runtime.evaluate",
+                {"expression": "document.body.innerText"},
+                "selected-session",
+                30.0,
+            )
+        ]
 
 
 def test_frame_id_route_allowed_when_page_is_not_private(monkeypatch):
