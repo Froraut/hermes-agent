@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Iterable
 
@@ -16,7 +17,8 @@ from tools.environments.base_output import _popen_bash
 from tools.environments.file_sync import (
     FileSyncManager, iter_sync_files, quoted_mkdir_command, quoted_rm_command, unique_parent_dirs)
 from tools.environments.remote_common import (
-    bash_argv, client_env_with, load_hermes_env_vars, prepend_unset, resolve_passthrough_env, run_capture)
+    bash_argv, client_env_with, exec_group_kill_script, load_hermes_env_vars, prepend_unset, record_exec_group,
+    resolve_passthrough_env, run_capture)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,9 @@ _SSH_MULTIPLEX = os.name != "nt"
 
 # Module-level binding: tests patch ``ssh._load_hermes_env_vars`` to fake the .env file.
 _load_hermes_env_vars = load_hermes_env_vars
+
+# Bound on the remote kill (its own TERM grace is 1s) so a dead link cannot stall a timeout or /stop.
+_REMOTE_KILL_TIMEOUT = 5
 
 
 def _ensure_ssh_available() -> None:
@@ -281,9 +286,39 @@ class SSHEnvironment(BaseEnvironment):
         remote sshd must ``AcceptEnv`` them (#14091). Profile-scoped names missing from the active
         scope are unset remotely so a shared host cannot serve another profile's value."""
         values, unset_names = resolve_passthrough_env(hermes_env_loader=_load_hermes_env_vars)
-        cmd = self._build_ssh_command(send_env=values) + bash_argv(shlex.quote(prepend_unset(cmd_string, unset_names)), login)
+        pidfile = f"{self.get_temp_dir().rstrip('/')}/.hermes-exec-{uuid.uuid4().hex}.pid"
+        script = record_exec_group(prepend_unset(cmd_string, unset_names), pidfile)
+        cmd = self._build_ssh_command(send_env=values) + bash_argv(shlex.quote(script), login)
         client_env = client_env_with(values)
-        return _popen_bash(cmd, stdin_data, env=client_env) if client_env is not None else _popen_bash(cmd, stdin_data)
+        proc = _popen_bash(cmd, stdin_data, env=client_env) if client_env is not None else _popen_bash(cmd, stdin_data)
+        proc._hermes_exec_pidfile = pidfile
+        return proc
+
+    def _kill_remote_group(self, proc, *, force: bool) -> None:
+        """Kill ``proc``'s remote command over a separate ssh (the ControlMaster when one is up).
+        Killing the local ``ssh`` client only closes the channel: sshd does not signal a session
+        without a pty, so the command kept running on the host. ``force`` (the host is about to
+        hard-exit) only launches the kill; the caller must not block."""
+        pidfile = getattr(proc, "_hermes_exec_pidfile", None)
+        if not pidfile:
+            return
+        argv = self._build_ssh_command() + [shlex.join(bash_argv(exec_group_kill_script(pidfile, force=force)))]
+        try:
+            if force:
+                subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+            else:
+                run_capture(argv, timeout=_REMOTE_KILL_TIMEOUT)
+        except (OSError, subprocess.SubprocessError) as e:
+            logger.debug("SSH: remote kill of %s failed: %s", pidfile, e)
+
+    def _kill_process(self, proc):
+        self._kill_remote_group(proc, force=False)
+        super()._kill_process(proc)
+
+    def _force_kill_process(self, proc):
+        self._kill_remote_group(proc, force=True)
+        super()._kill_process(proc)
 
     def cleanup(self):
         if self._sync_manager:

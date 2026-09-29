@@ -88,6 +88,39 @@ def bash_argv(cmd_string: str, login: bool = False) -> list[str]:
     return ["bash", "-l", "-c", cmd_string] if login else ["bash", "-c", cmd_string]
 
 
+# Killing the local client of a spawn-per-call backend (``ssh``) does not signal the command it
+# started on the other side, so a timed-out or interrupted command kept running there. The remote
+# shell records its PID; the kill runs remotely over a separate connection against that shell's
+# process group (``ps`` resolves the group when the shell is not its leader; without ``ps`` the
+# PID's own group, then the PID alone). TERM, up to 1s grace, then KILL (the local backend's shape).
+# The script runs in a subshell so the record is removed even when it sets its own EXIT trap or
+# ``exec``s; a killed group leaves the removal to the kill.
+# A kill can land before the shell has recorded its PID (the session is still starting). The kill
+# first leaves a ``.stop`` marker, then reads the PID; the shell first records its PID, then checks
+# the marker. Whichever runs second sees the other's write, so either the kill finds the PID or the
+# shell exits before running the command.
+def record_exec_group(cmd_string: str, pidfile: str) -> str:
+    """``cmd_string`` wrapped to record its shell's PID in ``pidfile`` for :func:`exec_group_kill_script`."""
+    q = shlex.quote(pidfile)
+    return (f"{{ echo $$ > {q}; }} 2>/dev/null\n"
+            f"if [ -e {q}.stop ]; then rm -f {q} {q}.stop; exit 130; fi\n(\n{cmd_string}\n)\n"
+            f"__hermes_exec_rc=$?\nrm -f {q}\nexit $__hermes_exec_rc")
+
+
+def exec_group_kill_script(pidfile: str, *, force: bool = False) -> str:
+    """Bash script that kills the process group :func:`record_exec_group` recorded in ``pidfile``:
+    TERM, up to 1s grace, then KILL; ``force`` (a host about to hard-exit) sends KILL at once."""
+    q = shlex.quote(pidfile)
+    target = (f': 2>/dev/null > {q}.stop; p=$(cat {q} 2>/dev/null); [ -n "$p" ] || exit 0; rm -f {q} {q}.stop; '
+              'g=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d " "); t=-${g:-$p}; ')
+    if force:
+        return target + 'kill -KILL -- "$t" 2>/dev/null || kill -KILL "$p" 2>/dev/null; exit 0'
+    return target + (
+        'kill -TERM -- "$t" 2>/dev/null || { t=$p; kill -TERM "$t" 2>/dev/null; } || exit 0; '
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 -- "$t" 2>/dev/null || exit 0; sleep 0.1; done; '
+        'kill -KILL -- "$t" 2>/dev/null; exit 0')
+
+
 def ensure_lazy_dep(extra: str) -> None:
     """Lazy-install an optional SDK's pm extra (idempotent). Install failures
     surface as ``ImportError``."""
