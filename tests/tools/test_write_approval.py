@@ -327,3 +327,54 @@ def test_memory_invalid_params_rejected_before_staging(hermes_home):
     r = json.loads(memory_tool("add", "memory", None, store=store))
     assert r["success"] is False
     assert wa.pending_count("memory") == 0
+
+# ---------------------------------------------------------------------------
+# /skills diff
+# ---------------------------------------------------------------------------
+
+_DEMO_SKILL = "---\nname: demo\ndescription: Use when probing. Demo skill.\n---\n\n# Demo\n\nStep 1: old step.\n"
+
+
+def _stage_skill_write(**call):
+    """Stage one skill_manage call through the real gate; return what `/skills diff <id>` prints."""
+    from hermes_cli.write_approval_commands import handle_pending_subcommand
+    from tools import write_approval as wa
+    from tools.skill_manager_tool import skill_manage
+    res = json.loads(skill_manage(**{"action": "", "name": "", **call}))
+    assert res.get("staged"), res
+    return handle_pending_subcommand(wa.SKILLS, ["diff", res["pending_id"]])
+
+
+@pytest.fixture
+def demo_skill(hermes_home):
+    skill_dir = os.path.join(hermes_home, "skills", "research", "demo")
+    os.makedirs(skill_dir)
+    with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as fh:
+        fh.write(_DEMO_SKILL)
+    _set_approval("skills", True)
+
+
+def test_batch_diff_previews_each_op_as_its_flat_staging_does(demo_skill):
+    """The operations array is the advertised call shape, so its pending record must preview
+    every op: each op's diff inside the batch equals that op's diff when staged on its own."""
+    ops = [{"action": "patch", "name": "demo", "content": _DEMO_SKILL.replace("old step", "rewritten step")},
+           {"action": "write_file", "name": "demo", "file_path": "references/notes.md",
+            "file_content": "Remember X.\n"}]
+
+    flat = [_stage_skill_write(**op).split("\n\n", 1)[1] for op in ops]
+    batch = _stage_skill_write(operations=ops)
+
+    for op_diff in flat:
+        assert "+++ b/" in op_diff, op_diff
+        assert op_diff in batch, batch
+    assert "+Step 1: rewritten step." in batch and "+Remember X." in batch
+
+
+def test_batch_diff_previews_ops_in_order(demo_skill):
+    """A patch chain on one file previews each step against the text the step before left."""
+    batch = _stage_skill_write(operations=[
+        {"action": "patch", "name": "demo", "old_string": "old step", "new_string": "mid step"},
+        {"action": "patch", "name": "demo", "old_string": "mid step", "new_string": "new step"}])
+
+    second = batch.split("operations[1]", 1)[1]
+    assert "-Step 1: mid step." in second and "+Step 1: new step." in second, batch
