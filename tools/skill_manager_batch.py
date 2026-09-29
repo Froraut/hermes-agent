@@ -86,7 +86,7 @@ def _op_shape_error(action: str, args: dict):
 def _validate_batch_ops(operations, default_name, tool_error):
     """Shape checks with no side effects. Returns (names, None) or (None, error_json)."""
     from tools.skill_manager_guards import _background_review_preflight
-    from tools.skill_manager_tool import _canonical_skill_name, _validate_category
+    from tools.skill_manager_tool import _validate_category
     def fail(i, msg):
         return None, tool_error(f"operations[{i}]{msg}", success=False)
     names = []
@@ -108,8 +108,6 @@ def _validate_batch_ops(operations, default_name, tool_error):
         # so it returns a JSON error (not a TypeError) and never leaks the snapshot tempdir.
         if act == "create" and (cat_err := _validate_category(op.get("category"))) is not None:
             return fail(i, f" ({act} on '{nm}'): {cat_err}")
-        if act != "create":  # both spellings of one skill are one skill for the clobber guard and snapshots
-            nm = _canonical_skill_name(nm)
         names.append(nm)
         if act == "create" and nm in names[:-1]:
             return fail(i, f": create for '{nm}' must precede that skill's other ops.")
@@ -126,7 +124,7 @@ def _validate_batch_ops(operations, default_name, tool_error):
         fp = (op.get("file_path") or "").strip()
         target = ("SKILL.md" if (act == "create" or full_rewrite or not fp)
                   else posixpath.normpath(fp.lstrip("/")))
-        key = (nm, target)
+        key = (Path(nm).name, target)  # ``research/x`` and ``x`` are one skill (lock keys agree)
         if (act in ("create", "write_file", "remove_file") or full_rewrite) and key in touched_files:
             return fail(i, f": {act} on '{target}' of skill '{nm}' — an earlier op in this "
                            f"batch already touched that file, and this op would silently discard its work. "
