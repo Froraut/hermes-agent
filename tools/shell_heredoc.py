@@ -162,19 +162,28 @@ def _scan_heredoc_command_unit(command: str, start: int):
 
 
 def _find_heredoc_close(
-        command: str, body_start: int, delimiter: str, strip_tabs: bool) -> int | None:
-    """Return the position after an exact shell heredoc terminator line."""
+        command: str, body_start: int, delimiter: str, strip_tabs: bool, quoted: bool) -> int | None:
+    """Return the position after an exact shell heredoc terminator line. In an unquoted body
+    bash first joins a line ending in an odd run of backslashes with the next one, so
+    ``text\\`` + ``EOF`` is body text and ``EO\\`` + ``F`` is the terminator."""
     cursor = body_start
     while True:
-        newline = command.find("\n", cursor)
-        after = len(command) if newline == -1 else newline + 1
-        line = command[cursor:after].removesuffix("\n").removesuffix("\r")
-        candidate = line.lstrip("\t") if strip_tabs else line
+        logical = ""
+        while True:
+            newline = command.find("\n", cursor)
+            after = len(command) if newline == -1 else newline + 1
+            line = command[cursor:after].removesuffix("\n")
+            cursor = after
+            if quoted or newline == -1 or (len(line) - len(line.rstrip("\\"))) % 2 == 0:
+                logical += line
+                break
+            logical += line[:-1]
+        logical = logical.removesuffix("\r")
+        candidate = logical.lstrip("\t") if strip_tabs else logical
         if candidate == delimiter:
             return after
         if newline == -1:
             return None
-        cursor = after
 
 
 def _heredoc_units(command: str):
@@ -207,8 +216,8 @@ def _heredoc_units(command: str):
             return
         body_cursor = command_end + 1
         body_ranges: list[tuple[int, int]] = []
-        for delimiter, strip_tabs, _quoted in specs:
-            close_end = _find_heredoc_close(command, body_cursor, delimiter, strip_tabs)
+        for delimiter, strip_tabs, quoted in specs:
+            close_end = _find_heredoc_close(command, body_cursor, delimiter, strip_tabs, quoted)
             if close_end is None:
                 yield None  # unterminated
                 return
@@ -218,15 +227,57 @@ def _heredoc_units(command: str):
         command_start = body_cursor
 
 
+def _substitution_end(command: str, cursor: int, limit: int) -> int:
+    """Index just past the ``$(...)`` (or ``$((...))``) opened at ``cursor``; ``limit`` if unclosed."""
+    depth, end = 0, cursor + 1
+    while end < limit:
+        char = command[end]
+        if char == "\\":
+            end += 2
+        elif char == "'":
+            end = command.find("'", end + 1) + 1 or limit
+        elif char in '"`':
+            end = _span_end(command, end, char)
+        else:
+            depth += (char == "(") - (char == ")")
+            end += 1
+            if depth == 0:
+                return end
+    return limit
+
+
+def _unquoted_body_data_ranges(command: str, start: int, end: int) -> list[tuple[int, int]]:
+    """Split an unquoted body into its data: bash runs the ``$(...)`` and backtick command
+    substitutions in it when it expands the body, so those stay live (quotes are literal here)."""
+    ranges: list[tuple[int, int]] = []
+    piece = cursor = start
+    while cursor < end:
+        if command[cursor] == "\\":
+            cursor += 2
+        elif command[cursor] == "`" or command.startswith("$(", cursor):
+            close = (min(_span_end(command, cursor, "`"), end) if command[cursor] == "`"
+                     else _substitution_end(command, cursor, end))
+            if cursor > piece:
+                ranges.append((piece, cursor))
+            piece = cursor = close
+        else:
+            cursor += 1
+    if end > piece:
+        ranges.append((piece, end))
+    return ranges
+
+
 def heredoc_body_ranges(command: str) -> list[tuple[int, int]] | None:
-    """``(start, end)`` of every heredoc body (its lines through the terminator line), in order,
-    or ``None`` when one cannot be delimited. Whatever the delimiter quoting, the shell reads a
-    body as data: no list operator or command word inside one is live."""
+    """``(start, end)`` of the data in every heredoc body, in order, or ``None`` when a body
+    cannot be delimited. The shell reads a body as data, so no list operator or command word in
+    it is live: a quoted body is data through its terminator line; an unquoted one is data
+    except for the command substitutions it expands (see ``_unquoted_body_data_ranges``)."""
     ranges: list[tuple[int, int]] = []
     for unit in _heredoc_units(command):
         if unit is None:
             return None
-        ranges.extend(unit[-1])
+        for (_delimiter, _strip_tabs, quoted), (start, end) in zip(unit[2], unit[-1]):
+            ranges.extend([(start, end)] if quoted else _unquoted_body_data_ranges(command, start, end))
     return ranges
 
 

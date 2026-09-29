@@ -133,3 +133,28 @@ def test_sudo_inside_a_heredoc_body_is_data(monkeypatch):
     assert terminal_tool_sudo._transform_sudo_command(script) == (script, None)
     assert terminal_tool_sudo._transform_sudo_command(script + "sudo true") == (
         script + "sudo -S -p '' true", "testpass\n")
+
+
+def test_command_substitution_in_an_unquoted_heredoc_body_is_live(monkeypatch):
+    """Bash expands ``$(...)`` in an unquoted body when it reads it, so that sudo runs and gets
+    ``-S``; the body's plain text stays data, and a quoted body expands nothing."""
+    monkeypatch.setenv("SUDO_PASSWORD", "testpass")
+    unquoted = "cat <<EOF\nsudo apt update\nuser: $(sudo whoami)\nEOF"
+    quoted = unquoted.replace("<<EOF", "<<'EOF'")
+
+    assert terminal_tool_sudo._transform_sudo_command(unquoted) == (
+        unquoted.replace("$(sudo whoami)", "$(sudo -S -p '' whoami)"), "testpass\n")
+    assert terminal_tool_sudo._transform_sudo_command(quoted) == (quoted, None)
+
+
+def test_backslash_newline_joins_lines_before_an_unquoted_terminator(monkeypatch):
+    """Bash joins ``text\\`` + ``EOF`` into ``textEOF`` in an unquoted body, so that ``EOF`` is
+    body text and the body runs to the next terminator; a quoted body keeps both lines as-is."""
+    monkeypatch.setenv("SUDO_PASSWORD", "testpass")
+    unquoted = "cat <<EOF\ntext\\\nEOF\nsudo echo body\nEOF\n"
+    quoted = unquoted.replace("<<EOF", "<<'EOF'")
+
+    assert terminal_tool_sudo._transform_sudo_command(unquoted + "sudo true") == (
+        unquoted + "sudo -S -p '' true", "testpass\n")
+    assert terminal_tool_sudo._transform_sudo_command(quoted) == (
+        quoted.replace("sudo echo", "sudo -S -p '' echo"), "testpass\n")

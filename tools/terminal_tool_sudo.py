@@ -270,10 +270,12 @@ def _scan_shell(command: str, background: bool = False) -> Iterator[tuple[str, i
     Yields ``(kind, start, end, at_command_start)`` events that tile *command* exactly:
     ``ws`` (one whitespace char), ``comment`` (``#`` up to, not including, the newline),
     ``op`` (``&& || ;; ; | & ( )``), ``word`` (one ``_read_shell_token`` token), and
-    ``heredoc`` (one body through its terminator line, ``shell_heredoc.heredoc_body_ranges``):
-    a body is data, so nothing in it is an operator or a command word and a quote inside it
-    cannot swallow the shell text after it. When a body cannot be delimited (unterminated, or
-    a ``<<`` that is an arithmetic shift) the command is scanned as plain text.
+    ``heredoc`` (heredoc body data, ``shell_heredoc.heredoc_body_ranges``): a quoted body
+    through its terminator line, or an unquoted body's text around the ``$(...)``/backtick
+    substitutions it expands, which are scanned as shell. Nothing in the data is an operator or
+    a command word, and a quote inside it cannot swallow the shell text after it. When a body
+    cannot be delimited (unterminated, or a ``<<`` that is an arithmetic shift) the command is
+    scanned as plain text.
     Comments open at word boundaries.
     Background mode (compound-background semantics) additionally emits ``escape`` for a bare ``\\x``, ops ``&>``, ``{ `` and a closing
     ``}``, and tracks ``(...)``/``{ ... }`` depth: inside a group nothing is an operator, so
