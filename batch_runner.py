@@ -20,6 +20,7 @@ import contextlib
 import os
 import time
 import traceback
+from collections import Counter
 from datetime import datetime
 from multiprocessing import Lock, Pool
 from pathlib import Path
@@ -539,14 +540,16 @@ class BatchRunner:
         else:
             atomic_json_write(self.checkpoint_file, checkpoint_data)
 
-    def _scan_completed_prompts_by_content(self) -> set:
-        """Prompt texts already processed, scanned from every ``batch_*.jsonl``.
+    def _scan_completed_prompts_by_content(self) -> Dict[str, List[Optional[int]]]:
+        """Completed prompt text -> the ``prompt_index`` of every row recording it, scanned
+        from every ``batch_*.jsonl``.
 
         Matching on content rather than index lets resume recover even when indices
-        don't line up. Failed entries are skipped (retried); discard tombstones count
-        as completed (#93527) — re-running would just re-discard.
+        don't line up; one index per row keeps rows that share a prompt text apart.
+        Failed entries are skipped (retried); discard tombstones count as completed
+        (#93527) — re-running would just re-discard.
         """
-        completed_prompts = set()
+        completed_prompts: Dict[str, List[Optional[int]]] = {}
         batch_files = sorted(self.output_dir.glob("batch_*.jsonl"))
 
         if not batch_files:
@@ -563,7 +566,7 @@ class BatchRunner:
                                 continue
                             prompt_text = _entry_prompt_text(entry)
                             if prompt_text:
-                                completed_prompts.add(prompt_text)
+                                completed_prompts.setdefault(prompt_text, []).append(entry.get("prompt_index"))
                         except json.JSONDecodeError:
                             continue
             except Exception as e:
@@ -571,41 +574,49 @@ class BatchRunner:
 
         return completed_prompts
 
-    def _filter_dataset_by_completed(self, completed_prompts: set) -> Tuple[List[Dict], List[int]]:
-        """Return ``([(index, entry)] not yet completed, [skipped indices])``."""
+    def _filter_dataset_by_completed(
+            self, completed_prompts: Dict[str, List[Optional[int]]]) -> Tuple[List[Tuple[int, Dict]], List[int]]:
+        """Return ``([(index, entry)] not yet completed, [skipped indices])``.
+
+        Each completed row accounts for ONE dataset row: the one at its recorded index when
+        that row still carries its prompt text, else (dataset reordered or edited) the first
+        unclaimed row with that text. Rows sharing a prompt (repeated samples, per-row
+        image/cwd) therefore stay pending until each of them has completed.
+        """
+        texts = [_entry_prompt_text(entry) for entry in self.dataset]
+        claimed: set = set()
+        unplaced: Counter = Counter()
+        for prompt_text, indices in completed_prompts.items():
+            for idx in indices:
+                if isinstance(idx, int) and 0 <= idx < len(texts) and texts[idx] == prompt_text:
+                    claimed.add(idx)
+                else:
+                    unplaced[prompt_text] += 1
         filtered_dataset = []
         skipped_indices = []
-
         for idx, entry in enumerate(self.dataset):
-            prompt_text = entry.get("prompt", "").strip()
-
-            # Also check conversations format
-            if not prompt_text:
-                conversations = entry.get("conversations", [])
-                for msg in conversations:
-                    role = msg.get("role") or msg.get("from")
-                    if role in {"user", "human"}:
-                        prompt_text = (msg.get("content") or msg.get("value", "")).strip()
-                        break
-
-            if prompt_text in completed_prompts:
+            if idx not in claimed and unplaced[texts[idx]] > 0:
+                unplaced[texts[idx]] -= 1
+                claimed.add(idx)
+            if idx in claimed:
                 skipped_indices.append(idx)
             else:
                 filtered_dataset.append((idx, entry))
 
         return filtered_dataset, skipped_indices
 
-    def _apply_resume(self) -> bool:
-        """Rebuild ``self.batches`` from unprocessed prompts. False when nothing is left to run."""
+    def _apply_resume(self) -> Optional[set]:
+        """Rebuild ``self.batches`` from unprocessed prompts; return the indices (in the
+        current dataset) already completed, or None when nothing is left to run."""
         completed_prompt_texts = self._scan_completed_prompts_by_content()
         if not completed_prompt_texts:
-            return True
-        print(f"   Found {len(completed_prompt_texts)} already-completed prompts by content matching")
+            return set()
+        print(f"   Found {sum(map(len, completed_prompt_texts.values()))} already-completed rows by content matching")
         filtered_entries, skipped_indices = self._filter_dataset_by_completed(completed_prompt_texts)
 
         if not filtered_entries:
             print("\n✅ All prompts have already been processed!")
-            return False
+            return None
         self.batches = _chunk(filtered_entries, self.batch_size)
         _banner("📊 RESUME SUMMARY")
         print(f"   Original dataset size:     {len(self.dataset):,} prompts")
@@ -614,7 +625,7 @@ class BatchRunner:
         print(f"   🎯 RESUMING WITH:          {len(filtered_entries):,} prompts")
         print(f"   New batches created:       {len(self.batches)}")
         print("=" * 70 + "\n")
-        return True
+        return set(skipped_indices)
 
     def _worker_config(self) -> Dict[str, Any]:
         """Picklable agent configuration for worker processes.
@@ -798,7 +809,8 @@ class BatchRunner:
         """Run the batch pipeline; with *resume*, skip prompts already present in batch files."""
         _banner("🚀 Starting Batch Processing")
 
-        if resume and not self._apply_resume():
+        resumed_indices = self._apply_resume() if resume else set()
+        if resumed_indices is None:
             return
 
         # Load existing checkpoint (so resume doesn't clobber prior progress)
@@ -807,8 +819,10 @@ class BatchRunner:
             checkpoint_data = self._empty_checkpoint()
         config = self._worker_config()
 
-        # Index tracking is secondary to content matching (backward compatibility).
-        completed_prompts_set = set(checkpoint_data.get("completed_prompts", []))
+        # Workers skip these indices. On --resume the content match is authoritative: the
+        # checkpoint's indices name rows of the dataset as it was when they ran, so after a
+        # reorder or insert they would drop the very rows the match left pending.
+        completed_prompts_set = resumed_indices if resume else set(checkpoint_data.get("completed_prompts", []))
         start_time = time.time()
 
         # Checkpoint writes happen in the parent process; keep a lock for safety.
