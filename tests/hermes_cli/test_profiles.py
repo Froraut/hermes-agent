@@ -1373,6 +1373,32 @@ def test_profile_published_under_a_deleted_name_is_live(profile_env, publish):
     mkdir_under_hermes_home(published / "sessions")  # the profile's own writers are not refused
 
 
+def test_failed_install_under_a_deleted_name_leaves_it_deleted(profile_env, monkeypatch):
+    """The tombstone goes only once the installed profile is published whole: a multiplexer rescan
+    mid-install must not serve the half-copied profile, and an install that fails part-way must not
+    resurrect the deleted name at all."""
+    from hermes_cli import profile_distribution as pd
+    create_profile("work", no_alias=True)
+    delete_profile("work", yes=True)
+    dist = profile_env / "dist"
+    dist.mkdir()
+    (dist / "distribution.yaml").write_text("name: work\nversion: 1.0.0\n", encoding="utf-8")
+    (dist / "SOUL.md").write_text("Work persona.\n", encoding="utf-8")
+    served_mid_install = []
+
+    def _failing_manifest_write(target, manifest):  # the payload copy's last step
+        served_mid_install.append([name for name, _home in profiles_to_serve(multiplex=True)])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(pd, "write_manifest", _failing_manifest_write)
+    with pytest.raises(OSError):
+        pd.install_distribution(str(dist))
+
+    work_dir = profile_env / ".hermes" / "profiles" / "work"
+    assert served_mid_install == [["default"]]
+    assert not work_dir.exists() and profiles.named_profile_is_deleted(work_dir)
+
+
 class TestExportImport:
     """Tests for export_profile() / import_profile()."""
 
