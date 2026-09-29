@@ -26,6 +26,7 @@ MAX_DIFF_CHARS = 4000
 MAX_OUTPUT_CHARS = 8000
 URL_TIMEOUT_SECONDS = 30
 MAX_URL_BYTES = 262_144  # 256 KiB
+MAX_URL_REDIRECTS = 5
 
 _SNAPSHOT_FILENAME = "monitor_last_output.txt"
 
@@ -86,17 +87,41 @@ def _write_last_output(job_id: str, output: str) -> None:
 
 
 def _fetch_monitor_url(url: str) -> tuple[bool, str]:
-    """Bounded GET of a monitor URL. Returns (ok, body-or-error)."""
-    import urllib.request
+    """Bounded GET of a monitor URL. Returns (ok, body-or-error).
+
+    The URL is model-supplied (cronjob ``monitor``) and fetched on the gateway host every tick, with
+    the body injected into the prompt and delivered — so every hop passes the same SSRF + website
+    policy as web_extract (private IPs unless ``security.allow_private_urls``, cloud metadata always
+    blocked, connect-time IP pinning against DNS rebinding), redirects re-checked hop by hop."""
+    from urllib.parse import urljoin
+
+    from tools.url_safety import create_ssrf_safe_client, is_safe_url
+    from tools.website_policy import check_website_access
 
     if not str(url).lower().startswith(("http://", "https://")):
         return False, f"monitor_url must be http(s): {url!r}"
+    current = url
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "hermes-cron-monitor"})
-        with urllib.request.urlopen(req, timeout=URL_TIMEOUT_SECONDS) as resp:  # nosec B310 — scheme checked above
-            body = resp.read(MAX_URL_BYTES + 1)
-        return True, body[:MAX_URL_BYTES].decode("utf-8", errors="replace")
-    except Exception as exc:
+        with create_ssrf_safe_client(timeout=URL_TIMEOUT_SECONDS, follow_redirects=False) as client:
+            for _ in range(MAX_URL_REDIRECTS + 1):
+                if not is_safe_url(current):
+                    return False, f"monitor_url blocked: {current!r} targets a private or internal address"
+                if blocked := check_website_access(current):
+                    return False, f"monitor_url blocked by website policy rule {blocked['rule']!r}: {current!r}"
+                with client.stream("GET", current, headers={"User-Agent": "hermes-cron-monitor"}) as resp:
+                    location = resp.headers.get("location") if resp.is_redirect else None
+                    if location:
+                        current = urljoin(current, location)
+                        continue
+                    resp.raise_for_status()
+                    body = b""
+                    for chunk in resp.iter_bytes():
+                        body += chunk
+                        if len(body) > MAX_URL_BYTES:
+                            break
+                    return True, body[:MAX_URL_BYTES].decode("utf-8", errors="replace")
+        return False, f"monitor_url fetch failed: more than {MAX_URL_REDIRECTS} redirects"
+    except Exception as exc:  # connect-time SSRF block, HTTP status, transport: all a failed tick
         return False, f"monitor_url fetch failed: {exc}"
 
 

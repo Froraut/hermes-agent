@@ -475,3 +475,50 @@ def test_cronjob_tool_update_clears_monitor_script(hermes_env):
     )
     assert result.get("success") is True
     assert get_job(created["job_id"]).get("monitor_script") is None
+
+
+def _serve(routes: dict):
+    """Loopback HTTP server; ``routes`` maps path -> (status, headers, body)."""
+    import http.server
+    import threading
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            status, headers, body = routes[self.path]
+            self.send_response(status)
+            for key, value in headers.items():
+                self.send_header(key, value)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize("allow_private", [False, True], ids=["default", "allow_private_urls"])
+def test_monitor_url_obeys_the_ssrf_policy_on_every_hop(hermes_env, monkeypatch, allow_private):
+    """monitor_url is model-supplied (cronjob ``monitor``) and fetched on the gateway host every
+    tick, its body injected into the prompt and delivered — it must pass the same SSRF policy as
+    web_extract. A loopback service is reachable only with the private-URL opt-in, and a redirect
+    to cloud metadata is refused even then (each hop is checked before it is dialed)."""
+    import cron.monitor as monitor
+    import tools.url_safety as url_safety
+
+    monkeypatch.setattr(url_safety, "_allow_private_resolved", False)
+    monkeypatch.setenv("HERMES_ALLOW_PRIVATE_URLS", "1" if allow_private else "0")
+    server = _serve({
+        "/status": (200, {}, b"internal-status-ok"),
+        "/hop": (302, {"Location": "http://169.254.169.254/latest/meta-data/"}, b""),
+    })
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        ok, body = monitor._fetch_monitor_url(f"{base}/status")
+        assert ok is allow_private and ("internal-status-ok" in body) is allow_private, body
+        ok, body = monitor._fetch_monitor_url(f"{base}/hop")
+        assert not ok and ("169.254.169.254" in body) is allow_private, body
+    finally:
+        server.shutdown()
