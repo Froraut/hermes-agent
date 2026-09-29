@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agent.i18n import t
 from gateway.platforms.base import (
     BasePlatformAdapter, SendResult,
-    cache_document_from_bytes, cache_image_from_bytes,
+    cache_document_from_bytes_async, cache_image_from_bytes_async, validate_inbound_media_size,
 )
 from gateway.platforms.helpers import cancel_task
 from gateway.platforms.event import MessageEvent, MessageType
@@ -379,7 +379,8 @@ def _verify_sender_authentication(msg: email_lib.message.Message, from_addr: str
 
 
 def _extract_attachments(msg: email_lib.message.Message, skip_attachments: bool = False) -> List[Dict[str, Any]]:
-    """Extract attachment metadata and cache files locally (nothing when *skip_attachments*)."""
+    """Extract attachment names, types and bytes (nothing when *skip_attachments*). Nothing is written
+    to disk here: the sender is not yet authorized (``_cache_attachments`` runs after the gate)."""
     attachments = []
     if not msg.is_multipart():
         return attachments
@@ -391,16 +392,27 @@ def _extract_attachments(msg: email_lib.message.Message, skip_attachments: bool 
         filename = _decode_header_value(fn) if (fn := part.get_filename()) else f"attachment.{part.get_content_subtype() or 'bin'}"
         if not (payload := part.get_payload(decode=True)):
             continue
-        if (ext := Path(filename).suffix.lower()) in _IMAGE_EXTS:
-            try:
-                cached_path, kind = cache_image_from_bytes(payload, ext), "image"
-            except ValueError:
-                logger.debug("Skipping non-image attachment %s (invalid magic bytes)", filename)
-                continue
-        else:
-            cached_path, kind = cache_document_from_bytes(payload, filename), "document"
-        attachments.append({"path": cached_path, "filename": filename, "type": kind, "media_type": content_type})
+        attachments.append({"filename": filename, "media_type": content_type, "payload": payload})
     return attachments
+
+
+async def _cache_attachments(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Cache an accepted message's attachments; each kind honours the inbound media size cap, and images
+    must also pass the magic-byte check."""
+    cached = []
+    for att in attachments:
+        filename, payload = att["filename"], att["payload"]
+        try:
+            if (ext := Path(filename).suffix.lower()) in _IMAGE_EXTS:
+                cached_path, kind = await cache_image_from_bytes_async(payload, ext), "image"
+            else:
+                validate_inbound_media_size(len(payload), media_type="document")
+                cached_path, kind = await cache_document_from_bytes_async(payload, filename), "document"
+        except ValueError as exc:
+            logger.debug("Skipping attachment %s: %s", filename, exc)
+            continue
+        cached.append({"path": cached_path, "filename": filename, "type": kind, "media_type": att["media_type"]})
+    return cached
 
 
 def _attach_file(msg: MIMEMultipart, path: Path, filename: str) -> None:
@@ -751,7 +763,8 @@ class EmailAdapter(BasePlatformAdapter):
         sender_addr = msg_data["sender_addr"]
         if not self._sender_accepted(sender_addr, msg_data):
             return
-        subject, body, attachments = msg_data["subject"], msg_data["body"].strip(), msg_data["attachments"]
+        subject, body = msg_data["subject"], msg_data["body"].strip()
+        attachments = await _cache_attachments(msg_data["attachments"])
         text = f"[Subject: {subject}]\n\n{body}" if subject and not subject.startswith("Re:") else body  # subject unless reply
         # DOCUMENT wins over PHOTO for mixed attachments: run.py keys image handling off the per-path mime type regardless
         # of message_type, but document-context injection gates strictly on MessageType.DOCUMENT — so DOCUMENT surfaces both.

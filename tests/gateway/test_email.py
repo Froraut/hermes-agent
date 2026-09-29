@@ -281,14 +281,15 @@ class TestDispatchMessage(unittest.TestCase):
             "message_id": "<msg5@test.com>",
             "in_reply_to": "",
             "body": "Check this photo",
-            "attachments": [{"path": "/tmp/img.jpg", "filename": "img.jpg", "type": "image", "media_type": "image/jpeg"}],
+            "attachments": [{"filename": "img.jpg", "media_type": "image/jpeg", "payload": b"\xff\xd8\xff" + b"\0" * 32}],
             "date": "",
         }
 
         asyncio.run(adapter._dispatch_message(msg_data))
         self.assertEqual(len(captured_events), 1)
         self.assertEqual(captured_events[0].message_type, MessageType.PHOTO)
-        self.assertEqual(captured_events[0].media_urls, ["/tmp/img.jpg"])
+        (path,) = captured_events[0].media_urls
+        self.assertTrue(path.endswith(".jpg") and os.path.isfile(path))
 
 
     def test_empty_allowlist_denies_without_optin(self):
@@ -448,6 +449,53 @@ class TestDispatchDefersToGatewayAuthorization(unittest.TestCase):
         for label, kwargs in cases.items():
             with self.subTest(label):
                 self.assertEqual(self._reached_gateway(**kwargs), [])
+
+
+class TestAttachmentsCachedAfterSenderGate(unittest.TestCase):
+    """Only mail the sender gate accepts writes attachments to the media cache: a stranger mailing the
+    inbox must not be able to put files on disk."""
+
+    @staticmethod
+    def _mail(sender: str) -> bytes:
+        from email.mime.application import MIMEApplication
+        msg = MIMEMultipart()
+        msg["From"], msg["To"], msg["Subject"] = sender, "hermes@test.com", "invoice"
+        msg.attach(MIMEText("see attached", "plain"))
+        for name, data in (("invoice.bin", b"\0" * 4096), ("chart.png", b"\x89PNG\r\n\x1a\n" + b"\0" * 64)):
+            part = MIMEApplication(data, Name=name)
+            part["Content-Disposition"] = f'attachment; filename="{name}"'
+            msg.attach(part)
+        return msg.as_bytes()
+
+    def test_only_accepted_mail_writes_attachments_to_the_cache(self):
+        import asyncio
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import get_document_cache_dir, get_image_cache_dir
+        from plugins.platforms.email.adapter import EmailAdapter
+
+        def cached_files():
+            return {str(p) for d in (get_document_cache_dir(), get_image_cache_dir()) for p in d.iterdir()}
+
+        with patch.dict(os.environ, {"EMAIL_ADDRESS": "hermes@test.com", "EMAIL_PASSWORD": "secret",
+                                     "EMAIL_IMAP_HOST": "imap.test.com", "EMAIL_SMTP_HOST": "smtp.test.com",
+                                     "EMAIL_ALLOWED_USERS": "owner@example.com", "EMAIL_TRUST_FROM_HEADER": "true"}):
+            for key in ("EMAIL_ALLOW_ALL_USERS", "GATEWAY_ALLOWED_USERS", "GATEWAY_ALLOW_ALL_USERS"):
+                os.environ.pop(key, None)
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+            events = []
+
+            async def capture(event):
+                events.append(event)
+
+            adapter.handle_message = capture
+            before = cached_files()
+            asyncio.run(adapter._dispatch_message(adapter._parse_fetched_message(b"1", self._mail("spammer@evil.example"))))
+            self.assertEqual((events, cached_files()), ([], before))
+
+            asyncio.run(adapter._dispatch_message(adapter._parse_fetched_message(b"2", self._mail("owner@example.com"))))
+            (event,) = events
+            self.assertEqual(len(event.media_urls), 2)
+            self.assertEqual(set(event.media_urls), cached_files() - before)
 
 
 class TestThreadContext(unittest.TestCase):
