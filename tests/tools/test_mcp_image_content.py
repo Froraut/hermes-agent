@@ -17,7 +17,10 @@ images natively.
 from __future__ import annotations
 
 import base64
+import json
 from types import SimpleNamespace
+
+import pytest
 
 
 def _png_bytes():
@@ -92,10 +95,10 @@ class TestCacheMcpImageBlock:
         assert _cache_mcp_image_block(block) == ""
 
 
-    def test_returns_empty_when_bytes_dont_look_like_an_image(self, tmp_path, monkeypatch):
+    def test_bytes_the_cache_rejects_become_an_inline_notice(self, tmp_path, monkeypatch):
         """``cache_image_from_bytes`` has a format sniff; if the claimed
         ``image/png`` is actually an HTML error page, the cache raises and
-        we log + drop rather than propagate."""
+        we log + report the block inline rather than propagate or drop it."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         from tools.mcp_tool_content import _cache_mcp_image_block
 
@@ -103,7 +106,26 @@ class TestCacheMcpImageBlock:
             data=base64.b64encode(b"<html>error</html>").decode("ascii"),
             mimeType="image/png",
         )
-        assert _cache_mcp_image_block(block) == ""
+        tag = _cache_mcp_image_block(block)
+        assert not tag.startswith("MEDIA:") and "image/png" in tag
+
+    @pytest.mark.parametrize(("kind", "mime", "data"), [
+        ("image", "image/svg+xml", base64.b64encode(b'<svg xmlns="http://www.w3.org/2000/svg"/>').decode()),
+        ("image", "image/png", "!!!notbase64"),
+        ("audio", "audio/wav", "!!!notbase64"),
+    ])
+    def test_media_only_result_that_cannot_be_cached_is_visible_to_the_model(
+        self, tmp_path, monkeypatch, kind, mime, data,
+    ):
+        """A tool whose only output is a media block Hermes cannot turn into a MEDIA tag must
+        not read as a successful empty result: the model has to learn the block existed."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from tools.mcp_tool_handlers import _render_call_tool_result
+
+        result = SimpleNamespace(content=[SimpleNamespace(type=kind, data=data, mimeType=mime)],
+                                 isError=False, structuredContent=None, meta=None)
+        rendered = json.loads(_render_call_tool_result(result, "diagrams"))["result"]
+        assert kind in rendered and mime in rendered
 
     def test_handles_jpeg(self, tmp_path, monkeypatch):
         """JPEG signature should also be accepted."""
