@@ -1160,8 +1160,9 @@ def _clone_file(source_dir: Path, profile_dir: Path, relpath: str) -> None:
 
 # Files a clone edits in place after copying. A ``--clone-all`` copy preserves symlinks
 # (``symlinks=True``), so a symlinked source ``.env`` would otherwise be edited THROUGH the link and
-# the channel stripping would mutate the SOURCE profile. These are materialized as real files first.
-_CLONE_MATERIALIZE = (".env", "config.yaml", "auth.json", "SOUL.md")
+# the channel stripping would mutate the SOURCE profile (likewise ``profile.yaml``: the role drop and
+# ``--description``). These are materialized as real files first.
+_CLONE_MATERIALIZE = (".env", "config.yaml", "auth.json", "SOUL.md", "profile.yaml")
 
 
 def _materialize_symlinked_files(profile_dir: Path) -> List[str]:
@@ -1227,11 +1228,11 @@ def _clone_all_into(source_dir: Path, profile_dir: Path, canon: str) -> None:
     """--clone-all: full copytree minus infrastructure/history, then strip runtime files,
     the backend-assigned role, and cloned single-use OAuth grants."""
     _copytree_keep_junctions(source_dir, profile_dir, _clone_all_copytree_ignore(source_dir))
-    drop_profile_role(profile_dir)
     materialized = _materialize_symlinked_files(profile_dir)
     if materialized:
         logger.info("profile %s: materialized symlinked %s so the clone never writes through to %s",
                     canon, materialized, source_dir)
+    drop_profile_role(profile_dir)
     # Excluded history dirs (sessions/, cron/) must still exist as empty dirs so the clone runs.
     for subdir in _PROFILE_DIRS:
         (profile_dir / subdir).mkdir(parents=True, exist_ok=True)
