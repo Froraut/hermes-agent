@@ -88,6 +88,7 @@ class SmsAdapter(BasePlatformAdapter):
     serves_profile_prefix: bool = True
 
     MAX_MESSAGE_LENGTH = MAX_SMS_LENGTH
+    splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.SMS)
@@ -163,7 +164,9 @@ class SmsAdapter(BasePlatformAdapter):
         url, headers = _messages_endpoint(self._account_sid, self._auth_token)
         session = self._http_session or _new_session(trust_env=gateway_trust_env())
         try:
-            for chunk in self.truncate_message(self.format_message(content)):
+            # Twilio rejects a Body over 1600 chars (21617): chunk at our own limit, not the
+            # 4096 default — a 1601-4096 char reply was one rejected POST, its fallback too.
+            for chunk in self.truncate_message(self.format_message(content), self.MAX_MESSAGE_LENGTH):
                 form_data = _twilio_form(self._from_number, chat_id, chunk)
                 try:
                     async with session.post(url, data=form_data, headers=headers) as resp:

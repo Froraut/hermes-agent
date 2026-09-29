@@ -311,3 +311,35 @@ class TestMultiplexProfileScope:
         finally:
             reset_secret_scope(token)
         assert "TWILIO_PHONE_NUMBER required" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_send_never_posts_a_body_over_the_twilio_limit(monkeypatch):
+    """Twilio rejects a Body over 1600 chars (error 21617). A long reply must reach it as chunks
+    within that limit — not as one 1601-4096 char POST that fails, fallback included."""
+    import types
+
+    import plugins.platforms.sms.adapter as sms
+
+    adapter = TestSmsFormatAndTruncate()._make_adapter()
+    bodies = []
+    monkeypatch.setattr(sms, "_twilio_form", lambda _from, _to, body: bodies.append(body) or body)
+
+    class _Resp:
+        status = 201
+
+        async def json(self):
+            return {"sid": "SM1"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    adapter._http_session = types.SimpleNamespace(post=lambda *a, **k: _Resp())
+
+    result = await adapter.send("+15559876543", " ".join(f"item{i}" for i in range(500)))
+
+    assert result.success and len(bodies) > 1
+    assert all(len(body) <= sms.MAX_SMS_LENGTH for body in bodies), [len(b) for b in bodies]
