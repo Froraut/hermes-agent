@@ -2709,12 +2709,15 @@ def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
 def run_one_job(
     job: dict, *, adapters=None, loop=None, verbose: bool = False,
     extra_prompt: Optional[str] = None, cancel_event: Optional[_CancelEventLike] = None,
+    worker_terminal_overlay: Optional[Dict[str, str]] = None,
 ) -> bool:
     """Run ONE due job end-to-end: execute → save output → deliver → mark. Shared by the built-in
     ticker and external providers' ``fire_due``; does NOT decide due-ness or acquire the initial
     claim (callers use the store CAS) but keeps it alive. True if processed (a job failure is
     recorded via ``mark_job_run``), False only if processing raised. ``cancel_event``: optional
-    transport-level cancel (dashboard drain)."""
+    transport-level cancel (dashboard drain). ``worker_terminal_overlay``: the ``TERMINAL_*``
+    overlay the dispatching host granted a detached worker (payload ``terminal_overlay``); read
+    only by the worker that owns the execution."""
     # Every gateway path (built-in scheduler, external providers, and direct
     # API fires) crosses this seam.  Ensure the detached worker has a durable
     # attempt to adopt before any launch can occur.
@@ -2787,7 +2790,8 @@ def run_one_job(
                     extra_prompt=extra_prompt,
                     claim_lost=lost_ownership,
                     transport_cancel=cancel_event,
-                    execution_token=execution_token))
+                    execution_token=execution_token,
+                    worker_terminal_overlay=worker_terminal_overlay))
     finally:
         with _running_lock:
             executions = _running_fire_owners.get(_fire_key)
@@ -3158,6 +3162,7 @@ def _run_one_job_body(
     extra_prompt: Optional[str] = None, claim_lost: Optional[_CancelEventLike] = None,
     transport_cancel: Optional[_CancelEventLike] = None,
     execution_token: Optional[object] = None,
+    worker_terminal_overlay: Optional[Dict[str, str]] = None,
 ) -> bool:
     fence = _FireOwnership(job, claim_lost, transport_cancel)
     fire_owner = fence.owner
@@ -3222,8 +3227,14 @@ def _run_one_job_body(
         from tools.terminal_scope import (
             install_profile_terminal_scope)
 
+        # The launch profile's env-only TERMINAL_* (live on a single-profile host, frozen once it
+        # multiplexes) overlays its files; any other profile gets none. A detached worker applies the
+        # host's grant instead of deciding: its process home is the fired profile's whichever that
+        # is, and a secondary's env still carries launch TERMINAL_* the strip does not know (#191).
         _terminal_scope_token = install_profile_terminal_scope(
-            _get_hermes_home(), env_overlay=served_terminal_overlay(_get_hermes_home()))
+            _get_hermes_home(),
+            env_overlay=(worker_terminal_overlay if external_owner
+                         else served_terminal_overlay(_get_hermes_home())))
         # Defer agent teardown until AFTER delivery; closing first races the live send against a
         # torn-down async client. run_job hands the agent back via this list.
         # Defer the cron agent's async-resource teardown until AFTER delivery. run_job normally closes the
@@ -3488,7 +3499,12 @@ def _launch_external_cron_worker(job: dict) -> bool:
         str(ack_path),
     ]
 
-    from agent.secret_scope import is_multiplex_active, reset_secret_scope, set_secret_scope
+    from agent.secret_scope import (
+        _is_process_home,
+        is_multiplex_active,
+        reset_secret_scope,
+        set_secret_scope,
+    )
     from hermes_cli.env_loader import hydrate_profile_secret_sources
     from tools.environments.local import build_subprocess_env, strip_launch_profile_env
     from tools.process_registry import (
@@ -3498,8 +3514,8 @@ def _launch_external_cron_worker(job: dict) -> bool:
     )
     from tui_gateway.launch_profile_policy import (
         capture_launch_env,
-        is_multiplexed_launch_home,
         served_secret_scope,
+        served_terminal_overlay,
     )
 
     try:
@@ -3523,11 +3539,14 @@ def _launch_external_cron_worker(job: dict) -> bool:
         )
 
     profile_home = _get_hermes_home().resolve()
-    # Only a multiplexing host's LAUNCH profile hands its worker the env frozen at activation
-    # (systemd / `op run` keys have no file to rebuild from), unscrubbed like a single-profile
-    # worker's. A secondary's worker gets a scrubbed base and resolves from its own files; the
-    # payload tells the child which of the two it was granted.
-    launch_worker = is_multiplexed_launch_home(profile_home)
+    # The host decides the worker's grant; the worker cannot, because its own process home is the
+    # fired profile's. The launch profile's worker keeps the launch env unscrubbed (the env frozen at
+    # activation once this host multiplexes: systemd / `op run` keys have no file to rebuild from)
+    # and its TERMINAL_* overlay. Any other profile's worker gets a scrubbed base and no overlay and
+    # resolves from its own files, on a single-profile host too: a scoped miss in the worker falls
+    # back to its env, which is never that profile's. The payload tells the child what it got.
+    own_profile = _is_process_home(profile_home)
+    launch_worker = own_profile and multiplex_active
     _ensure_cron_dir(handoff_dir)
     try:
         handoff_dir.chmod(0o700)
@@ -3542,6 +3561,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
                     "profile_home": str(profile_home),
                     "multiplex_active": multiplex_active,
                     "launch_env": launch_worker,
+                    "terminal_overlay": served_terminal_overlay(profile_home),
                 },
                 payload_file,
             )
@@ -3556,7 +3576,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
     try:
         worker_env = strip_launch_profile_env(build_subprocess_env(
             base=capture_launch_env() if launch_worker else None,
-            scrub_secrets=multiplex_active and not launch_worker,
+            scrub_secrets=not own_profile,
             inherit_profile_home=True,
             extra={"HERMES_HOME": str(profile_home)},
         ))
@@ -3790,7 +3810,9 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
             old_external_execution = os.environ.get("_HERMES_CRON_EXTERNAL_WORKER")
             os.environ["_HERMES_CRON_EXTERNAL_WORKER"] = execution_id
             try:
-                return run_one_job(job, adapters=None, loop=None, verbose=False)
+                return run_one_job(
+                    job, adapters=None, loop=None, verbose=False,
+                    worker_terminal_overlay=payload.get("terminal_overlay"))
             finally:
                 if old_external_execution is None:
                     os.environ.pop("_HERMES_CRON_EXTERNAL_WORKER", None)
