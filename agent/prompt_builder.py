@@ -1447,12 +1447,15 @@ def _build_skills_system_prompt_inner(
         _oneshot_prompt_variant(),
     )
     snapshot = _load_skills_snapshot(skills_dir)
-    app_gated = snapshot is not None and any(
-        entry.get("requires_apps") for entry in snapshot.get("skills", []) if isinstance(entry, dict)
+    # App presence and runtime environments (kanban is context-dependent, never memoized) are not in
+    # the key: an index built from gated entries is re-derived from the snapshot, not served from the LRU.
+    host_gated = snapshot is not None and any(
+        entry.get("requires_apps") or entry.get("environments")
+        for entry in snapshot.get("skills", []) if isinstance(entry, dict)
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
-        if cached is not None and not app_gated:
+        if cached is not None and not host_gated:
             _SKILLS_PROMPT_CACHE.move_to_end(cache_key)
             return cached
 
