@@ -295,6 +295,25 @@ class TestAtomicWrite:
         ops.write_file(str(target), "hello\n")
         assert [p for p in os.listdir(tmp_path) if ".hermes-tmp" in p] == []
 
+    @pytest.mark.platforms("posix")
+    def test_no_temp_file_leaked_when_the_swap_fails(self, tmp_path: Path, monkeypatch):
+        # The temp was created and filled, then the rename failed (EBUSY bind mount, ENOSPC,
+        # ...): the write reports failure, the original stays, and the temp is cleaned up.
+        stub = tmp_path.parent / "failing-mv-bin"
+        stub.mkdir()
+        (stub / "mv").write_text("#!/bin/sh\necho 'mv: Device or resource busy' >&2\nexit 1\n")
+        (stub / "mv").chmod(0o755)
+        monkeypatch.setenv("PATH", f"{stub}{os.pathsep}{os.environ['PATH']}")
+        from tools.environments.local import LocalEnvironment  # built after PATH: env is snapshotted
+        from tools.file_operations import ShellFileOperations
+        ops = ShellFileOperations(LocalEnvironment(cwd=str(tmp_path)), cwd=str(tmp_path))
+        target = tmp_path / "f.txt"
+        target.write_text("v1", encoding="utf-8")
+        res = ops.write_file(str(target), "v2 content")
+        assert res.error
+        assert target.read_text(encoding="utf-8") == "v1"
+        assert [p for p in os.listdir(tmp_path) if ".hermes-tmp" in p] == []
+
 
     @pytest.mark.platforms("linux")
     def test_patch_routes_through_atomic_write(self, ops, tmp_path: Path):
