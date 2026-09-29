@@ -2129,6 +2129,18 @@ def _default_export_ignore(root_dir: Path):
 # its persistent Chromium profile (Cookies, Login Data — the bot's live web sessions), Xauthority, sockets.
 _EXPORT_CREDENTIAL_FILES = frozenset({"auth.json", ".env", "bot-desktop"})
 
+
+def _export_credential_root_paths() -> frozenset[str]:
+    """Profile-root-relative POSIX paths of credential stores a named-profile export drops: all the
+    file tools read-deny as credentials (``agent.file_safety``), plus stores they never reach but an
+    archive would — config backups (byte-exact config.yaml copies whose timestamp suffix escapes the
+    redact pass, so inline keys ship verbatim), the 1Password bootstrap token, pairing state and the
+    backup-excluded ``browser_profiles/``. Root-scoped: a skill's own ``backups/`` is user data."""
+    from agent.file_safety import _CREDENTIAL_FILE_NAMES, _READ_DENIED_DIRS
+    return frozenset({*(Path(name).as_posix() for name in _CREDENTIAL_FILE_NAMES),
+                      *(subdir for subdir, *_ in _READ_DENIED_DIRS),
+                      "backups", ".op.env", "pairing", "browser_profiles"})
+
 # Text/config suffixes secret-scrubbed on export; binary DBs, images etc. are left alone.
 _EXPORT_REDACT_SUFFIXES = frozenset({
     ".md", ".txt", ".yaml", ".yml", ".json", ".jsonl", ".toml", ".ini", ".cfg", ".conf", ".py", ".sh",
@@ -2184,9 +2196,13 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
     # The default profile IS ~/.hermes (dir name ".hermes"), so both paths stage a filtered
     # copy under a temp dir named after the canonical id: root allow-list for default,
     # credential exclusion for named profiles.
+    credential_root_paths = _export_credential_root_paths()
+
     def _ignore_credentials(directory: str, contents: list) -> set:
         ignored = _non_exportable_entries(directory, contents)
         ignored.update(_EXPORT_CREDENTIAL_FILES & set(contents))
+        rel = Path(directory).relative_to(profile_dir)
+        ignored.update(entry for entry in contents if (rel / entry).as_posix() in credential_root_paths)
         if Path(directory) == profile_dir:
             ignored |= PM_RUNTIME_ROOT_DIRS & set(contents)
         return ignored
