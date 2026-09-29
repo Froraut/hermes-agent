@@ -133,6 +133,7 @@ def status() -> Dict[str, Any]:
         "url": active.get("url"),
         "startedAt": active.get("started_at"),
         "outDir": active.get("out_dir"),
+        "sessionId": active.get("session_id"),
         **bot_status,
     }
 

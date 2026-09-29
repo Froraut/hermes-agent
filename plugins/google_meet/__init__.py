@@ -29,14 +29,17 @@ _TOOLS = (
     ("meet_say",        MEET_SAY_SCHEMA,        handle_meet_say,        "🗣️"))
 
 
-def _on_session_end(**kwargs) -> None:
-    """Leave a still-running call so we don't orphan a headless Chromium (never raises)."""
+def _on_session_finalize(session_id: str = "", **kwargs) -> None:
+    """Leave a still-running call when the session that joined it really ends, so we don't orphan a
+    headless Chromium (never raises). Not ``on_session_end``: that fires after every turn, and the bot
+    must outlive the turn that started it."""
     try:
         status = pm.status()
-        if status.get("ok") and status.get("alive"):
+        owner = status.get("sessionId")
+        if status.get("ok") and status.get("alive") and (not owner or not session_id or owner == session_id):
             pm.stop(reason="session ended")
     except Exception as e:  # pragma: no cover — defensive
-        logger.debug("google_meet on_session_end cleanup failed: %s", e)
+        logger.debug("google_meet on_session_finalize cleanup failed: %s", e)
 
 
 def register(ctx) -> None:
@@ -54,4 +57,4 @@ def register(ctx) -> None:
         setup_fn=_register_meet_cli, handler_fn=_meet_command,
         description=("Let the hermes agent join a Google Meet call and scrape live "
                      "captions into a transcript. See: hermes meet setup"))
-    ctx.register_hook("on_session_end", _on_session_end)
+    ctx.register_hook("on_session_finalize", _on_session_finalize)
