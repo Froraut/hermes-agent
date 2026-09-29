@@ -118,12 +118,15 @@ def _launch_env() -> Dict[str, str]:
 
 
 def launch_terminal_env() -> Dict[str, str]:
-    """The frozen launch ``TERMINAL_*`` overlay for a launch-profile turn's terminal scope.
+    """The launch ``TERMINAL_*`` overlay for a launch-profile terminal scope, from the same source
+    as :func:`launch_secret_scope`: frozen once multiplexing is active, live before.
 
-    Production always captured at activation; a first capture here only happens when the
-    multiplexer flag was set by another owner (the messaging gateway) or a harness.
+    Capturing here before activation froze the snapshot at the first launch-profile kanban
+    dispatch or connector install on a single-profile host, so activation later reused it and
+    missed every key the process gained in between. Under multiplexing, a first capture here only
+    happens when the flag was set by another owner (the messaging gateway) or a harness.
     """
-    return {k: v for k, v in capture_launch_env().items() if k.startswith("TERMINAL_")}
+    return {k: v for k, v in _launch_env().items() if k.startswith("TERMINAL_")}
 
 
 def launch_secret_scope(launch_home: "str | Path") -> Dict[str, str]:

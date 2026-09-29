@@ -130,3 +130,24 @@ def test_worker_scopes_follow_the_pinned_launch_home_not_a_mirrored_env_var(
     assert "CORP_SERVICE_TOKEN" not in served_worker, (
         "the launch profile's env-only credential reached profile B's worker")
     assert launch_worker.get("CORP_SERVICE_TOKEN") == "launch-env-only"
+
+
+def test_a_launch_worker_dispatched_before_activation_does_not_freeze_the_launch_env(
+        profile_b, monkeypatch):
+    """The launch env is frozen when a second profile is first served, never earlier: before that
+    the process env IS the launch profile's and may still gain credentials. A single-profile
+    dispatcher resolving the launch profile's worker toolsets froze it at that dispatch, so a key
+    the process gained afterwards was missing from the launch profile's scope for its lifetime."""
+    from agent.secret_scope import set_multiplex_active
+    from tui_gateway.launch_profile_policy import activate_multi_profile_hosting, launch_secret_scope
+
+    launch = profile_b.parent.parent
+    monkeypatch.delenv("LATE_LAUNCH_TOKEN", raising=False)
+    kanban_db_dispatch._resolve_worker_cli_toolsets(str(launch))  # single-profile launch dispatch
+    monkeypatch.setenv("LATE_LAUNCH_TOKEN", "gained-after-dispatch")  # env-only, no .env to rebuild
+    activate_multi_profile_hosting()
+    try:
+        scope = launch_secret_scope(launch)
+    finally:
+        set_multiplex_active(False)
+    assert scope.get("LATE_LAUNCH_TOKEN") == "gained-after-dispatch"
