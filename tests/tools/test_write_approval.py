@@ -370,11 +370,38 @@ def test_batch_diff_previews_each_op_as_its_flat_staging_does(demo_skill):
     assert "+Step 1: rewritten step." in batch and "+Remember X." in batch
 
 
-def test_batch_diff_previews_ops_in_order(demo_skill):
+_MID = "Step 1: mid step.\n"
+
+
+@pytest.mark.parametrize("first, second_target", [
+    ({"action": "patch", "name": "demo", "old_string": "old step", "new_string": "mid step"}, {"name": "demo"}),
+    # The same skill and file, spelled differently by the second op: still one chained target.
+    ({"action": "patch", "name": "demo", "old_string": "old step", "new_string": "mid step"},
+     {"name": "research/demo"}),
+    ({"action": "write_file", "name": "demo", "file_path": "references/a.md", "file_content": _MID},
+     {"name": "demo", "file_path": "./references//a.md"}),
+], ids=["same-spelling", "categorized-name", "unnormalized-path"])
+def test_batch_diff_previews_ops_in_order(demo_skill, first, second_target):
     """A patch chain on one file previews each step against the text the step before left."""
     batch = _stage_skill_write(operations=[
-        {"action": "patch", "name": "demo", "old_string": "old step", "new_string": "mid step"},
-        {"action": "patch", "name": "demo", "old_string": "mid step", "new_string": "new step"}])
+        first, {"action": "patch", "old_string": "mid step", "new_string": "new step", **second_target}])
 
     second = batch.split("operations[1]", 1)[1]
     assert "-Step 1: mid step." in second and "+Step 1: new step." in second, batch
+
+
+@pytest.mark.parametrize("shape", ["flat", "batch"])
+@pytest.mark.parametrize("spelling", ["traversal", "absolute"])
+def test_diff_never_reads_a_target_the_write_would_refuse(hermes_home, demo_skill, shape, spelling):
+    """Staging precedes the write handler's path checks, so /skills diff must resolve the target
+    the way the handler will: a path outside the skill is refused unread, never shown."""
+    skill_dir = os.path.join(hermes_home, "skills", "research", "demo")
+    victim = os.path.join(os.path.dirname(hermes_home), "victim.txt")
+    with open(victim, "w", encoding="utf-8") as fh:
+        fh.write("VICTIM-SECRET=hunter2\n")
+    fp = os.path.relpath(victim, skill_dir) if spelling == "traversal" else victim
+    op = {"action": "write_file", "name": "demo", "file_path": fp, "file_content": ""}
+
+    out = _stage_skill_write(**op) if shape == "flat" else _stage_skill_write(operations=[op])
+
+    assert "VICTIM-SECRET" not in out, out
