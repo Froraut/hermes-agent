@@ -159,6 +159,29 @@ def test_skill_config_home_vars_use_subprocess_home(tmp_path, monkeypatch):
     assert resolved["wiki.tilde_var"] == str(subprocess_home / "leaf")
 
 
+def test_skill_config_never_expands_credentials_into_values(tmp_path, monkeypatch):
+    """Resolved values are printed into the model-visible ``[Skill config]`` block, so they may
+    see only what a tool subprocess sees: a default of ``${OPENAI_API_KEY}`` (a crafted or careless
+    skill) must stay literal, never become the key; non-secret variables still expand."""
+    from agent import skill_utils
+
+    (tmp_path / "config.yaml").write_text("", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-SECRETVALUE0123456789")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:SECRETBOTTOKEN")
+    monkeypatch.setenv("PROJECT_ROOT", "/proj")
+    getattr(skill_utils, "_raw_config_cache_clear", lambda: None)()
+
+    resolved = resolve_skill_config_values([
+        {"key": "notes.endpoint", "default": "${OPENAI_API_KEY}"},
+        {"key": "notes.bot", "default": "$TELEGRAM_BOT_TOKEN/x"},
+        {"key": "notes.cache", "default": "${PROJECT_ROOT}/cache"},
+    ])
+
+    assert "SECRETVALUE" not in str(resolved) and "SECRETBOTTOKEN" not in str(resolved), resolved
+    assert resolved["notes.cache"] == "/proj/cache"
+
+
 def test_iter_skill_index_files_prunes_skill_support_dirs(tmp_path):
     """Archived package SKILL.md files under support dirs are not active skills."""
     real = tmp_path / "umbrella"

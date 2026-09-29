@@ -724,14 +724,20 @@ def _resolve_dotpath(config: Dict[str, Any], dotted_key: str):
 
 
 _HOME_VAR_RE = re.compile(r"\$(?:\{HOME\}|HOME)(?=$|[/\\])")
+_ENV_REF_RE = re.compile(r"\$(\w+|\{[^}]*\})", re.ASCII)  # posixpath.expandvars' reference shapes
 
 
 def _expand_skill_config_path(value: str) -> str:
-    """Expand ``~`` / ``$HOME`` against the HOME Hermes injects into tool subprocesses.
+    """Expand ``~`` / ``$HOME`` against the HOME Hermes injects into tool subprocesses, and other
+    ``$VAR`` references against the environment such a subprocess receives.
 
     Skill config defaults describe paths the agent hands to tools, so in a container where the
     control process HOME (``/opt/data``) differs from the tool HOME (``{HERMES_HOME}/home``) a
-    plain ``expanduser`` pointed the prompt at a path no tool would ever read (#12260).
+    plain ``expanduser`` pointed the prompt at a path no tool would ever read (#12260). The value
+    is printed into the model-visible skill message, so it must never see more than a tool does:
+    ``os.path.expandvars`` read the live process env — every ``.env`` credential, and under
+    multiplex the LAUNCH profile's — so a skill default of ``${OPENAI_API_KEY}`` put the key in
+    the prompt. Credentials (and unknown names) now stay literal.
     """
     subprocess_home = get_subprocess_home()
     if subprocess_home:
@@ -740,7 +746,11 @@ def _expand_skill_config_path(value: str) -> str:
         # Callable replacement: a literal template would parse backslashes in the home path
         # as regex escapes.
         value = _HOME_VAR_RE.sub(lambda _m: subprocess_home, value)
-    return os.path.expanduser(os.path.expandvars(value))
+    if "$" in value:
+        from tools.environments.local import hermes_subprocess_env, strip_launch_profile_env
+        env = hermes_subprocess_env(base_env=strip_launch_profile_env(dict(os.environ)))
+        value = _ENV_REF_RE.sub(lambda m: env.get(m.group(1).strip("{}"), m.group(0)), value)
+    return os.path.expanduser(value)
 
 
 def resolve_skill_config_values(config_vars: List[Dict[str, Any]]) -> Dict[str, Any]:
