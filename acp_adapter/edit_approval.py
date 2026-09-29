@@ -34,6 +34,9 @@ class EditProposal:
     # display string for multi-file V4A patches; ``paths`` is the authoritative
     # set for auto-approve checks. Empty means "``path`` alone".
     paths: tuple[str, ...] = ()
+    # The paths as the tool call named them, before task resolution. Sensitivity is
+    # judged on these too: resolving dereferences a ``.env`` / ``.git`` symlink away.
+    named_paths: tuple[str, ...] = ()
 
 
 EditApprovalRequester = Callable[[EditProposal], bool]
@@ -77,23 +80,26 @@ def _task_path(path: str, task_id: str) -> str:
     return str(_resolve_path_for_task(path, task_id))
 
 
-def _required_path(arguments: dict[str, Any], task_id: str) -> str:
+def _required_path(arguments: dict[str, Any]) -> str:
     path = str(arguments.get("path") or "")
     if not path:
         raise ValueError("path required")
-    return _task_path(path, task_id)
+    return path
 
 
 def _proposal_for_write_file(arguments: dict[str, Any], task_id: str) -> EditProposal:
-    path = _required_path(arguments, task_id)
+    named = _required_path(arguments)
+    path = _task_path(named, task_id)
     content = arguments.get("content")
     if content is None:
         raise ValueError("content required")
-    return EditProposal("write_file", path, _read_text_if_exists(path), str(content), dict(arguments))
+    return EditProposal("write_file", path, _read_text_if_exists(path), str(content), dict(arguments),
+                        named_paths=(named,))
 
 
 def _proposal_for_patch_replace(arguments: dict[str, Any], task_id: str) -> EditProposal:
-    path = _required_path(arguments, task_id)
+    named = _required_path(arguments)
+    path = _task_path(named, task_id)
     old_string, new_string = arguments.get("old_string"), arguments.get("new_string")
     if old_string is None or new_string is None:
         raise ValueError("old_string and new_string required")
@@ -107,7 +113,7 @@ def _proposal_for_patch_replace(arguments: dict[str, Any], task_id: str) -> Edit
         old_text, str(old_string), str(new_string), bool(arguments.get("replace_all", False)))
     if error or match_count == 0:
         raise ValueError(error or f"Could not find match for old_string in {path}")
-    return EditProposal("patch", path, old_text, new_text, dict(arguments))
+    return EditProposal("patch", path, old_text, new_text, dict(arguments), named_paths=(named,))
 
 
 def _extract_v4a_patch_paths(patch_body: str) -> list[str]:
@@ -121,7 +127,8 @@ def _proposal_for_patch_v4a(arguments: dict[str, Any], task_id: str) -> EditProp
     patch_body = arguments.get("patch")
     if not isinstance(patch_body, str) or not patch_body:
         raise ValueError("patch content required")
-    paths = [_task_path(p, task_id) for p in _extract_v4a_patch_paths(patch_body)]
+    named = _extract_v4a_patch_paths(patch_body)
+    paths = [_task_path(p, task_id) for p in named]
     if not paths:
         raise ValueError("no file paths found in V4A patch")
     single = len(paths) == 1
@@ -130,7 +137,7 @@ def _proposal_for_patch_v4a(arguments: dict[str, Any], task_id: str) -> EditProp
     return EditProposal(
         "patch", paths[0] if single else ", ".join(paths),
         _read_text_if_exists(paths[0]) if single else None, patch_body, dict(arguments),
-        tuple(paths),
+        tuple(paths), tuple(named),
     )
 
 
@@ -162,7 +169,8 @@ def should_auto_approve_edit(proposal: EditProposal, policy: str, cwd: str | Non
     # Multi-file V4A proposals join paths into one display string; the checks
     # must run per real target or a sensitive/escaped file hides in the join.
     paths = proposal.paths or (proposal.path,)
-    if policy == AUTO_APPROVE_ASK or any(_is_sensitive_auto_approve_path(p) for p in paths):
+    if policy == AUTO_APPROVE_ASK or any(
+            _is_sensitive_auto_approve_path(p) for p in (*paths, *proposal.named_paths)):
         return False
     resolved = [Path(p).expanduser().resolve(strict=False) for p in paths]
     if policy == AUTO_APPROVE_SESSION:

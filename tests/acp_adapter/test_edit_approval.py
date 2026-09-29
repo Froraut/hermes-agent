@@ -6,6 +6,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from acp_adapter.edit_approval import (
     EditProposal,
     build_acp_edit_tool_call,
@@ -201,3 +203,31 @@ def test_relative_edit_is_approved_against_the_file_the_tool_edits(tmp_path, mon
     assert [Path(p.path) for p in seen] == [target.resolve()]
     assert seen[0].old_text == "const x = 1;\n"
     assert target.read_text(encoding="utf-8") == seen[0].new_text == "const x = 2;\n"
+
+
+@pytest.mark.platforms("posix")
+def test_sensitive_name_behind_a_symlink_still_needs_approval(tmp_path):
+    """Task resolution dereferences a ``.env`` / ``.git`` symlink (POSIX ``resolve()``); the
+    name the edit targets must still keep that file out of autonomous auto-approval."""
+    from tools.terminal_tool import clear_task_env_overrides, record_session_cwd
+
+    (tmp_path / "secrets.txt").write_text("API_KEY=1\n", encoding="utf-8")
+    (tmp_path / ".env").symlink_to("secrets.txt")
+    gitdir = tmp_path / "gitdir"
+    gitdir.mkdir()
+    (gitdir / "config").write_text("[core]\n", encoding="utf-8")
+    (tmp_path / ".git").symlink_to(gitdir)
+    task_id = "acp-edit-sensitive-symlink"
+    record_session_cwd(task_id, str(tmp_path))
+    try:
+        proposals = [
+            build_edit_proposal("write_file", {"path": ".env", "content": "API_KEY=2\n"}, task_id),
+            build_edit_proposal("write_file", {"path": ".git/config", "content": "[core]\n"}, task_id),
+            build_edit_proposal("patch", {"mode": "patch", "patch": "*** Update File: .env\n@@\n+X=1\n"}, task_id),
+        ]
+    finally:
+        clear_task_env_overrides(task_id)
+
+    for proposal in proposals:
+        assert not should_auto_approve_edit(proposal, "session", str(tmp_path)), proposal.path
+        assert not should_auto_approve_edit(proposal, "workspace_session", str(tmp_path)), proposal.path
