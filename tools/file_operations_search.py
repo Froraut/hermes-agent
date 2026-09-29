@@ -109,12 +109,17 @@ _ADMISSION_INTERRUPTED_ERROR = (
     "search on the same root. Retry when ready.")
 
 _SEARCH_TIMEOUT_MARKER_RE = re.compile(r"\n?\[Command timed out after \d+s\]\s*$")
+# Exit 130: "[Command interrupted]" (shell executor, native rg lane) or "[Command interrupted - ...]".
+_SEARCH_INTERRUPT_MARKER_RE = re.compile(r"\n?\[Command interrupted\b[^\n]*\]\s*$")
 
 
 def _search_stdout_and_limit(result: ExecuteResult) -> tuple[str, Optional[str]]:
-    """Return stdout cleaned for parsing and a limit reason for search timeouts."""
+    """Return stdout cleaned for parsing — the executor's timeout/interrupt marker line is not
+    engine output — and a limit reason for search timeouts."""
     if result.exit_code == 124:
         return _SEARCH_TIMEOUT_MARKER_RE.sub("", result.stdout), "search_timeout"
+    if result.exit_code == 130:
+        return _SEARCH_INTERRUPT_MARKER_RE.sub("", result.stdout), None
     return result.stdout, None
 
 
@@ -124,22 +129,30 @@ def _search_stdout_and_limit(result: ExecuteResult) -> tuple[str, Optional[str]]
 _SEARCH_OUTPUT_RE = re.compile(r'^([A-Za-z]:)?[^\s:][^\n]*?[:\-]\d|^[^\s:][^\s]*$')
 
 
-def _split_tool_diagnostics(output: str, by_shape: bool = True) -> tuple[str, str]:
+def _split_tool_diagnostics(output: str, paths_only: bool = False) -> tuple[str, str]:
     """Separate rg/grep diagnostic lines from real match output → ``(diagnostics, payload)``.
     ``_exec`` merges stderr into stdout; classifying by SHAPE lets the exit-2 guard
     tell a pure failure (no payload) from a partial one (one unreadable file, others
-    matched) and guarantees error text is never parsed as a match. ``by_shape=False``
-    keeps every unprefixed line: a files_only line is a bare path, which may hold spaces
-    the shape test would reject."""
+    matched) and guarantees error text is never parsed as a match. The engine's own
+    diagnostic shape is an ``rg: ``/``grep: `` line; followed by an indented or blank line
+    it heads a fatal multi-line error (regex parse error, caret, help prose), after which
+    rg exits, so the rest of the output is that error. ``paths_only`` (files_only output)
+    keeps every other line: a bare path may hold spaces ("My Project/app.py") the match
+    shape would reject."""
     diagnostics: list[str] = []
     payload: list[str] = []
-    for line in output.split('\n'):
+    lines = output.rstrip('\n').split('\n')
+    for i, line in enumerate(lines):
         if not line.strip():
             continue
         # Prefix check first: a match path can contain "-<digit>" (".../pytest-686/...").
         if line.lstrip().startswith(("rg: ", "grep: ")):
+            following = lines[i + 1] if i + 1 < len(lines) else None
+            if following is not None and (not following.strip() or following[:1].isspace()):
+                diagnostics.extend(ln for ln in lines[i:] if ln.strip())
+                break
             diagnostics.append(line)
-        elif not by_shape or line == "--" or _SEARCH_OUTPUT_RE.match(line):
+        elif paths_only or line == "--" or _SEARCH_OUTPUT_RE.match(line):
             payload.append(line)
         else:
             diagnostics.append(line)
@@ -205,11 +218,7 @@ def _parse_search_output(result, output_mode: str, limit: int, offset: int,
     errors (one unreadable file), so an error is surfaced only when exit==2 AND no
     usable payload remains. ``warning`` is attached to files_only/content results."""
     stdout, limit_reason = _search_stdout_and_limit(result)
-    # files_only lines are bare paths ("My Project/app.py"), which the shape test cannot tell from
-    # diagnostic prose: shape-filter them only when the tool reported an error (exit 2) — on
-    # success every unprefixed line is a path, and dropping the spaced ones lost real matches.
-    diagnostics, payload = _split_tool_diagnostics(
-        stdout, by_shape=output_mode != "files_only" or result.exit_code == 2)
+    diagnostics, payload = _split_tool_diagnostics(stdout, paths_only=output_mode == "files_only")
     if result.exit_code == 2 and not payload.strip():
         error_msg = diagnostics.strip() or result.stdout.strip() or "Search error"
         return SearchResult(error=f"Search failed: {error_msg}", total_count=0)
