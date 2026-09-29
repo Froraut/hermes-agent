@@ -5,6 +5,7 @@ import hmac
 import json
 import re
 import secrets
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -24,15 +25,27 @@ def _subscriptions_path() -> Path:
     return get_hermes_home() / _SUBSCRIPTIONS_FILENAME
 
 
+class WebhookSubscriptionsError(ValueError):
+    """The subscriptions store exists but cannot be read as a JSON object."""
+
+
 def _load_subscriptions() -> Dict[str, dict]:
+    """Routes by name; {} only when the store does not exist. An unreadable store raises: read as
+    empty, the next subscribe/create would write it back holding only the new route — every other
+    route and its HMAC secret gone (the docs send users into this file to add ``toolsets``)."""
     path = _subscriptions_path()
     if not path.exists():
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    except (OSError, ValueError) as exc:  # JSONDecodeError / UnicodeDecodeError are ValueErrors
+        data = exc
+    if not isinstance(data, dict):
+        reason = data if isinstance(data, Exception) else f"top level is {type(data).__name__}, not an object"
+        raise WebhookSubscriptionsError(
+            f"{display_hermes_home()}/{_SUBSCRIPTIONS_FILENAME} is not a valid subscriptions file "
+            f"({reason}); fix it or move it aside — refusing to overwrite it")
+    return data
 
 
 def _save_subscriptions(subs: Dict[str, dict]) -> None:
@@ -107,7 +120,11 @@ def webhook_command(args):
         return
     handler = _ACTIONS.get(sub)
     if handler is not None:
-        handler(args)
+        try:
+            handler(args)
+        except WebhookSubscriptionsError as exc:
+            print(f"Error: {exc}")
+            sys.exit(1)
 
 
 def _cmd_subscribe(args):

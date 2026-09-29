@@ -138,11 +138,21 @@ class TestRemove:
 
 class TestPersistence:
 
-    def test_corrupted_file(self):
+    @pytest.mark.parametrize("content", ['{"a": {"secret": "s"},}', "broken{{{", "[]"])
+    def test_subscribe_refuses_to_overwrite_an_unreadable_store(self, capsys, content):
+        """Only a MISSING store is empty. An unreadable one (a typo from the documented hand edit
+        for ``toolsets``) must not be read as {} and written back holding just the new route —
+        that silently destroys every other route and its HMAC secret."""
         path = _subscriptions_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("broken{{{")
-        assert _load_subscriptions() == {}
+        path.write_text(content, encoding="utf-8")
+
+        with pytest.raises(SystemExit) as exc:
+            webhook_command(_make_args(webhook_action="subscribe", name="new-hook"))
+
+        assert exc.value.code != 0
+        assert path.read_text(encoding="utf-8") == content
+        assert "webhook_subscriptions.json" in capsys.readouterr().out
 
     @pytest.mark.platforms("posix")  # POSIX mode bits are platform-specific
     def test_save_creates_secret_file_owner_only_under_permissive_umask(self):
