@@ -93,6 +93,21 @@ class TestSubdirectoryHintTracker:
         tracker = SubdirectoryHintTracker(working_dir=str(project))
         assert tracker.check_tool_call("terminal", {"command": command}) is None
 
+    @pytest.mark.parametrize("tool, args", [
+        ("terminal", {"command": "cd packages/chart.js && npm test"}),
+        ("terminal", {"command": "ls", "workdir": "packages/chart.js"}),
+        ("search_files", {"pattern": "render", "path": "packages/chart.js"}),
+    ])
+    def test_directory_with_a_dot_in_its_name_is_a_directory(self, project, tool, args):
+        """An existing `chart.js` / `api.v2` directory must load its own hint file, not be
+        mistaken for a file whose parent is visited instead."""
+        dotted = project / "packages" / "chart.js"
+        dotted.mkdir(parents=True)
+        (dotted / "AGENTS.md").write_text("Chart package rules", encoding="utf-8")
+        tracker = SubdirectoryHintTracker(working_dir=str(project))
+        result = tracker.check_tool_call(tool, args)
+        assert result is not None and "Chart package rules" in result
+
     def test_relative_path(self, project):
         """Relative paths resolved against working_dir."""
         tracker = SubdirectoryHintTracker(working_dir=str(project))

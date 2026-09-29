@@ -161,7 +161,9 @@ class SubdirectoryHintTracker:
             if not p.is_absolute():
                 p = self.working_dir / p
             p = p.resolve()
-            if p.suffix or (p.exists() and p.is_file()):
+            # The filesystem outranks the name: `packages/chart.js` or `api.v2` is a directory.
+            # A suffix only implies a file when nothing exists there yet (a write target).
+            if not p.is_dir() and (p.suffix or p.is_file()):
                 p = p.parent
             for _ in range(_MAX_ANCESTOR_WALK):
                 if p in self._loaded_dirs:
