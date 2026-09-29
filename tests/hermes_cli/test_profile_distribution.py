@@ -977,3 +977,23 @@ class TestManifestCrashDurability:
 
         mode = stat.S_IMODE(mf.stat().st_mode)
         assert mode == 0o644, f"new manifest created as {oct(mode)}"
+
+
+def test_imported_and_installed_profiles_never_inherit_the_default_env_on_update(profile_env, tmp_path):
+    """``hermes update`` backfills a ``.env`` into profiles that have none by copying the DEFAULT
+    profile's (legacy pre-#44792 profiles). Import and distribution install are fresh profiles:
+    they must own a ``.env`` from day one, or that backfill hands them the default's bot tokens,
+    allow-all policy and API keys."""
+    from hermes_cli.profiles import backfill_profile_envs, create_profile, export_profile, import_profile
+
+    (profile_env / ".hermes" / ".env").write_text("TELEGRAM_BOT_TOKEN=123:default-bot\n", encoding="utf-8")
+    install_distribution(str(_make_staging_dir(profile_env, "src")), name="installed")
+    create_profile("source")
+    archive = export_profile("source", str(tmp_path / "source.tar.gz"))
+    import_profile(str(archive), name="imported")
+
+    backfill_profile_envs(quiet=True)
+
+    for name in ("installed", "imported"):
+        env = profile_env / ".hermes" / "profiles" / name / ".env"
+        assert env.is_file() and "default-bot" not in env.read_text(encoding="utf-8"), name

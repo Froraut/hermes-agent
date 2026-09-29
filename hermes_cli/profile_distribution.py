@@ -554,10 +554,14 @@ def _copy_dist_payload(staged: Path, target: Path, manifest: DistributionManifes
 
 
 def _bootstrap_user_dirs(target: Path) -> None:
-    """Create the bootstrap dirs a fresh profile expects (same set as ``create_profile``)."""
-    from hermes_cli.profiles import _PROFILE_DIRS
+    """Create the bootstrap dirs and placeholder ``.env`` a fresh profile expects (as
+    ``create_profile``). A profile without a ``.env`` is taken for a pre-#44792 one by
+    ``backfill_profile_envs``, which the next ``hermes update`` fills with a copy of the DEFAULT
+    profile's ``.env`` — its bot tokens and allow-all policy in a third-party distribution."""
+    from hermes_cli.profiles import _PLACEHOLDER_ENV, _PROFILE_DIRS, _seed_file_if_missing
     for d in _PROFILE_DIRS:
         (target / d).mkdir(parents=True, exist_ok=True)
+    _seed_file_if_missing(target / ".env", _PLACEHOLDER_ENV, 0o600)
 
 
 def install_distribution(

@@ -2250,6 +2250,9 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
                 else:
                     child.unlink()
         drop_profile_role(final_source)
+        # Exports strip .env; own one from day one (as create_profile does), or the next `hermes
+        # update` backfill takes this for a pre-#44792 profile and copies the DEFAULT's .env in.
+        _seed_file_if_missing(final_source / ".env", _PLACEHOLDER_ENV, 0o600)
         shutil.move(str(final_source), str(profile_dir))
     return profile_dir
 
