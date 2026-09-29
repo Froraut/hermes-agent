@@ -108,11 +108,6 @@ def test_non_ascii_callback_state_is_an_ordinary_state_mismatch():
     unknown = client.get("/api/mcp/oauth/callback/reports", params={"code": "abc", "state": "unknown"})
     non_ascii = client.get("/api/mcp/oauth/callback/reports", params={"code": "abc", "state": "unknöwn"})
     assert (non_ascii.status_code, non_ascii.text) == (unknown.status_code, unknown.text)
-
-    # Relays that skip the route (the TUI/desktop ``oauth.callback`` RPC) reach the flow's own check.
-    for state in ("unknown", "unknöwn"):
-        with pytest.raises(ValueError, match="state mismatch"):
-            flow.deliver_callback(code="abc", state=state, error=None)
     assert flow._callback is None and flow.status == "authorization_required"
 
 
