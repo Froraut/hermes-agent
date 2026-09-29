@@ -38,18 +38,27 @@ _started = False
 
 
 def note_emit(sid: str) -> None:
-    """Record an event frame for ``sid`` (``server._emit`` calls this after every successful write)."""
+    """Record a frame delivered to ``sid``'s client (``server.write_json`` calls this after every write it
+    routes to the session's transport: ``_emit`` events, relayed compute-host frames, server→client requests)."""
     if sid:
         with _lock:
             _last_emit[sid] = time.monotonic()
 
 
 def _activity(session: dict) -> dict:
-    """The local agent's own last-activity label and its age; empty when the turn runs elsewhere."""
+    """What the turn last did and how long ago. A local turn reports its agent's own ``_touch_activity`` label
+    and age. A turn isolated in a compute host reports only the age of the activity stamp the host mirrors
+    (``_compute_host_activity_ns``, the clock the ws-orphan reaper reads): the label stays in the child, and the
+    parent's local agent is not the one running the turn, so its stamp would be stale."""
+    out: dict = {}
+    if session.get("_compute_host_turn_id"):
+        stamp = session.get("_compute_host_activity_ns")
+        if isinstance(stamp, int) and not isinstance(stamp, bool) and stamp > 0:
+            out["activity_age_s"] = round(max(0.0, (time.perf_counter_ns() - stamp) / 1_000_000_000), 1)
+        return out
     agent = session.get("agent")
     desc = getattr(agent, "_last_activity_desc", None)
     stamped = getattr(agent, "_last_activity_ts", None)
-    out: dict = {}
     if isinstance(desc, str) and desc.strip():
         out["activity"] = desc.strip()[:_ACTIVITY_MAX_CHARS]
     if isinstance(stamped, (int, float)) and not isinstance(stamped, bool) and stamped > 0:
@@ -65,11 +74,15 @@ def tick(now: float | None = None) -> int:
         return 0
     now = time.monotonic() if now is None else now
     with server._sessions_lock:
-        snapshot = [(sid, s) for sid, s in server._sessions.items()
-                    if s.get("transport") is not None and not s.get("_finalized")]
+        snapshot = [(sid, s) for sid, s in server._sessions.items() if not s.get("_finalized")]
     running: list[tuple[str, dict, str]] = []
     for sid, session in snapshot:
         try:
+            # Only a client that can hear it. A detached window's session keeps running on the parked drop sink
+            # (``_detached_ws_transport``), which is not None but swallows every write; a closed socket and the
+            # stdio fallback do not count either.
+            if not server._session_has_live_transport(session):
+                continue
             status = server._session_live_status(sid, session)
         except Exception:
             logger.debug("turn.alive: live status failed for %s", sid, exc_info=True)
@@ -86,6 +99,9 @@ def tick(now: float | None = None) -> int:
             # A turn first seen here counts its quiet from now, not from an event before it started.
             quiet = now - _last_emit.setdefault(sid, now)
             if quiet >= TURN_ALIVE_INTERVAL_S:
+                # Stamp the attempt, not only a delivered frame: a write the peer drops is retried once per
+                # interval instead of on every tick.
+                _last_emit[sid] = now
                 due.append((sid, session, status, quiet))
     sent = 0
     for sid, session, status, quiet in due:

@@ -8,12 +8,13 @@ from tui_gateway import event_replay, server, turn_alive
 
 
 class _Transport:
-    def __init__(self):
+    def __init__(self, delivers=True):
         self.frames = []
+        self.delivers = delivers
 
     def write(self, obj):
         self.frames.append(obj)
-        return True
+        return self.delivers
 
     def alive(self):
         return [f["params"] for f in self.frames if f.get("params", {}).get("type") == turn_alive.EVENT]
@@ -83,15 +84,65 @@ def test_any_other_event_for_the_session_defers_it(sessions, monkeypatch):
 
 
 def test_idle_waiting_detached_and_finalized_sessions_get_nothing(sessions, monkeypatch):
+    closed = _Transport()
+    closed._closed = True
     sessions["idle"] = _session(running=False)
     sessions["waiting"] = _session()
-    sessions["detached"] = {"transport": None, "running": True}
+    # A closed window's turn keeps running on the parked drop sink, which is not None.
+    sessions["detached"] = {"transport": server._detached_ws_transport, "running": True}
+    sessions["closed"] = {"transport": closed, "running": True}
+    sessions["no-transport"] = {"transport": None, "running": True}
     sessions["finalized"] = _session(_finalized=True)
     monkeypatch.setattr(server, "_session_pending_kind", lambda sid: "approval.request" if sid == "waiting" else "")
+    emitted = []
+    monkeypatch.setattr(server, "_emit", lambda event, sid, payload=None: emitted.append(sid) or True)
+
+    for n in range(9):  # 40 s of ticks
+        turn_alive.tick(n * turn_alive._TICK_S)
+
+    assert emitted == []  # not even attempted: nobody could hear the frame
+    assert turn_alive._last_emit == {}
+
+
+def test_a_frame_the_peer_drops_is_retried_once_per_interval(sessions):
+    sessions["s1"] = {"transport": _Transport(delivers=False), "running": True}
+    interval = turn_alive.TURN_ALIVE_INTERVAL_S
 
     turn_alive.tick(0.0)
+    assert turn_alive.tick(interval) == 0  # attempted, not delivered
+    for n in range(1, 3):  # the next ticks inside the interval do not retry
+        assert turn_alive.tick(interval + n * turn_alive._TICK_S) == 0
+    turn_alive.tick(2 * interval)
 
-    assert turn_alive.tick(turn_alive.TURN_ALIVE_INTERVAL_S * 4) == 0
+    assert len(sessions["s1"]["transport"].alive()) == 2
+
+
+def test_a_relayed_compute_host_frame_defers_it(sessions, monkeypatch):
+    # An isolated turn's events reach the client through the relay, which writes them without _emit.
+    sessions["s1"] = _session(_compute_host_turn_id="t1")
+    clock = [4000.0]
+    monkeypatch.setattr(turn_alive.time, "monotonic", lambda: clock[0])
+
+    turn_alive.tick()
+    clock[0] += turn_alive.TURN_ALIVE_INTERVAL_S - 1
+    assert server._relay_compute_host_rpc({"jsonrpc": "2.0", "method": "event", "params": {
+        "type": "message.delta", "session_id": "s1", "payload": {"text": "streaming"}}}) is True
+    clock[0] += 1
+
+    assert turn_alive.tick() == 0
+    assert sessions["s1"]["transport"].alive() == []
+
+
+def test_an_isolated_turn_reports_the_hosts_activity_not_the_local_agents(sessions):
+    sessions["s1"] = _session(agent=_Agent(age_s=900), _compute_host_turn_id="t1",
+                              _compute_host_activity_ns=time.perf_counter_ns() - 7_000_000_000)
+
+    turn_alive.tick(0.0)
+    turn_alive.tick(turn_alive.TURN_ALIVE_INTERVAL_S)
+
+    payload = sessions["s1"]["transport"].alive()[0]["payload"]
+    assert "activity" not in payload  # the label stays in the host process
+    assert 6 <= payload["activity_age_s"] <= 9
 
 
 def test_an_agent_build_counts_as_running(sessions):
