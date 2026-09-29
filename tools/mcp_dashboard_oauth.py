@@ -115,8 +115,9 @@ class DashboardOAuthFlow:
         with self._lock:
             if self._callback_ready.is_set():
                 raise ValueError("OAuth callback already received")
-            # Compare as bytes: compare_digest raises TypeError on non-ASCII str, and ``state`` is callback input.
-            if (self.expected_state is None or state is None
+            # ``state`` is remote input (redirect, or relay JSON that may carry lone surrogates); OAuth states
+            # are ASCII, so non-ASCII is a mismatch before compare_digest (TypeError) or .encode() can raise.
+            if (self.expected_state is None or state is None or not state.isascii()
                     or not secrets.compare_digest(self.expected_state.encode(), state.encode())):
                 raise ValueError("OAuth callback state mismatch")
             if error:
