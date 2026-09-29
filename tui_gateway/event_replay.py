@@ -6,9 +6,11 @@ with its last seen seq and gets everything newer. Invariants: stdio TUI unaffect
 event frames; Ink ignores unknown keys); one lock guards counters + buffers, and write_json already
 serializes per-transport writes so stamping cannot reorder frames; memory bound =
 _REPLAY_BUFFER_MAX events AND _REPLAY_BUFFER_BYTES_MAX serialized bytes per session,
-_REPLAY_PROCESS_BYTES_MAX bytes across at most _REPLAY_SESSIONS_MAX sessions, oldest evicted
-FIFO. Evicted or never-retained (oversized) frames leave a truncation watermark so a
-reconnecting client refetches instead of trusting a replay with holes.
+_REPLAY_PROCESS_BYTES_MAX bytes across at most _REPLAY_SESSIONS_MAX sessions, the least recently
+active evicted first. Evicted or never-retained (oversized) frames leave a truncation watermark so a
+reconnecting client refetches instead of trusting a replay with holes. A session's seq counter and
+watermark (two ints) outlive its ring for the process lifetime: an evicted session that is still
+live continues its numbering, so a client's high watermark never meets a restarted seq=1.
 """
 
 from __future__ import annotations
@@ -72,10 +74,12 @@ def _stamp_event(obj: dict) -> None:
             buf = _replay_buffers[sid] = deque()
             _replay_buffer_bytes[sid] = 0
             while len(_replay_buffers) > _REPLAY_SESSIONS_MAX:
-                oldest_sid, oldest_buf = _replay_buffers.popitem(last=False)
-                _replay_total_bytes -= _replay_buffer_bytes.pop(oldest_sid, 0)
-                _replay_next_seq.pop(oldest_sid, None)
-                _replay_evicted_through.pop(oldest_sid, None)
+                idle_sid, _idle_buf = _replay_buffers.popitem(last=False)
+                _replay_total_bytes -= _replay_buffer_bytes.pop(idle_sid, 0)
+                # Everything it ever stamped is gone: a reconnect below this refetches.
+                _replay_evicted_through[idle_sid] = _replay_next_seq[idle_sid]
+        else:
+            _replay_buffers.move_to_end(sid)
         if size > _REPLAY_BUFFER_BYTES_MAX or size > _REPLAY_PROCESS_BYTES_MAX:
             _replay_evicted_through[sid] = seq
             return
