@@ -1054,17 +1054,15 @@ export function LocalFilePreview({
       // agent edit, an external save), don't clobber it silently — surface the
       // choice. `force` is the user picking "overwrite" from that banner.
       if (!force) {
-        try {
-          const current = await readTextPreview(filePath)
+        // A failed or partial read cannot establish that the file is unchanged.
+        // Keep the draft open on read errors; only explicit overwrite may bypass
+        // a changed/binary/truncated result.
+        const current = await readTextPreview(filePath)
 
-          if (!current.binary && (current.text ?? '') !== baselineRef.current) {
-            setConflict(true)
-            setSaving(false)
+        if (current.binary || current.truncated || (current.text ?? '') !== baselineRef.current) {
+          setConflict(true)
 
-            return
-          }
-        } catch {
-          // Couldn't re-read for the check — fall through and attempt the write.
+          return
         }
       }
 
