@@ -83,6 +83,23 @@ class TestSessionInfoReasoningEffort:
         })
         assert info["reasoning_effort"] == info["reasoning_effort_wire"] == "ultra"
 
+    def test_ultra_pending_choice_wins_over_stale_compute_host_snapshot(self) -> None:
+        session = {
+            "_compute_host_active": True,
+            "create_reasoning_override": {"enabled": True, "effort": "ultra"},
+            "_metadata_mirror": {
+                "provider": "openai-codex", "model": "gpt-6-sol",
+                "reasoning_effort": "high", "reasoning_effort_wire": "high",
+            },
+        }
+        pending = _session_info(None, session)
+        assert pending["reasoning_effort"] == "ultra"
+        assert pending["reasoning_effort_wire"] == ""
+
+        session["_metadata_mirror"].update(reasoning_effort="ultra", reasoning_effort_wire="ultra")
+        confirmed = _session_info(None, session)
+        assert confirmed["reasoning_effort"] == confirmed["reasoning_effort_wire"] == "ultra"
+
 
 class TestConfigSetReasoningSessionScope:
     """Session-targeted reasoning changes must not touch global config."""
