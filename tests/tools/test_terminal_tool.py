@@ -122,3 +122,14 @@ def test_sudo_rewrite_preserves_env_operands_and_prose(monkeypatch):
 def test_count_real_sudo_invocations_ignores_mentions(monkeypatch):
     assert terminal_tool_sudo._count_real_sudo_invocations("grep sudo README.md") == 0
     assert terminal_tool_sudo._count_real_sudo_invocations("sudo a; sudo b") == 2
+
+
+def test_sudo_inside_a_heredoc_body_is_data(monkeypatch):
+    """A script written through a heredoc keeps its ``sudo`` lines, and only the live sudo
+    after it gets ``-S`` and a password line."""
+    monkeypatch.setenv("SUDO_PASSWORD", "testpass")
+    script = "cat > setup.sh <<'EOF'\nsudo apt-get install -y jq\nEOF\n"
+
+    assert terminal_tool_sudo._transform_sudo_command(script) == (script, None)
+    assert terminal_tool_sudo._transform_sudo_command(script + "sudo true") == (
+        script + "sudo -S -p '' true", "testpass\n")
