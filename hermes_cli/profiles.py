@@ -243,10 +243,21 @@ def _wrapper_path(alias: str) -> Path:
     return _get_wrapper_dir() / (f"{alias}.bat" if sys.platform == "win32" else alias)
 
 
+# ``hermes -p <profile>`` in a wrapper we wrote. The POSIX wrapper execs the shlex-quoted hermes
+# path, so an install path with a space or apostrophe ends the executable with a closing quote.
+_WRAPPER_PROFILE_RE = re.compile(r"hermes'? -p\s+(\S+)")
+
+
+def _wrapper_profile(content: str) -> Optional[str]:
+    """Profile a Hermes-generated wrapper activates, or None when *content* is not one."""
+    m = _WRAPPER_PROFILE_RE.search(content)
+    return m.group(1) if m else None
+
+
 def _is_our_wrapper(path: Path) -> bool:
-    """True when *path* reads as a Hermes-generated wrapper (contains ``hermes -p``)."""
+    """True when *path* reads as a Hermes-generated wrapper (``hermes -p <profile>``)."""
     try:
-        return "hermes -p" in path.read_text(encoding="utf-8-sig")
+        return _wrapper_profile(path.read_text(encoding="utf-8-sig")) is not None
     except Exception:
         return False
 
@@ -547,7 +558,6 @@ def build_alias_map() -> dict[str, str]:
     if not wrapper_dir.is_dir():
         return result
     is_windows = sys.platform == "win32"
-    prefix = "hermes -p "
     for entry in sorted(wrapper_dir.iterdir()):
         if not entry.is_file():
             continue
@@ -561,12 +571,7 @@ def build_alias_map() -> dict[str, str]:
                 content = f.read(_WRAPPER_READ_LIMIT)
         except (OSError, UnicodeDecodeError):
             continue  # UnicodeDecodeError = a binary on PATH, not a wrapper
-        idx = content.find(prefix)
-        if idx == -1:
-            continue
-        rest = content[idx + len(prefix):]
-        # Profile id is the first whitespace-delimited token after the flag.
-        canon = rest.split(None, 1)[0].strip() if rest.strip() else ""
+        canon = _wrapper_profile(content)
         if not canon:
             continue
         canon = normalize_profile_name(canon)
