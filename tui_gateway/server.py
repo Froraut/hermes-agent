@@ -677,9 +677,13 @@ def _event_frame(event: str, sid: str, payload: dict | None = None) -> dict:
 
 def _emit(event: str, sid: str, payload: dict | None = None) -> bool:
     from agent.notification_presentation import event_presentation_muted
+    from tui_gateway import turn_alive
     if event_presentation_muted(event, sid):
         return False
-    return write_json(_event_frame(event, sid, payload))
+    written = write_json(_event_frame(event, sid, payload))
+    if written and sid:
+        turn_alive.note_emit(sid)  # a session with fresh events needs no turn.alive
+    return written
 
 
 from tui_gateway import server_requests as _server_requests  # noqa: E402
