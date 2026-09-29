@@ -134,3 +134,34 @@ class TestExportSecretScrub:
         assert _LEAKED_KEY not in archived
         assert _LEAKED_KEY in outside.read_text()
         assert link.is_symlink()
+
+
+def test_named_profile_export_drops_every_credential_store(tmp_path, monkeypatch):
+    """An export is shareable, so no credential store may ride along: everything the file tools
+    read-deny as credentials (agent.file_safety), plus config backups (byte-exact config.yaml
+    copies whose timestamp suffix escapes the redact pass) and the 1Password token. A skill's own
+    ``backups/`` folder is user data and stays."""
+    from agent.file_safety import _CREDENTIAL_FILE_NAMES, _READ_DENIED_DIRS
+
+    profiles_root = tmp_path / "profiles"
+    profile_dir = profiles_root / "work"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "config.yaml").write_text("model: gpt-4\n", encoding="utf-8")
+    stores = [*_CREDENTIAL_FILE_NAMES, *(f"{d}/secret.bin" for d, *_ in _READ_DENIED_DIRS),
+              "backups/config/config.yaml.good.20260929-083132", ".op.env"]
+    for rel in stores:
+        path = profile_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"api_key: {_LEAKED_KEY}\n", encoding="utf-8")
+    (profile_dir / "skills" / "demo" / "backups").mkdir(parents=True)
+    (profile_dir / "skills" / "demo" / "backups" / "notes.md").write_text("keep\n", encoding="utf-8")
+    _patch_named_profile(monkeypatch, profiles_root, profile_dir)
+
+    result = export_profile("work", str(tmp_path / "work.tar.gz"))
+
+    with tarfile.open(result, "r:gz") as tf:
+        names = {n.split("/", 1)[1] for n in tf.getnames() if "/" in n}
+        payload = b"".join(tf.extractfile(m).read() for m in tf.getmembers() if m.isfile())
+    assert not [rel for rel in stores if rel.replace("\\", "/") in names], names
+    assert _LEAKED_KEY.encode() not in payload
+    assert "config.yaml" in names and "skills/demo/backups/notes.md" in names
