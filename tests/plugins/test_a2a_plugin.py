@@ -161,6 +161,17 @@ class TestPeerIdentity:
         assert security.A2ASecurityContext.capture().authenticate("Bearer tok-c", "1.1.1.1") == "carol"
         assert security.A2ASecurityContext.capture().authenticate("Bearer shared-tok", "1.1.1.1") == "ip:1.1.1.1"
 
+    def test_non_ascii_credentials_are_rejected_not_raised(self, monkeypatch):
+        """http.server decodes headers as latin-1, so any character can arrive (and a token may be
+        configured with one): a wrong credential is a clean 401 verdict, never an exception."""
+        for peer_tokens in ("carol:tok-c", "dora:tök-d"):
+            monkeypatch.setenv("A2A_BEARER_TOKEN", "shared-tok")
+            monkeypatch.setenv("A2A_PEER_TOKENS", peer_tokens)
+            context = security.A2ASecurityContext.capture()
+            for header in ("Bearer n\xe9", "Bearer \xff\xfe", "Bearer shared-tök", "Bearer wrong"):
+                assert context.authenticate(header, "5.6.7.8") is None, (peer_tokens, header)
+            assert context.authenticate("Bearer shared-tok", "5.6.7.8") == "ip:5.6.7.8"
+
 
 class TestTrustedPeers:
     def test_localhost_trusts_all(self, monkeypatch):
