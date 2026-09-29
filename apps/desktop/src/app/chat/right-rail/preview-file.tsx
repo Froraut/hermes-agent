@@ -1069,11 +1069,19 @@ export function LocalFilePreview({
       // Also guards Overwrite: bypassing a content conflict never authorizes
       // writing the same path on another connection/profile or this device.
       requireEditorOwner()
-      await writeDesktopFileText(filePath, draftRef.current)
-      baselineRef.current = draftRef.current
-      setDirty(false)
+      const savedText = draftRef.current
+      await writeDesktopFileText(filePath, savedText)
+      // The editor stays editable during IPC/remote I/O. Only the submitted
+      // snapshot is now on disk; newer typing must remain an unsaved draft.
+      baselineRef.current = savedText
+      const hasNewerEdits = draftRef.current !== savedText
+      setDirty(hasNewerEdits)
       setConflict(false)
-      setEditing(false)
+
+      if (!hasNewerEdits) {
+        setEditing(false)
+      }
+
       notifyWorkspaceChanged()
       setSelfReload(n => n + 1)
     } catch (error) {
