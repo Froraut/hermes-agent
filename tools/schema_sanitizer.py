@@ -58,23 +58,55 @@ def _rename_property_keys(props: dict, path: str) -> dict[str, str]:
     return renames
 
 
-def unrename_tool_args(params_schema: Any, args: Any) -> Any:
+def _schema_branches(schema: Any, root: Any, refs: tuple = ()):
+    """*schema* plus its ``anyOf``/``oneOf``/``allOf`` branches, local ``$ref`` targets resolved
+    against *root* (a ref already on this path is not followed again, so recursive schemas end)."""
+    if not isinstance(schema, dict):
+        return
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/") and ref not in refs:
+        target = root
+        for part in ref[2:].split("/"):
+            part = part.replace("~1", "/").replace("~0", "~")
+            target = target.get(part) if isinstance(target, dict) else None
+        yield from _schema_branches(target, root, (*refs, ref))
+    yield schema
+    for key in ("anyOf", "oneOf", "allOf"):
+        for branch in schema.get(key) if isinstance(schema.get(key), list) else ():
+            yield from _schema_branches(branch, root, refs)
+
+
+def unrename_tool_args(params_schema: Any, args: Any, _root: Any = None) -> Any:
     """Map sanitized keys in model-emitted args back to wire names. ``params_schema`` is the
-    ORIGINAL registry schema; recurses into objects/array items; unknown keys pass through."""
-    props = params_schema.get("properties") if isinstance(params_schema, dict) else None
-    if not isinstance(props, dict) or not isinstance(args, dict):
+    ORIGINAL registry schema; follows every position ``_sanitize_node`` renames in (object
+    properties, array items, ``additionalProperties``, local ``$ref`` targets, union branches);
+    unknown keys pass through."""
+    root = params_schema if _root is None else _root
+    branches = list(_schema_branches(params_schema, root))
+    if isinstance(args, list):
+        items = next((b["items"] for b in branches if isinstance(b.get("items"), dict)), None)
+        return [unrename_tool_args(items, item, root) for item in args] if items else args
+    if not isinstance(args, dict):
         return args
-    reverse = {v: k for k, v in _rename_property_keys(props, "<unrename>").items()}
+    reverse: dict[str, str] = {}
+    subs: dict[str, Any] = {}
+    extra = None
+    for branch in branches:
+        props = branch.get("properties")
+        if isinstance(props, dict):
+            for orig, renamed in _rename_property_keys(props, "<unrename>").items():
+                reverse.setdefault(renamed, orig)
+            for key, sub in props.items():
+                subs.setdefault(key, sub)
+        if extra is None and isinstance(branch.get("additionalProperties"), dict):
+            extra = branch["additionalProperties"]
+    if not subs and extra is None:
+        return args
     out = {}
     for key, value in args.items():
-        orig = reverse.get(key, key)
-        sub = props.get(orig) if isinstance(props.get(orig), dict) else {}
-        if isinstance(value, dict) and sub:
-            value = unrename_tool_args(sub, value)
-        elif isinstance(value, list) and isinstance(sub.get("items"), dict):
-            value = [unrename_tool_args(sub["items"], item) if isinstance(item, dict) else item
-                     for item in value]
-        out[orig] = value
+        # A renamed key never equals a real key of the same properties dict (_rename_property_keys).
+        orig = key if key in subs else reverse.get(key, key)
+        out[orig] = unrename_tool_args(subs.get(orig, extra), value, root)
     return out
 
 
