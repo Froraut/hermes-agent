@@ -2100,6 +2100,48 @@ describe('useGatewayBoot remote reconnect loop (real hook, fake socket)', () => 
     expect($backendRestartRequest.get()).toBe(before + 1)
   })
 
+  it('a backend exit the supervisor is already respawning offers no Restart that would kill the replacement', async () => {
+    render(<Harness />)
+    await flushAsync()
+    expect($desktopBoot.get().visible).toBe(false)
+
+    // An external `hermes update` SIGTERMed the backend; main's supervisor
+    // claimed the respawn and announced the exit as recovering.
+    FakeWebSocket.mode = 'fail'
+    act(() => FakeWebSocket.instances[0].drop())
+    act(() => backendExit?.({ code: null, signal: 'SIGTERM', recovering: true }))
+
+    expect($notifications.get().find(entry => entry.kind === 'error')).toBeUndefined()
+
+    // The replacement comes up and the reconnect loop re-dials it on its own.
+    FakeWebSocket.mode = 'open'
+    await advanceBackoff()
+
+    expect($gatewayState.get()).toBe('open')
+    expect($notifications.get().find(entry => entry.kind === 'error')).toBeUndefined()
+  })
+
+  it('a backend-stopped toast is retired once the primary socket reopens', async () => {
+    render(<Harness />)
+    await flushAsync()
+
+    FakeWebSocket.mode = 'fail'
+    act(() => FakeWebSocket.instances[0].drop())
+    act(() => backendExit?.({ code: 1, signal: null }))
+    act(() => backendExit?.({ code: 1, signal: null }))
+
+    // Repeated exits replace one sticky toast instead of stacking them.
+    expect($notifications.get().filter(entry => entry.kind === 'error')).toHaveLength(1)
+
+    // A backend is reachable again, so "Restart Hermes" would now recycle a
+    // healthy one.
+    FakeWebSocket.mode = 'open'
+    await advanceBackoff()
+
+    expect($gatewayState.get()).toBe('open')
+    expect($notifications.get().find(entry => entry.kind === 'error')).toBeUndefined()
+  })
+
   it('seeds the configured default project dir pre-connect — no route-resume race (#71873)', async () => {
     // The reporter's scenario: a configured default project dir must be applied
     // at boot regardless of route-resume timing. The seed now runs BEFORE the
