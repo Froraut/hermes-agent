@@ -119,8 +119,10 @@ def _worker_memory_max_bytes() -> int:
     The proposed local-memory-guard environment override is honored when it tightens the safe bound, so this
     isolation composes with PR #57121 instead of inventing a second knob.
     """
+    from tools.terminal_scope import terminal_env
+
     override_bound: Optional[int] = None
-    override = os.getenv("TERMINAL_LOCAL_MEMORY_MAX_MB", "").strip()
+    override = terminal_env("TERMINAL_LOCAL_MEMORY_MAX_MB").strip()
     if override:
         try:
             parsed = int(override) * 1024 * 1024
@@ -2149,9 +2151,11 @@ class ProcessRegistry(ProcessCheckpointMixin):
         ``timeout`` defaults to (and is clamped by) TERMINAL_TIMEOUT. Returns a dict
         with status exited|timeout|interrupted|not_found|error and an output snapshot."""
         from tools.interrupt import consume_yield as _consume_yield, is_interrupted as _is_interrupted
+        from tools.terminal_scope import terminal_env
 
         try:
-            max_timeout = int(os.getenv("TERMINAL_TIMEOUT", "180"))
+            # The routed profile's terminal.timeout: os.environ holds the launch profile's.
+            max_timeout = int(terminal_env("TERMINAL_TIMEOUT", "180"))
         except (ValueError, TypeError):
             max_timeout = 180
         # The schema says minimum=1 but not every caller enforces it; timeout=0 is

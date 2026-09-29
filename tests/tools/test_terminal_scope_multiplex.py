@@ -302,3 +302,43 @@ def test_launch_turn_binds_terminal_scope_once_multiplexing_is_active(
     finally:
         reset_terminal_scope(token)
     assert get_terminal_scope() is None
+
+
+def test_sandbox_roots_wait_limit_and_memory_cap_follow_the_routed_profile(tmp_path, monkeypatch):
+    """terminal.sandbox_dir, terminal.timeout, TERMINAL_SCRATCH_DIR and
+    TERMINAL_LOCAL_MEMORY_MAX_MB resolve from the routed profile, A -> B -> A,
+    never from the launch profile's values bridged into ``os.environ``."""
+    from tools.environments.base import get_sandbox_dir
+    from tools.environments.singularity import _get_scratch_dir
+    from tools.process_registry import ProcessRegistry, ProcessSession, _worker_memory_max_bytes
+
+    profiles = {}
+    for name, timeout, dotenv_extra in (("a", 5, "TERMINAL_LOCAL_MEMORY_MAX_MB=64\n"), ("b", 600, "")):
+        sandbox, scratch = tmp_path / f"{name}-sandboxes", tmp_path / f"{name}-scratch"
+        home = _profile(tmp_path, name,
+                        config_yaml=f"terminal:\n  timeout: {timeout}\n  sandbox_dir: {sandbox}\n",
+                        dotenv=f"TERMINAL_SCRATCH_DIR={scratch}\n{dotenv_extra}")
+        profiles[name] = (home, sandbox, scratch)
+    # Launch profile A's settings, as the startup bridge left them in the process env.
+    monkeypatch.setenv("TERMINAL_TIMEOUT", "5")
+    monkeypatch.setenv("TERMINAL_SANDBOX_DIR", str(profiles["a"][1]))
+    monkeypatch.setenv("TERMINAL_SCRATCH_DIR", str(profiles["a"][2]))
+    monkeypatch.setenv("TERMINAL_LOCAL_MEMORY_MAX_MB", "64")
+    registry = ProcessRegistry()
+    done = ProcessSession(id="proc_done", command="true", exited=True, exit_code=0)
+    registry._finished[done.id] = done
+
+    seen = {}
+    for name in ("a", "b", "a"):
+        home, sandbox, scratch = profiles[name]
+        token = install_profile_terminal_scope(home)
+        try:
+            assert get_sandbox_dir() == sandbox
+            assert _get_scratch_dir() == scratch
+            # A's 5s limit clamps a 20s wait; B's 600s limit does not.
+            assert ("timeout_note" in registry.wait(done.id, timeout=20)) == (name == "a")
+            seen.setdefault(name, _worker_memory_max_bytes())
+        finally:
+            reset_terminal_scope(token)
+    assert seen["a"] == 64 * 1024 * 1024
+    assert seen["b"] > seen["a"], "profile B inherited profile A's worker memory cap"
