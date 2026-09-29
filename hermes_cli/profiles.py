@@ -2270,6 +2270,8 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
         # update` backfill takes this for a pre-#44792 profile and copies the DEFAULT's .env in.
         _seed_placeholder_env(final_source)
         shutil.move(str(final_source), str(profile_dir))
+    # A profile deleted earlier under this name left its tombstone (same as create_profile).
+    clear_named_profile_deleted(profile_dir)
     return profile_dir
 
 
@@ -2405,6 +2407,9 @@ def rename_profile(old_name: str, new_name: str) -> Path:
     # resurrect it, and a future profile reusing the old name must not read as deleted.
     if live_mux:
         clear_named_profile_deleted(old_dir)
+    # Likewise a profile deleted earlier under the NEW name left its tombstone: the renamed
+    # profile would inherit it (unlisted, unserved, every home mkdir refused).
+    clear_named_profile_deleted(new_dir)
 
     # 2b. Record the rename so Bot Mode group chats can re-link persisted
     # member descriptors to the new slug (#110200). Best-effort: a metadata

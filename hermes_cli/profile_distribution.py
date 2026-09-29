@@ -579,6 +579,10 @@ def install_distribution(
                 "Use `hermes profile update` to upgrade in place, or pass --force to overwrite."
             )
 
+        # A profile deleted earlier under this name left its tombstone (cleared as in
+        # create_profile); kept, it refuses the payload writes and hides the installed profile.
+        from hermes_constants import clear_named_profile_deleted
+        clear_named_profile_deleted(plan.target_dir)
         # Fresh install (or --force): config.yaml comes from the distribution. Roots the
         # payload does not ship are left alone either way, so --force keeps user skills.
         # A fresh install is built in a hidden sibling and published by one rename, as
