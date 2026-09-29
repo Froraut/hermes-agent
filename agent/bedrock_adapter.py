@@ -461,9 +461,12 @@ _NON_TOOL_CALLING_PATTERNS = [
 # cachePoint allowlist — inverted policy vs tools: unknown models get NO cache markers (they reject
 # cachePoint). Claude only reaches build_converse_kwargs under bearer auth.
 _CACHE_POINT_PATTERNS = ["anthropic.claude", "amazon.nova"]
-# Converse accepts an image inside toolResult.content only for these families ("only supported by Amazon
-# Nova and Anthropic Claude 3 and 4 models"); any other model rejects the request with a ValidationException.
-_TOOL_RESULT_IMAGE_PATTERNS = ["anthropic.claude", "amazon.nova"]
+# Converse documents an image inside toolResult.content as "only supported by Amazon Nova and Anthropic
+# Claude 3 and 4 models"; other models reject it with a ValidationException. Later Claude generations get
+# the text note until AWS documents them: a missing image degrades, a rejected request fails the turn.
+_TOOL_RESULT_IMAGE_PATTERNS = [
+    "amazon.nova", "anthropic.claude-3", "anthropic.claude-opus-4", "anthropic.claude-sonnet-4", "anthropic.claude-haiku-4",
+]
 
 
 def _model_supports_tool_use(model_id: str) -> bool:

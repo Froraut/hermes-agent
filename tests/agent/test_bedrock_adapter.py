@@ -708,7 +708,11 @@ class TestBuildConverseKwargs:
                 {"type": "image_url", "image_url": {"url": data_url}}]},
         ]
 
-    @pytest.mark.parametrize("model", ["us.amazon.nova-pro-v1:0", "anthropic.claude-sonnet-4-6-20250514-v1:0"])
+    # Converse accepts toolResult images only for "Amazon Nova and Anthropic Claude 3 and 4 models".
+    @pytest.mark.parametrize("model", [
+        "us.amazon.nova-pro-v1:0", "anthropic.claude-sonnet-4-6-20250514-v1:0",
+        "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+    ])
     def test_tool_result_image_reaches_the_model_as_an_image_block(self, model):
         from agent.bedrock_adapter import build_converse_kwargs
         image_bytes = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 8
@@ -718,10 +722,11 @@ class TestBuildConverseKwargs:
         assert {"text": "Image loaded into your context"} in blocks
         assert not any(data_url.split(",", 1)[1][:64] in b.get("text", "") for b in blocks)
 
-    def test_tool_result_image_is_never_inlined_as_text_for_models_without_tool_result_images(self):
+    @pytest.mark.parametrize("model", ["us.meta.llama4-maverick-17b-instruct-v1:0", "us.anthropic.claude-opus-5-v1:0"])
+    def test_tool_result_image_is_never_inlined_as_text_for_models_without_tool_result_images(self, model):
         from agent.bedrock_adapter import build_converse_kwargs
         data_url, messages = self._vision_tool_round(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 8)
-        blocks = build_converse_kwargs(model="us.meta.llama4-maverick-17b-instruct-v1:0", messages=messages)[
+        blocks = build_converse_kwargs(model=model, messages=messages)[
             "messages"][-1]["content"][0]["toolResult"]["content"]
         assert blocks and all(set(b) == {"text"} and b["text"].strip() for b in blocks)
         assert {"text": "Image loaded into your context"} in blocks
