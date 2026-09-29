@@ -1,4 +1,5 @@
 import base64
+import stat
 from pathlib import Path
 
 import pytest
@@ -116,3 +117,22 @@ def test_fs_endpoints_require_auth(tmp_path):
     assert list_response.status_code == 401
     assert read_response.status_code == 401
     assert default_response.status_code == 401
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("name, mode", [("deploy.sh", 0o755), ("pgpass.conf", 0o600)])
+def test_fs_write_text_keeps_the_saved_file_mode(client, tmp_path, name, mode):
+    """A spot-editor save edits the file; it must not reset its permission bits
+    (a script losing its exec bit, a 0600 credential file turning world-readable)."""
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / name
+    target.write_text("before\n")
+    target.chmod(mode)
+
+    response = client.post("/api/fs/write-text", json={"path": str(target), "content": "after\n"})
+
+    assert response.status_code == 200
+    assert target.read_text() == "after\n"
+    assert stat.S_IMODE(target.stat().st_mode) == mode
+    assert [p.name for p in project.iterdir()] == [name]
