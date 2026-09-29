@@ -1863,6 +1863,49 @@ describe('useGatewayBoot remote reconnect loop (real hook, fake socket)', () => 
     expect(secondaryBot).toMatchObject({ runtimeId: 'runtime-secondary-live' })
   })
 
+  it('a soft re-home (backend recycle / connection apply) unbinds tiles from the torn-down primary so they re-resume', async () => {
+    // "Restart Hermes" / Models-page recovery: main SIGTERMs the primary,
+    // spawns a replacement and fires onConnectionApplied WITHOUT reloading
+    // the renderer. The switch wipes every $sessionStates slice, so an open
+    // tab still bound to a runtime id minted by the dead process painted an
+    // endless loader and 4001'd ("session not found") on every poll — its
+    // resume effect only re-arms once the binding is gone.
+    render(<Harness />)
+    await flushAsync()
+    expect($gatewayState.get()).toBe('open')
+
+    $sessionTiles.set([
+      { runtimeId: '5b359a94', storedSessionId: 'stored-find-and-fix' },
+      {
+        ownerRoute: { connectionId: 'primary-vps', mode: 'remote', profile: 'default' },
+        runtimeId: 'cccae222',
+        storedSessionId: 'stored-review'
+      },
+      {
+        ownerRoute: { connectionId: 'coder-remote', mode: 'remote', profile: 'coder', targetProfile: 'coder' },
+        runtimeId: 'runtime-secondary-live',
+        storedSessionId: 'secondary-bot-chat',
+        workspaceMode: 'bots',
+        workspaceOwnerKey: 'coder-remote::coder'
+      }
+    ])
+
+    act(() => connectionApplied?.())
+    await flushAsync()
+    await flushAsync()
+
+    expect($gatewaySwitching.get()).toBe(false)
+    expect($gatewayState.get()).toBe('open')
+
+    const [plainTab, primaryOwnedTab, secondaryBot] = $sessionTiles.get()
+
+    expect(plainTab).toEqual({ storedSessionId: 'stored-find-and-fix' })
+    expect(primaryOwnedTab).not.toHaveProperty('runtimeId')
+    expect(primaryOwnedTab).toMatchObject({ storedSessionId: 'stored-review' })
+    // Another source's backend was not torn down; its runtime is still live.
+    expect(secondaryBot).toMatchObject({ runtimeId: 'runtime-secondary-live' })
+  })
+
   it('FIX: a successful reconnect retires the focused composer busy latch (#93059)', async () => {
     // Backend respawned mid-turn (auto-update, sleep/wake): the focused
     // composer's draft latches never get their terminal busy:false, and Send
