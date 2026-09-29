@@ -4207,19 +4207,26 @@ class BasePlatformAdapter(ABC):
 
     async def _finalize_delivery_obligation(
         self, obligation_id: str, result: Any, event: MessageEvent,
-        delivery_adapter: "BasePlatformAdapter") -> None:
+        delivery_adapter: "BasePlatformAdapter", *, reply_to: Optional[str] = None,
+        metadata: Any = None) -> None:
         """Mark the ledger row delivered/failed (best-effort). On ``send_path_degraded`` with a
         replacement adapter live, trigger another redelivery sweep (the watcher's may have run
         before this failure landed; atomic claiming keeps it idempotent). On any other rejection arm
         the runner's timed redelivery, so the reply goes out once the flood penalty or the retry
-        backoff has passed instead of waiting for the next restart (#91653)."""
+        backoff has passed instead of waiting for the next restart (#91653). A partly delivered
+        split reply is remembered with the ``reply_to``/``metadata`` it was sent with, so that
+        redelivery sends only what did not land."""
         try:
             from gateway.dead_targets import classify_dead_error
-            from gateway.delivery_ledger import is_reconnect_only, mark_delivered, mark_failed
+            from gateway.delivery_ledger import (
+                is_reconnect_only, mark_delivered, mark_failed, remember_partial_send)
             if getattr(result, "success", False):
                 await asyncio.to_thread(mark_delivered, obligation_id)
                 return
             error = str(getattr(result, "error", "") or "")
+            if self._is_partial_delivery(result):
+                # Before the row turns 'failed': a sweep that claims it must already see the remainder.
+                remember_partial_send(obligation_id, result, reply_to=reply_to, metadata=metadata)
             await asyncio.to_thread(mark_failed, obligation_id, error)
             if is_reconnect_only(error):
                 redeliver = getattr(
@@ -4326,7 +4333,8 @@ class BasePlatformAdapter(ABC):
             chat_id=event.source.chat_id, content=text_content, reply_to=reply_to, metadata=metadata)
         stop_reply_clock(delivery_adapter, event.source.chat_id, result)
         if obligation_id is not None:
-            await self._finalize_delivery_obligation(obligation_id, result, event, delivery_adapter)
+            await self._finalize_delivery_obligation(
+                obligation_id, result, event, delivery_adapter, reply_to=reply_to, metadata=metadata)
         return result, delivery_adapter
 
     async def _release_turn_marker(self, event: MessageEvent) -> None:
