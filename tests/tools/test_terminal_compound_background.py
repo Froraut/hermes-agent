@@ -210,7 +210,7 @@ def test_heredoc_body_is_written_byte_exact(tmp_path, opener):
     what was sent, even when a body line looks like ``A && B &``."""
     from tools.environments.local import LocalEnvironment
 
-    body = "#!/bin/bash\nredis-server --daemonize no && node server.js &\nwait\n"
+    body = "#!/usr/bin/env bash\nredis-server --daemonize no && node server.js &\nwait\n"
     env = LocalEnvironment(cwd=str(tmp_path), timeout=30)
     try:
         result = env.execute(f"cat > start.sh {opener}\n{body}EOF")
