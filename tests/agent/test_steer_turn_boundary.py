@@ -71,22 +71,25 @@ def _late_steer_after_turn_end(agent, payloads):
     replies = iter([_tool_call_response(), _mock_response(content="done one"), _mock_response(content="done two")])
     agent._interruptible_api_call = lambda kw: payloads.append([dict(m) for m in kw["messages"]]) or next(replies)
     first = agent.run_conversation("first task")
-    agent.steer(STEER)  # accepted after the turn's last drain, while the surface still showed it busy
-    return agent.run_conversation("second question", conversation_history=first["messages"])
+    accepted = agent.steer(STEER)  # sent after the turn's final drain, while the surface still showed it busy
+    return agent.run_conversation("second question", conversation_history=first["messages"]), accepted
 
 
 def _steer_then_redirect_during_call(agent, payloads):
+    accepted = []
+
     def call(kw):
         payloads.append([dict(m) for m in kw["messages"]])
         if len(payloads) == 1:
             return _tool_call_response()
         if len(payloads) == 2:
-            assert agent.steer(STEER) and agent.redirect("REDIRECT_TEXT")
+            accepted.append(agent.steer(STEER))
+            assert agent.redirect("REDIRECT_TEXT")
             raise InterruptedError("redirect cancelled the in-flight request")
         return _mock_response(content="rebuilt reply")
 
     agent._interruptible_api_call = call
-    return agent.run_conversation("start something")
+    return agent.run_conversation("start something"), accepted == [True]
 
 
 @pytest.mark.parametrize("scenario", [_late_steer_after_turn_end, _steer_then_redirect_during_call])
@@ -94,20 +97,22 @@ def test_live_request_is_a_prefix_of_the_durable_transcript(tmp_path, scenario):
     db = SessionDB(tmp_path / "state.db")
     try:
         agent, payloads = _agent(db), []
-        result = scenario(agent, payloads)
+        result, accepted = scenario(agent, payloads)
         request = _shape(payloads[-1])
         durable = _shape(db.get_messages("steer-boundary"))
         assert durable[: len(request)] == request
-        # Delivered exactly once: in the request, or handed back as the next user turn.
+        # An accepted steer is delivered exactly once (in the request, or handed back as the next
+        # user turn); a rejected one is left to the surface, which queues it as a normal message.
         in_request = sum(steer for _role, steer in request)
-        assert in_request + (STEER in (result.get("pending_steer") or "")) == 1
+        assert in_request + (STEER in (result.get("pending_steer") or "")) == int(accepted)
     finally:
         db.close()
 
 
-def test_steer_left_by_an_early_turn_exit_is_handed_back(tmp_path):
+def test_turn_end_hands_back_the_steer_and_closes_acceptance(tmp_path):
     """Thinking-exhausted truncation returns without finalize_turn; the steer accepted during that
-    call must come back as ``pending_steer``, not linger for the next turn's pre-API drain."""
+    call must come back as ``pending_steer``. The same drain closes acceptance: a steer sent after it
+    is rejected (the surface queues it) rather than acknowledged and stranded, until the next turn."""
     db = SessionDB(tmp_path / "state.db")
     try:
         agent = _agent(db)
@@ -122,6 +127,13 @@ def test_steer_left_by_an_early_turn_exit_is_handed_back(tmp_path):
         result = agent.run_conversation("first task")
         assert result["completed"] is False
         assert result.get("pending_steer") == STEER
-        assert agent._drain_pending_steer() is None
+        assert agent.steer("sent after the turn ended") is False
+
+        accepted = []
+        agent._interruptible_api_call = lambda kw: accepted.append(agent.steer("NEXT_TURN_STEER")) or _mock_response(
+            content="second answer")
+        second = agent.run_conversation("second question", conversation_history=result["messages"])
+        assert accepted == [True]
+        assert second.get("pending_steer") == "NEXT_TURN_STEER"
     finally:
         db.close()
