@@ -1560,7 +1560,8 @@ class GatewayInboundMixin:
     @staticmethod
     def _cached_attachment_is_text(path: str) -> bool:
         """read_file's own byte-layer test on the cached file: no NUL and valid UTF-8 in the first
-        4 KiB. Known binary extensions and PDF (whose prefix can be pure ASCII) stay binary."""
+        4 KiB. Known binary extensions and PDF (whose prefix can be pure ASCII) stay binary; a PDF
+        is recognised by its ``%PDF-`` header too, since an upload keeps its (maybe extensionless) name."""
         from tools.binary_extensions import has_binary_extension, is_pdf_path
         from tools.file_operations import ShellFileOperations
         if has_binary_extension(path) or is_pdf_path(path):
@@ -1570,7 +1571,7 @@ class GatewayInboundMixin:
                 sample = fh.read(4096)
         except OSError:
             return False
-        return not ShellFileOperations._is_likely_binary_bytes(sample)
+        return not sample.startswith(b"%PDF-") and not ShellFileOperations._is_likely_binary_bytes(sample)
 
     @classmethod
     def _prepend_inbound_media_file_notes(cls, message_text: str, audio_file_paths: list[str], video_paths: list[str]) -> str:
