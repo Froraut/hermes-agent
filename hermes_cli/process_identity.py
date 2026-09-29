@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
+from pm.filesystem import lock_fd
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,10 @@ logger = logging.getLogger(__name__)
 SPAWN_ENV_VAR = "HERMES_SPAWN"
 _TAG_VERSION = "v1"
 LEDGER_FILENAME = "spawn-ledger.json"
+_LEDGER_LOCK_FILENAME = Path(LEDGER_FILENAME).with_suffix(".lock").name
+# Registration is best-effort and runs on startup. A live writer should finish in milliseconds;
+# bound a wedged filesystem/holder rather than hanging the process indefinitely.
+_LEDGER_LOCK_TIMEOUT_SECONDS = 5.0
 
 #: Purposes a reaper may treat as "safe to kill when the owner is gone".
 #: Interactive processes (chat, REPLs) are deliberately NOT in this set.
@@ -286,25 +291,30 @@ def _new_entry(
 def _append_entry(entry: LedgerEntry) -> bool:
     """Prune dead entries and append ``entry`` — the ONLY ledger write path.
 
-    Serialized under ``_LEDGER_LOCK`` with an atomic tmp+replace; no writer touches the file
-    outside this function.
+    Serialized across threads and processes with an atomic tmp+replace; no writer touches the
+    file outside this function.
 
     See #91660.
     """
     path = _ledger_path()
     with _LEDGER_LOCK:
-        entries = _read_ledger_or_quarantine(path) or []
-        # Drop malformed entries, our own stale entry, and provably dead pids.
-        pruned = [
-            e for e in entries
-            if isinstance(e.get("pid"), int)
-            and e["pid"] != entry.pid
-            and _pid_alive_matches(e["pid"], e.get("create_time")) is not False
-        ]
-        pruned.append(asdict(entry))
+        lock_fd_handle = None
         try:
             from hermes_constants import mkdir_under_hermes_home
             mkdir_under_hermes_home(path.parent)
+            lock_fd_handle = os.open(path.parent / _LEDGER_LOCK_FILENAME, os.O_CREAT | os.O_RDWR, 0o600)
+            if not lock_fd(lock_fd_handle, wait=True, timeout=_LEDGER_LOCK_TIMEOUT_SECONDS):
+                logger.debug("spawn ledger lock timed out")
+                return False
+            entries = _read_ledger_or_quarantine(path) or []
+            # Drop malformed entries, our own stale entry, and provably dead pids.
+            pruned = [
+                e for e in entries
+                if isinstance(e.get("pid"), int)
+                and e["pid"] != entry.pid
+                and _pid_alive_matches(e["pid"], e.get("create_time")) is not False
+            ]
+            pruned.append(asdict(entry))
             # argv may carry surrogate-escaped bytes (non-UTF-8 paths); ensure_ascii keeps the
             # utf-8 text handle from raising UnicodeEncodeError (a ValueError, not an OSError).
             atomic_json_write(path, pruned, mode=0o600, ensure_ascii=True)
@@ -312,6 +322,9 @@ def _append_entry(entry: LedgerEntry) -> bool:
         except OSError:
             logger.debug("spawn ledger write failed", exc_info=True)
             return False
+        finally:
+            if lock_fd_handle is not None:
+                os.close(lock_fd_handle)
 
 
 def register_child(pid: int, purpose: str, *, project_root: Optional[Path] = None) -> bool:

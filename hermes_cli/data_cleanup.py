@@ -17,6 +17,7 @@ class DataRemovalPlan:
 
 def plan_data_removal(home: Path, project: Path, userdata: Path | None = None) -> DataRemovalPlan:
     from hermes_constants import get_default_hermes_root
+    from hermes_cli.process_identity import LEDGER_FILENAME
     from pm.environments import base_venv, installs_root, store_root
     from hermes_cli.steward import is_bundled_payload
     from tools.checkpoint_pruning import store_lock_path
@@ -25,10 +26,12 @@ def plan_data_removal(home: Path, project: Path, userdata: Path | None = None) -
     if home == Path(home.anchor) or home == Path.home().resolve():
         raise ValueError(f"refusing to erase an entire filesystem or user home: {home}")
     machine = get_default_hermes_root(home=home).resolve()
+    ledger = machine / LEDGER_FILENAME
     protected = {
         project.resolve(), base_venv(project).resolve(), store_root(project).resolve(),
         installs_root().resolve(), machine / "tools", machine / "bin", machine / "cache",
-        machine / "spawn-ledger.json", home / "gateway.lock", home / ".backup.lock",
+        ledger, ledger.with_suffix(".lock"),
+        home / "gateway.lock", home / ".backup.lock",
         home / "runtime" / "active_sessions.lock", home / "cron" / ".tick.lock",
         store_lock_path(home / "checkpoints"),
     }

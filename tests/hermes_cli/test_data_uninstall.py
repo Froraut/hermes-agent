@@ -20,7 +20,8 @@ def layout(tmp_path, monkeypatch):
     witnesses = [source / "hermes_cli" / "__init__.py", store / "python" / "python.exe",
                  home / "installs" / "other-install" / "facts.json", home / "bin" / "hermes.cmd",
                  home / "profiles" / "sibling" / "config.yaml",
-                 home / "cache" / "partials" / ".locks" / "other-profile-transfer"]
+                 home / "cache" / "partials" / ".locks" / "other-profile-transfer",
+                 home / "spawn-ledger.lock"]
     for path in witnesses:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("keep", encoding="utf-8")

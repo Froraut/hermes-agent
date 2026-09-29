@@ -21,11 +21,12 @@ STALE and is ignored — an attaching client must never dial a recycled PID's po
 
 **Relationship to ``spawn-ledger.json``** (``hermes_cli/process_identity.py``): the ledger stays
 the append-only machine roster of every long-lived Hermes process (Desktop's attach ladder reads
-it) and is still written unchanged. It cannot be the host record: it has no lock, no
-single-writer semantics, no removal on exit, and no place to publish a protocol version or
-an authentication handle. The record here is authoritative for "who owns this host role"; the
-ledger remains authoritative for "what is running". Both are written, and this module reuses the
-ledger's ``(pid, create_time)`` liveness proof rather than inventing a second one.
+it) and is still written unchanged. Its transaction lock only serializes roster updates; it is not
+a lifetime ownership claim. The ledger has no single-owner semantics, no removal on exit, and no
+place to publish a protocol version or authentication handle. The record here is authoritative for
+"who owns this host role"; the ledger remains authoritative for "what is running". Both are written,
+and this module reuses the ledger's ``(pid, create_time)`` liveness proof rather than inventing a
+second one.
 """
 
 from __future__ import annotations

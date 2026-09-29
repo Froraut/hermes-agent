@@ -15,10 +15,12 @@ Runs on any host: psutil interactions go through a fake module.
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -116,6 +118,78 @@ def _entry(pid, create, purpose="serve", install=None, spawner_pid=None, spawner
         "registered_at": 0.0,
         "argv": "",
     }
+
+
+def _race_ledger_append(ledger_value, pid, start_barrier, read_barrier, results):
+    """Append in a fresh process after forcing unlocked readers onto the same snapshot."""
+    ledger = Path(ledger_value)
+    real_read = pi._read_ledger_or_quarantine
+
+    def synchronized_read(path):
+        entries = real_read(path)
+        try:
+            read_barrier.wait(timeout=2)
+        except threading.BrokenBarrierError:
+            # With a cross-process transaction lock, the peer cannot reach this read until the
+            # first writer commits. The bounded wait is only the green path's test-side cost.
+            pass
+        return entries
+
+    setattr(pi, "_ledger_path", lambda: ledger)
+    setattr(pi, "_read_ledger_or_quarantine", synchronized_read)
+    setattr(pi, "_pid_alive_matches", lambda *_args, **_kwargs: True)
+    start_barrier.wait(timeout=10)
+    entry = pi.LedgerEntry(
+        pid=pid,
+        create_time=float(pid),
+        purpose="serve",
+        install=pi.install_id(Path("/x/install")),
+        spawner_pid=None,
+        spawner_create=None,
+        registered_at=float(pid),
+        argv=f"worker-{pid}",
+    )
+    results.put(pi._append_entry(entry))
+
+
+def test_concurrent_process_appends_preserve_both_registrations(tmp_path):
+    """The machine ledger's read/prune/append/replace is one cross-process transaction."""
+    ledger = tmp_path / "spawn-ledger.json"
+    context = multiprocessing.get_context("spawn")
+    start_barrier = context.Barrier(2)
+    read_barrier = context.Barrier(2)
+    results = context.Queue()
+    pids = (41001, 41002)
+    processes = [
+        context.Process(
+            target=_race_ledger_append,
+            args=(str(ledger), pid, start_barrier, read_barrier, results),
+        )
+        for pid in pids
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=15)
+        assert process.exitcode == 0
+
+    assert [results.get(timeout=2) for _ in processes] == [True, True]
+    entries = json.loads(ledger.read_text(encoding="utf-8"))
+    assert {entry["pid"] for entry in entries} == set(pids)
+
+
+def test_append_fails_closed_when_transaction_lock_times_out(tmp_path, monkeypatch):
+    ledger = tmp_path / "spawn-ledger.json"
+    prior = [_entry(400, 2.0)]
+    ledger.write_text(json.dumps(prior), encoding="utf-8")
+    monkeypatch.setattr(pi, "_ledger_path", lambda: ledger)
+    monkeypatch.setattr(pi, "_pid_alive_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(pi, "lock_fd", lambda *_args, **_kwargs: False)
+    incoming = pi._new_entry(999, 50.0, "serve", Path("/x/install"), None, None)
+
+    assert pi._append_entry(incoming) is False
+    assert json.loads(ledger.read_text(encoding="utf-8")) == prior
 
 
 def test_register_self_writes_and_prunes_dead(tmp_path):
