@@ -242,11 +242,13 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
     if err is not None:
         return err
     if not _smt._skill_gate_bypass.get():
-        # Approval gate for the WHOLE batch as one pending write.
+        # Approval gate for the WHOLE batch as one pending write. Each op is staged with the
+        # target it resolved to: replay carries no legacy top-level ``name`` default.
         def _staging(wa):
             acts = ", ".join(op["action"] for op in operations)
             gist = f"batch({len(operations)} ops: {acts}) on {', '.join(sorted(set(names)))}"
-            return {"action": "batch", "operations": operations}, gist
+            staged_ops = [{**op, "name": nm} for op, nm in zip(operations, names)]
+            return {"action": "batch", "operations": staged_ops}, gist
         staged = _smt._run_write_gate(_staging)
         if staged is not None:
             return staged
