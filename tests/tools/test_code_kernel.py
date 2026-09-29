@@ -180,6 +180,20 @@ class TestKernelLifecycle(unittest.TestCase):
         self.assertEqual(result["status"], "success", result)
         self.assertIn("raw-passthrough", result["output"])
 
+    def test_clipped_cell_spill_is_complete_and_masked_like_the_inline_output(self):
+        """Output past the runner's capture spills in full; a credential in it is masked there
+        as it is inline, so it never persists unmasked on disk."""
+        from tools.code_kernel import _RUNNER_CAPTURE_BYTES
+
+        secret = "sk-proj-abc123xyz4567890abcdefGHIJKL"
+        with _kernel_config():
+            result = _run(f"print('OPENAI_API_KEY={secret}'); print('x' * {_RUNNER_CAPTURE_BYTES}); print('TAIL-MARK')")
+        self.assertEqual(result["status"], "success", result)
+        self.assertNotIn(secret, result["output"])
+        spill = Path(result["stdout_spill_path"]).read_text(encoding="utf-8")
+        self.assertTrue("TAIL-MARK" in spill, "the spill does not hold the full output")
+        self.assertFalse(secret in spill, "the credential persisted unmasked in the spill file")
+
 
 class TestModelFacingReset(unittest.TestCase):
     def test_reset_is_reachable_from_a_model_call_despite_stale_kernel_mode(self):

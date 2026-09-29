@@ -871,10 +871,13 @@ class TestHeadTailTruncation(unittest.TestCase):
     _SECRET = "sk-proj-abc123xyz4567890abcdefGHIJKL"
 
     def _assert_masked_everywhere(self, result):
+        # Checked after ANSI stripping: a reader (or terminal) rejoins an escape-split credential.
+        from tools.ansi_strip import strip_ansi
+
         self.assertTrue(result["stdout_truncated"])
-        self.assertNotIn(self._SECRET, result["output"])
+        self.assertNotIn(self._SECRET, strip_ansi(result["output"]))
         with open(result["stdout_spill_path"], encoding="utf-8") as f:
-            self.assertFalse(self._SECRET in f.read(), "the credential persisted unmasked in the spill file")
+            self.assertFalse(self._SECRET in strip_ansi(f.read()), "the credential persisted unmasked in the spill file")
 
     def test_remote_spill_masks_secrets_like_the_inline_output(self):
         """The spilled full output is redacted as the inline output is: a credential the
@@ -899,10 +902,12 @@ class TestHeadTailTruncation(unittest.TestCase):
         self._assert_masked_everywhere(result)
 
     def test_remote_kernel_spill_masks_secrets_like_the_inline_output(self):
+        """Also when an ANSI escape splits the credential: the inline pass strips escapes first."""
         from tools.code_execution_tool import _finish_remote_kernel_result
 
+        split = f"{self._SECRET[:1]}\x1b[31m{self._SECRET[1:]}"
         result = json.loads(_finish_remote_kernel_result(
-            {"status": "error", "stdout": "x" * 80_000, "stderr": f"token={self._SECRET}\n", "traceback": ""},
+            {"status": "error", "stdout": "x" * 80_000, "stderr": f"token={split}\n", "traceback": ""},
             timeout=30, exec_start=time.monotonic()))
 
         self._assert_masked_everywhere(result)

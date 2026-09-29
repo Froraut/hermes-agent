@@ -83,17 +83,20 @@ def _truncate_stdout_text(stdout_text: str) -> Tuple[str, Dict[str, Any]]:
 def _spill_full_stdout(stdout_text: str) -> Optional[str]:
     """Write full stdout to cache/exec; return its path (None on failure — best-effort,
     the truncated inline output is still returned). Keyed by content digest so identical
-    reruns coalesce. The text is redacted here with the inline pass, whatever the caller did
-    (the remote paths truncate before they redact), so no secret persists unmasked on disk."""
+    reruns coalesce. The text gets the inline pass here (ANSI strip, then redaction: an escape
+    inside a credential hides it from the redactor), whatever the caller did (the remote paths
+    truncate before they redact; the local kernel's runner cannot redact), so no secret persists
+    unmasked on disk."""
     try:
         import hashlib
         from agent.redact import redact_sensitive_text
         from hermes_constants import get_hermes_dir
+        from tools.ansi_strip import strip_ansi
         from tools.spill_safety import write_text_exclusive
         if len(stdout_text) > MAX_SPILLED_STDOUT_BYTES:
             stdout_text = (stdout_text[:MAX_SPILLED_STDOUT_BYTES]
                            + f"\n\n[... spill capped at {MAX_SPILLED_STDOUT_BYTES:,} bytes ...]")
-        stdout_text = redact_sensitive_text(stdout_text, code_file=True)
+        stdout_text = redact_sensitive_text(strip_ansi(stdout_text), code_file=True)
         cache_dir = get_hermes_dir("cache/exec", "exec_spill")
         cache_dir.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256(stdout_text.encode("utf-8", errors="replace")).hexdigest()[:12]
