@@ -22,18 +22,20 @@ def coerce_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if not args or not isinstance(args, dict):
         return args
 
-    schema = registry.get_schema(tool_name)
-    properties = ((schema or {}).get("parameters") or {}).get("properties")
-    if not properties:
-        return args
+    parameters = (registry.get_schema(tool_name) or {}).get("parameters") or {}
 
     # The model saw the SANITIZED schema (provider-illegal property keys were
-    # renamed); map those keys back to the registry's wire names first.
+    # renamed); map those keys back to the registry's wire names first — also
+    # when only patternProperties / additionalProperties / conditionals list them.
     try:
         from tools.schema_sanitizer import unrename_tool_args
-        args = unrename_tool_args(schema.get("parameters"), args)
+        args = unrename_tool_args(parameters, args)
     except Exception:  # pragma: no cover — never break dispatch
         pass
+
+    properties = parameters.get("properties")
+    if not properties:
+        return args
 
     for key, value in list(args.items()):
         prop_schema = properties.get(key)

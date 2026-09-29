@@ -247,3 +247,27 @@ class TestCoerceToolArgsNested:
         args = {"todos": [_json.dumps({"id": "1", "content": "x", "status": "pending"})]}
         result = coerce_tool_args("todo_list", args)
         assert result["todos"][0] == {"id": "1", "content": "x", "status": "pending"}
+
+
+def test_dispatch_restores_renamed_keys_when_the_schema_has_no_top_level_properties():
+    """A tool whose arguments are described only by patternProperties / additionalProperties still
+    has its nested keys renamed for the model ("$eq" -> "_eq"); dispatch must hand the tool the wire
+    keys back, not skip the mapping because the top level lists no properties."""
+    import json
+
+    from tools.registry import registry
+    from tools.schema_sanitizer import sanitize_tool_schemas
+
+    name, toolset, calls = "mcp_probe_pattern_only", "mcp-probe-pattern-only", []
+    params = {"type": "object", "patternProperties": {"^f_": {
+        "type": "object", "properties": {"$eq": {"type": "string"}}}}}
+    registry.register(name=name, toolset=toolset, schema={"name": name, "description": "d", "parameters": params},
+                      handler=lambda args, **kw: calls.append(args) or json.dumps({"ok": True}))
+    try:
+        shown = sanitize_tool_schemas([{"type": "function", "function": {"name": name, "parameters": params}}])
+        (eq_key,) = shown[0]["function"]["parameters"]["patternProperties"]["^f_"]["properties"]
+        model_tools.handle_function_call(function_name=name, function_args={"f_status": {eq_key: "open"}},
+                                         enabled_toolsets=[toolset])
+    finally:
+        registry.deregister(name)
+    assert calls == [{"f_status": {"$eq": "open"}}]
