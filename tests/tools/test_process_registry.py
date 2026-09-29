@@ -1116,6 +1116,41 @@ class TestEnvPollerIncrementalRead:
         assert session.output_buffer == "x" * 10
 
 
+@pytest.mark.platforms("posix")
+class TestSpawnViaEnvCwd:
+    """A sandbox background process runs in the cwd it was spawned with.
+
+    The environment's own ``cwd`` is shared by every session using the
+    backend and moves with whichever command last reported one, so a
+    background job must not fall back to it when a directory was resolved.
+    """
+
+    @pytest.fixture()
+    def env(self, tmp_path):
+        from tools.environments.local import LocalEnvironment
+
+        shared = tmp_path / "shared_env_cwd"
+        shared.mkdir()
+        env = LocalEnvironment(cwd=str(shared), timeout=30)
+        yield env
+        env.cleanup()
+
+    def test_process_runs_in_the_requested_cwd_not_the_env_cwd(self, registry, env, tmp_path):
+        requested = tmp_path / "requested_workdir"
+        requested.mkdir()
+        session = registry.spawn_via_env(env, "pwd", cwd=str(requested))
+        deadline = time.monotonic() + 30
+        while not session.exited and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert session.exited
+        assert os.path.realpath(session.output_buffer.strip()) == os.path.realpath(requested)
+
+    def test_missing_cwd_fails_the_launch_instead_of_running_elsewhere(self, registry, env, tmp_path):
+        session = registry.spawn_via_env(env, "pwd", cwd=str(tmp_path / "does_not_exist"))
+        assert session.completion_reason == "failed_start"
+        assert session.pid is None
+
+
 # =========================================================================
 # Popen leak prevention
 # =========================================================================
