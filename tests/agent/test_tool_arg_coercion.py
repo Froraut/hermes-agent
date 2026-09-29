@@ -35,12 +35,18 @@ class TestCoerceNumber:
 
     def test_integer_result_is_exactly_the_value_written(self):
         """A quoted ID past float precision (tweet / snowflake / BIGINT key) must never come back as
-        a different integer: any int result equals the number the string denotes, else it stays a string."""
-        for value in ("1790123456789012345", "-9007199254740993", "1e30", "12345678901234567.0"):
+        a different integer: any int result equals the number the string denotes, else it stays a string.
+        The result is an int exactly when the string denotes an integer, in any spelling
+        ("9007199254740992.0"), and never for a decimal whose float happens to be integral."""
+        for value in ("1790123456789012345", "-9007199254740993", "1e30", "12345678901234567.0",
+                      "9007199254740992.0", "9.007199254740992e15", "4503599627370496.5"):
+            written = Decimal(value)
             for integer_only in (True, False):
                 result = _coerce_number(value, integer_only=integer_only)
+                assert isinstance(result, int) == (written == written.to_integral_value()), (
+                    value, integer_only, result)
                 if isinstance(result, int):
-                    assert Decimal(result) == Decimal(value), (value, integer_only, result)
+                    assert Decimal(result) == written, (value, integer_only, result)
                 elif integer_only:
                     assert result == value, (value, result)
 

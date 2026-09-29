@@ -8,6 +8,7 @@ conservative: originals are kept whenever a repair is not unambiguous.
 
 import json
 import logging
+from decimal import Decimal
 from typing import Any, Dict
 
 from tools.registry import registry
@@ -193,9 +194,11 @@ def _coerce_number(value: str, integer_only: bool = False):
         return value
     if f != f or f in (float("inf"), float("-inf")):
         return value  # not JSON-serializable
-    if f.is_integer() and abs(f) < 2**53:
-        return int(f)
-    # Past 2**53 a float-form integer ("1e30") is already rounded: never pass it off as exact.
+    # Integral or not is read from the digits written, not from f: from 2**52 on the float has
+    # already rounded ("9007199254740993.0" and "4503599627370496.5" both land on integral floats).
+    written = Decimal(value)  # accepts every spelling float() does
+    if written == written.to_integral_value():
+        return int(written)
     return value if integer_only else f
 
 
