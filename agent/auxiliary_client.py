@@ -1155,12 +1155,16 @@ def _parse_codex_final_response(final: Any) -> Tuple[List[str], List[Any], Any]:
         input_tokens, output_tokens = _field(resp_usage, "input_tokens", 0), _field(resp_usage, "output_tokens", 0)
         details = _field(resp_usage, "input_tokens_details")
         # Readable as chat (prompt_tokens_details) AND Codex (input_tokens_details) usage: consumers pick the
-        # shape by provider/api_mode, and dropping the details bills cache hits at the full input rate.
+        # shape by provider/api_mode, and dropping the details bills cache hits at the full input rate. The
+        # chat alias carries the cache-write bucket under its own name (legacy cache_creation_tokens included).
+        chat_details = SimpleNamespace(
+            cached_tokens=_field(details, "cached_tokens", 0),
+            cache_write_tokens=_field(details, "cache_write_tokens", 0) or _field(details, "cache_creation_tokens", 0))
         usage = SimpleNamespace(
             prompt_tokens=input_tokens, completion_tokens=output_tokens,
             total_tokens=_field(resp_usage, "total_tokens", 0) or input_tokens + output_tokens,
             input_tokens=input_tokens, output_tokens=output_tokens,
-            input_tokens_details=details, prompt_tokens_details=details,
+            input_tokens_details=details, prompt_tokens_details=chat_details,
             output_tokens_details=_field(resp_usage, "output_tokens_details"))
     return text_parts, tool_calls_raw, usage
 

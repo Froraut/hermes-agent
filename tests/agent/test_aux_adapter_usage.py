@@ -12,6 +12,8 @@ from dataclasses import astuple
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from agent.usage_pricing import normalize_usage
 
 
@@ -40,11 +42,12 @@ def test_anthropic_aux_usage_normalizes_like_the_raw_sdk_usage():
     assert _buckets(usage, provider="minimax") == expected  # chat shape (Anthropic-wire provider, no api_mode)
 
 
-def test_codex_aux_usage_normalizes_like_the_raw_responses_usage():
+@pytest.mark.parametrize("write_field", ["cache_write_tokens", "cache_creation_tokens"])  # current + legacy
+def test_codex_aux_usage_normalizes_like_the_raw_responses_usage(write_field):
     from agent.auxiliary_client import _parse_codex_final_response
 
     raw = SimpleNamespace(input_tokens=50000, output_tokens=700, total_tokens=50700,
-                          input_tokens_details=SimpleNamespace(cached_tokens=45000, cache_write_tokens=1000))
+                          input_tokens_details=SimpleNamespace(cached_tokens=45000, **{write_field: 1000}))
     _text, _calls, usage = _parse_codex_final_response(SimpleNamespace(output=[], usage=raw))
 
     expected = _buckets(raw, api_mode="codex_responses")
