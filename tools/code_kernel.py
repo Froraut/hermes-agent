@@ -783,7 +783,7 @@ def _redacted_respill(kernel: SessionKernel, runner_spill: str) -> str:
     if not kernel.tmpdir or path.parent != Path(kernel.tmpdir):
         return ""
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
         path.unlink()
     except OSError:
         return ""
