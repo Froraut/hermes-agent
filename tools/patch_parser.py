@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 if TYPE_CHECKING:  # annotations only; the real import is per-call in apply_v4a_operations
     from tools.file_operations_common import PatchResult
 
-from tools.file_operations_common import PatchResult
+from tools.file_operations_common import PatchResult, _detect_line_ending, _normalize_changed_line_endings
 
 
 class OperationType(Enum):
@@ -365,14 +365,14 @@ def apply_v4a_operations(operations: List[PatchOperation], file_ops: Any) -> Pat
         lint=lint_results or None, lsp_diagnostics="\n\n".join(lsp_blocks) or None)
 
 
-def _write_file_accepts_pre_content(file_ops: Any) -> bool:
-    """Whether ``file_ops.write_file`` accepts ``pre_content`` — read from the signature, not by
+def _write_file_accepts(file_ops: Any, name: str) -> bool:
+    """Whether ``file_ops.write_file`` accepts keyword ``name`` — read from the signature, not by
     catching TypeError around the call, so a TypeError raised *inside* it can't double-write."""
     try:
         params = inspect.signature(file_ops.write_file).parameters
     except (TypeError, ValueError):
         return False
-    return "pre_content" in params or any(
+    return name in params or any(
         p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
@@ -459,7 +459,13 @@ def _apply_update(op: PatchOperation, file_ops: Any) -> ApplyResult:
             hint = _no_match_hint(error, search_pattern, new_content)
             return _fail(f"Could not apply hunk: {_patch_mode_advice(error)}" + hint)
     # Pass pre_content to skip a redundant re-read inside write_file when supported.
-    extra = {"pre_content": current_content} if _write_file_accepts_pre_content(file_ops) else {}
+    # Hunk lines arrive bare-LF: give the lines the patch produced the file's ending, and ask
+    # write_file not to re-normalize the whole buffer (untouched lines keep their bytes).
+    extra = {"pre_content": current_content} if _write_file_accepts(file_ops, "pre_content") else {}
+    ending = _detect_line_ending(current_content or "")
+    if ending and _write_file_accepts(file_ops, "keep_line_endings"):
+        new_content = _normalize_changed_line_endings(current_content, new_content, ending)
+        extra["keep_line_endings"] = True
     write_result = file_ops.write_file(op.file_path, new_content, **extra)
     return _written(write_result, _unified_diff(op.file_path, current_content, new_content))
 
