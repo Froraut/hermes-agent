@@ -412,9 +412,13 @@ class MemoryStore:
         if not operations:
             return _error("operations list is empty.")
         ops = [op or {} for op in operations]
-        # Scan every add/replace content BEFORE touching disk -- one poisoned op rejects the batch.
-        for i, op in enumerate(ops):
-            scan_error = op.get("action") in {"add", "replace"} and op.get("content") and _scan_memory_content(op["content"])
+        # One effective text per op (``new_text`` is the schema's alias for ``content``), used for
+        # BOTH the scan and the write — scanning only ``content`` let an alias-only op persist, and
+        # mirror to external providers, text the scanner exists to block.
+        texts = [(op.get("content") or op.get("new_text") or "").strip() for op in ops]
+        # Scan every add/replace text BEFORE touching disk -- one poisoned op rejects the batch.
+        for i, (op, text) in enumerate(zip(ops, texts)):
+            scan_error = op.get("action") in {"add", "replace"} and text and _scan_memory_content(text)
             if scan_error:
                 return _error(f"Operation {i + 1}: {scan_error}")
 
@@ -424,7 +428,7 @@ class MemoryStore:
             for i, op in enumerate(ops):
                 act = op.get("action")
                 msg, previous_content = self._apply_batch_op(
-                    working, act, (op.get("content") or op.get("new_text") or "").strip(),
+                    working, act, texts[i],
                     (op.get("old_text") or "").strip(), f"Operation {i + 1} ({act or 'unknown'})",
                     op.get("matched_entry"))
                 if msg:
