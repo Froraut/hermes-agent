@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 import io
+import warnings
 import zipfile
 
 import httpx
@@ -60,7 +61,8 @@ def test_declared_oversize_does_not_read_body(monkeypatch):
 
 def _zip_of(members):
     data = io.BytesIO()
-    with zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as archive:
+    with warnings.catch_warnings(), zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as archive:
+        warnings.simplefilter("ignore", UserWarning)  # "Duplicate name": some archives repeat on purpose
         for name, text in members:
             archive.writestr(name, text)
     return data.getvalue()
@@ -73,11 +75,23 @@ def _extract(monkeypatch, members):
     return clawhub.ClawHubSource()._download_zip("example", "1")
 
 
-def test_decompressed_text_never_exceeds_the_download_cap(monkeypatch):
+def _inflating(cap):
     # ~120 KB on the wire inflating to more than the 25 MB the download itself may carry.
-    cap, per_member = clawhub.ClawHubSource.ZIP_DOWNLOAD_MAX_BYTES, 400_000  # under the per-file skip
-    files = _extract(monkeypatch, [("SKILL.md", "# s")] + [
-        (f"references/r{i}.md", "a" * per_member) for i in range(cap // per_member + 1)])
+    per_member = 400_000  # under the per-file skip, so every member is kept
+    return [(f"references/r{i}.md", "a" * per_member) for i in range(cap // per_member + 1)]
+
+
+def _duplicate_names(cap):
+    # Tiny entries whose names are repeated later by oversized ones: the loop counts (and keeps) the
+    # tiny entry, skips the oversized duplicate, and a by-name read would return the duplicate's bytes.
+    names = [f"references/r{i}.md" for i in range(cap // 600_000 + 1)]
+    return [(n, "x") for n in names] + [(n, "a" * 600_000) for n in names]
+
+
+@pytest.mark.parametrize("shape", [_inflating, _duplicate_names])
+def test_decompressed_text_never_exceeds_the_download_cap(monkeypatch, shape):
+    cap = clawhub.ClawHubSource.ZIP_DOWNLOAD_MAX_BYTES
+    files = _extract(monkeypatch, [("SKILL.md", "# s")] + shape(cap))
     assert sum(len(text) for text in files.values()) <= cap
 
 

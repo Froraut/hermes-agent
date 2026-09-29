@@ -568,7 +568,8 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
                             logger.debug("Skipping large file in ZIP: %s (%d bytes)", name, info.file_size)
                             continue
                         # zipfile never inflates a member past its declared file_size, so the sum
-                        # bounds what is held before any bytes are decompressed.
+                        # bounds what is held before any bytes are decompressed — provided we read
+                        # THIS entry: a by-name read resolves a duplicated name to its last entry.
                         members += 1
                         extracted_bytes += info.file_size
                         if members > self.ZIP_EXTRACT_MAX_MEMBERS or extracted_bytes > self.ZIP_DOWNLOAD_MAX_BYTES:
@@ -578,8 +579,8 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
                             )
                             return {}
                         try:
-                            files[name] = zf.read(info.filename).decode("utf-8")
-                        except (UnicodeDecodeError, KeyError):
+                            files[name] = zf.read(info).decode("utf-8")
+                        except UnicodeDecodeError:
                             logger.debug("Skipping non-text file in ZIP: %s", name)
                 return files
             except zipfile.BadZipFile:
