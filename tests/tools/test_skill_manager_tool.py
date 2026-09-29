@@ -1050,6 +1050,26 @@ class TestPinnedGuard:
         assert "Do it well." in (tmp_path / "my-skill" / "SKILL.md").read_text()
         assert not (tmp_path / "my-skill" / "my-skill").exists()
 
+    def test_staged_skill_md_alias_previews_the_file_approval_changes(self, tmp_path):
+        """Under write approval, /skills diff for a '<skill>/SKILL.md' patch previews the root
+        SKILL.md — the file the approved replay modifies — not a nonexistent nested file."""
+        import hermes_cli.config as cfg
+        from hermes_cli.write_approval_commands import handle_pending_subcommand
+        from tools import write_approval as wa
+        config = cfg.load_config()
+        config.setdefault("skills", {})["write_approval"] = True
+        cfg.save_config(config)
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            staged = json.loads(skill_manage(
+                action="patch", name="my-skill", file_path="my-skill/SKILL.md",
+                old_string="Step 1: Do the thing.", new_string="Step 1: Do it well."))
+            assert staged.get("staged") is True, staged
+            preview = wa.skill_pending_diff(wa.get_pending(wa.SKILLS, staged["pending_id"]))
+            handle_pending_subcommand(wa.SKILLS, ["approve", staged["pending_id"]])
+        assert "-Step 1: Do the thing." in preview and "+Step 1: Do it well." in preview, preview
+        assert "Do it well." in (tmp_path / "my-skill" / "SKILL.md").read_text()
+
     def test_broken_sidecar_fails_open(self, tmp_path):
         """If skill_usage.get_record raises, we allow delete through.
 
