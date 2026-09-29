@@ -391,11 +391,30 @@ function agentPackageFallback(gitUrl: string, subdir: string | null): string {
   return subdir ? subdir.split('/').pop()! : repoNameFromUrl(gitUrl)
 }
 
-export async function probePluginRepo(gitBin: string, identifier: string): Promise<PluginProbeResult> {
+/** Match the backend's exact-revision contract; reject before invoking Git. */
+function assertFullCommitSha(ref: unknown): asserts ref is string {
+  if (typeof ref !== 'string' || !/^[a-fA-F0-9]{40}$/.test(ref)) {
+    throw new Error('--ref must be a full 40-character commit SHA.')
+  }
+}
+
+// A catalog pick is probed at its reviewed pin, like the install: the default branch tip may have
+// moved or dropped the plugin folder, or not share history with the pin at all.
+export async function probePluginRepo(
+  gitBin: string,
+  identifier: string,
+  options: { ref?: string } = {}
+): Promise<PluginProbeResult> {
   try {
+    const { ref } = options
+
+    if (ref !== undefined) {
+      assertFullCommitSha(ref)
+    }
+
     const { gitUrl, subdir } = resolvePluginGitUrl(identifier)
     const { warnings, insecure } = insecureSchemeWarnings(gitUrl)
-    const { cloneRoot } = await cloneToTemp(gitBin, gitUrl, subdir)
+    const { cloneRoot } = await cloneToTemp(gitBin, gitUrl, subdir, ref?.toLowerCase())
 
     try {
       const pluginRoot = await resolvePluginRoot(cloneRoot, subdir)
@@ -472,12 +491,9 @@ export async function installDesktopPluginFromGit(
 ): Promise<DesktopPluginInstallResult> {
   try {
     const { ref, catalogName } = options
-    // Match the backend's exact-revision contract; reject before invoking Git.
-    if (
-      (ref !== undefined || catalogName !== undefined) &&
-      (typeof ref !== 'string' || !/^[a-fA-F0-9]{40}$/.test(ref) || ref.length !== 40)
-    ) {
-      throw new Error('--ref must be a full 40-character commit SHA.')
+
+    if (ref !== undefined || catalogName !== undefined) {
+      assertFullCommitSha(ref)
     }
     if (catalogName !== undefined) {
       assertSafePluginName(catalogName, 'Catalog')
