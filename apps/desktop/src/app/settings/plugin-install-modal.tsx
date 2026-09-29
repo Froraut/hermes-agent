@@ -136,7 +136,8 @@ export function PluginInstallModal() {
         return
       }
 
-      const result = await probeFn({ identifier: payload.repo })
+      // A catalog pick is reviewed at its pin; the repo's default branch may not even contain the plugin.
+      const result = await probeFn({ identifier: payload.repo, ref: payload.sha })
 
       if (token !== probeToken.current) {
         return

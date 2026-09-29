@@ -156,6 +156,23 @@ describe('Install from Git entry flow', () => {
     )
   })
 
+  it('probes a catalog pick at its reviewed pin, not the default branch tip', async () => {
+    renderFlow()
+    act(() =>
+      openPluginInstallRequest({
+        catalogName: 'plugin',
+        repo: 'https://github.com/example/plugin',
+        sha: 'b'.repeat(40)
+      })
+    )
+
+    expect(await screen.findByText('This package includes')).toBeTruthy()
+    expect(probePluginRepo).toHaveBeenCalledWith({
+      identifier: 'https://github.com/example/plugin',
+      ref: 'b'.repeat(40)
+    })
+  })
+
   it('pins a custom install to a full commit SHA and refuses anything shorter', async () => {
     probePluginRepo.mockResolvedValue({ ok: true, agent: true, desktop: false, warnings: [] })
     requestGateway.mockImplementation(async method =>

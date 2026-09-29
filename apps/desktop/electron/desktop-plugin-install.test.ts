@@ -154,6 +154,47 @@ describe('probePluginRepo', () => {
 
     expect(result).toMatchObject({ ok: true, agent: true, agentName: 'nested-agent' })
   })
+
+  it('probes a catalog pick at its pin when the default branch tip lost the plugin folder', async () => {
+    // The unbrowse catalog entry: its reviewed pin is not on the default branch, which has no
+    // plugins/hermes, so probing the tip refused an install the backend would do at the pin.
+    const repo = mkdtemp('hermes-plugin-pinned-')
+    roots.push(repo)
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' }).toString().trim()
+    const plugin = path.join(repo, 'plugins', 'hermes')
+    fs.mkdirSync(plugin, { recursive: true })
+    fs.writeFileSync(path.join(plugin, 'plugin.yaml'), 'name: pinned-agent\n')
+    fs.writeFileSync(path.join(plugin, '__init__.py'), 'def register(ctx): pass\n')
+    git('init', '-q')
+    git('config', 'uploadpack.allowFilter', 'true')
+    git('add', '.')
+    git('-c', 'user.email=fixture@example.com', '-c', 'user.name=Fixture', 'commit', '-qm', 'plugin')
+    const pin = git('rev-parse', 'HEAD')
+    fs.rmSync(path.join(repo, 'plugins'), { recursive: true })
+    fs.writeFileSync(path.join(repo, 'README.md'), 'moved elsewhere\n')
+    git('add', '-A')
+    git('-c', 'user.email=fixture@example.com', '-c', 'user.name=Fixture', 'commit', '-qm', 'drop plugin')
+    const identifier = `${pathToFileURL(repo).href}#plugins/hermes`
+
+    expect(await probePluginRepo('git', identifier)).toMatchObject({
+      ok: false,
+      error: "Plugin subdirectory 'plugins/hermes' does not exist in the repository."
+    })
+    expect(await probePluginRepo('git', identifier, { ref: pin.toUpperCase() })).toMatchObject({
+      ok: true,
+      agent: true,
+      agentName: 'pinned-agent'
+    })
+  }, 30_000)
+
+  it.each(['main', 'abc1234', '0'.repeat(39), '--upload-pack=touch /tmp/x'])(
+    'refuses a probe pin that is not a full commit SHA (%s)',
+    async ref => {
+      const result = await probePluginRepo('git', 'https://example.invalid/owner/repo.git', { ref })
+
+      expect(result).toMatchObject({ ok: false, error: '--ref must be a full 40-character commit SHA.' })
+    }
+  )
 })
 
 describe('installDesktopPluginFromGit', () => {
