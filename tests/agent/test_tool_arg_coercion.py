@@ -6,6 +6,7 @@ coerce_tool_args() fixes these type mismatches by comparing argument values
 against the tool's JSON Schema before dispatch.
 """
 
+from decimal import Decimal
 from unittest.mock import patch
 
 import model_tools  # noqa: F401 — populates the tool registry the "real schema" tests read
@@ -32,6 +33,16 @@ class TestCoerceNumber:
     def test_negative_integer(self):
         assert _coerce_number("-7") == -7
 
+    def test_integer_result_is_exactly_the_value_written(self):
+        """A quoted ID past float precision (tweet / snowflake / BIGINT key) must never come back as
+        a different integer: any int result equals the number the string denotes, else it stays a string."""
+        for value in ("1790123456789012345", "-9007199254740993", "1e30", "12345678901234567.0"):
+            for integer_only in (True, False):
+                result = _coerce_number(value, integer_only=integer_only)
+                if isinstance(result, int):
+                    assert Decimal(result) == Decimal(value), (value, integer_only, result)
+                elif integer_only:
+                    assert result == value, (value, result)
 
 
 
