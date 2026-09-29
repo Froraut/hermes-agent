@@ -1728,6 +1728,24 @@ class TestProfileArg:
         # The wrapper's own ps line must never be taken for the gateway (stop/status would signal osascript).
         assert status.looks_like_gateway_command_line(" ".join(program_args)) is False
 
+    def test_launchd_plist_round_trips_xml_special_characters(self, tmp_path, monkeypatch):
+        """Every string the plist carries (home, cwd, logs, PATH) parses back verbatim, even with & and <."""
+        profile_dir = tmp_path / "R&D <lab>" / ".hermes"
+        profile_dir.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(profile_dir))
+        monkeypatch.setenv("PATH", "/usr/bin:/Users/me/Tools & Scripts/bin")
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: profile_dir)
+
+        data = plistlib.loads(gateway_cli.generate_launchd_plist().encode("utf-8"))
+
+        home = str(profile_dir.resolve())
+        assert data["EnvironmentVariables"]["HERMES_HOME"] == home
+        assert data["WorkingDirectory"] == home
+        assert "/Users/me/Tools & Scripts/bin" in data["EnvironmentVariables"]["PATH"].split(":")
+        assert data["StandardOutPath"] == str(profile_dir / "logs" / "gateway.log")
+        assert data["StandardErrorPath"] == str(profile_dir / "logs" / "gateway.error.log")
+
     @pytest.mark.platforms("macos")
     def test_launchd_osascript_wrapper_preserves_process_group_and_exit_status(self, tmp_path):
         """The non-polling JXA wait keeps lifecycle signals and KeepAlive failure semantics intact."""
