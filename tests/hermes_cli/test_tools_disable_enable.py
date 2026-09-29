@@ -31,6 +31,30 @@ class TestToolsDisableBuiltin:
 
 class TestToolsDisableMcp:
 
+    @pytest.mark.parametrize("tools_cfg", [
+        {"include": ["create_issue", "list_issues"]},  # include mode (`hermes mcp add` select, checklist)
+        {"exclude": ["other"]},                         # exclude mode
+        {},                                             # no filter
+    ], ids=["include-mode", "exclude-mode", "unfiltered"])
+    def test_disable_and_enable_change_what_the_runtime_registers(self, tools_cfg):
+        """The CLI edits must move the RUNTIME registration filter: include wins over exclude, so
+        on an include-mode server an exclude-only edit reported success and changed nothing."""
+        import copy
+
+        from tools.mcp_tool_registration import _make_tool_filter
+
+        config = {"mcp_servers": {"github": {"command": "x", "tools": copy.deepcopy(tools_cfg)}}}
+
+        def registered():
+            return _make_tool_filter("github", config["mcp_servers"]["github"])("create_issue")
+
+        for action, expected in (("disable", False), ("enable", True)):
+            with patch("hermes_cli.tools_config.load_config", return_value=config), \
+                 patch("hermes_cli.tools_config.save_config"):
+                tools_disable_enable_command(
+                    Namespace(tools_action=action, names=["github:create_issue"], platform="cli"))
+            assert registered() is expected, (action, config["mcp_servers"]["github"]["tools"])
+
 
     def test_disable_unknown_server_prints_error(self, capsys):
         config = {"mcp_servers": {}}

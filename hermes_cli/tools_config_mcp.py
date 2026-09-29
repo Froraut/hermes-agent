@@ -164,7 +164,9 @@ def _apply_toolset_change(config: dict, platform: str, toolset_names: List[str],
 
 
 def _apply_mcp_change(config: dict, targets: List[str], action: str) -> Set[str]:
-    """Add or remove specific MCP tools from a server's exclude list."""
+    """Enable/disable specific MCP tools in the list the runtime filter honours: ``tools.include``
+    when the server is in include mode (``_make_tool_filter``: include wins and exclude is never
+    read — editing exclude there reported success and changed nothing), else ``tools.exclude``."""
     failed_servers: Set[str] = set()
     mcp_servers = config.get("mcp_servers") or {}
 
@@ -174,12 +176,14 @@ def _apply_mcp_change(config: dict, targets: List[str], action: str) -> Set[str]
             failed_servers.add(server_name)
             continue
         tools_cfg = mcp_servers[server_name].setdefault("tools", {})
-        exclude = list(tools_cfg.get("exclude") or [])
-        if action != "disable":
-            exclude = [t for t in exclude if t != tool_name]
-        elif tool_name not in exclude:
-            exclude.append(tool_name)
-        tools_cfg["exclude"] = exclude
+        key = "include" if isinstance(tools_cfg.get("include"), (str, list, tuple, set)) else "exclude"
+        raw = tools_cfg.get(key)
+        names = [raw] if isinstance(raw, str) else list(raw or [])
+        if (action == "disable") == (key == "include"):  # disable from include / enable from exclude
+            names = [t for t in names if t != tool_name]
+        elif tool_name not in names:
+            names.append(tool_name)
+        tools_cfg[key] = names
 
     return failed_servers
 
