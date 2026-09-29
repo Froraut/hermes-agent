@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from tools.patch_parser import (
     OperationType,
     apply_v4a_operations,
@@ -298,6 +300,35 @@ class TestAdditionOnlyHunks:
         assert result.success is True
         assert file_ops.written.endswith("def new_func():\n    return True\n")
         assert "existing = True" in file_ops.written
+
+    @pytest.mark.parametrize("hint_line", ["@@ import os @@", "@@ import os", "@@ import os  "])
+    def test_both_v4a_hint_forms_anchor_the_hunk(self, hint_line):
+        """OpenAI's V4A (the apply_patch format GPT/Codex models emit) writes a hint as ``@@ line``
+        with no closing ``@@``. Dropping it is not neutral: an addition-only hunk then lands at
+        EOF and the patch reports success — the edit silently goes to the wrong place."""
+        patch = f"*** Begin Patch\n*** Update File: m.py\n{hint_line}\n+import sys\n*** End Patch"
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            written = None
+            def read_file_raw(self, path):
+                return SimpleNamespace(content="import os\n\ndef main():\n    run()\n", error=None)
+            def write_file(self, path, content, pre_content=None):
+                self.written = content
+                return SimpleNamespace(error=None)
+
+        file_ops = FakeFileOps()
+        result = apply_v4a_operations(ops, file_ops)
+        assert result.success is True, result.error
+        assert file_ops.written == "import os\nimport sys\n\ndef main():\n    run()\n"
+
+    def test_whitespace_after_marker_is_not_a_hint(self):
+        """A bare ``@@`` with trailing spaces carries no hint; it must not become a whitespace hint
+        (which would match everywhere and make an addition-only hunk 'ambiguous')."""
+        patch = "*** Begin Patch\n*** Update File: m.py\n@@   \n+tail = 1\n*** End Patch"
+        ops, err = parse_v4a_patch(patch)
+        assert err is None and ops[0].hunks[0].context_hint is None
 
 
 class TestReadFileRaw:

@@ -1,5 +1,5 @@
 """V4A patch parser/applier (codex, cline). ``*** Begin Patch``/``*** End Patch`` wrap ops:
-``*** Update File: p`` + hunks (``@@ hint @@``, `` ctx``, ``-old``, ``+new``); ``*** Add File: n``
+``*** Update File: p`` + hunks (``@@ hint [@@]``, `` ctx``, ``-old``, ``+new``); ``*** Add File: n``
 + ``+`` lines; ``*** Delete File: o``; ``*** Move File: a -> b``. Entry points:
 ``parse_v4a_patch(text) -> (ops, error)`` and ``apply_v4a_operations(ops, file_ops)``."""
 
@@ -53,7 +53,9 @@ _OP_MARKERS: List[Tuple[OperationType, re.Pattern]] = [
     (OperationType.ADD, re.compile(r'\*\*\*\s*Add\s+File:\s*(.+)')),
     (OperationType.DELETE, re.compile(r'\*\*\*\s*Delete\s+File:\s*(.+)')),
     (OperationType.MOVE, re.compile(r'\*\*\*\s*Move\s+File:\s*(.+?)\s*->\s*(.+)'))]
-_HINT_RE = re.compile(r'@@\s*(.+?)\s*@@')
+# ``@@ hint @@`` or OpenAI's V4A ``@@ hint`` (no closing marker — what GPT/Codex models emit). The
+# hint must start with a non-space: a bare ``@@`` with trailing blanks carries none.
+_HINT_RE = re.compile(r'@@\s*(\S.*?)\s*(?:@@|$)')
 
 
 def parse_v4a_patch(patch_content: str) -> Tuple[List[PatchOperation], Optional[str]]:
