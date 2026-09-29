@@ -30,11 +30,13 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
   if (event.type === 'gateway.replay_truncated') {
     // The reconnect replay lost events the backend had already evicted, so this session's
     // transcript has a hole the replayed tail cannot fill. Re-read it from stored history (a
-    // still-live turn is left to its own stream; the read skips it).
+    // still-live turn is left to its own stream; the read skips it). Nothing re-announces the
+    // hole once the watermark moved past it, so a read that races the reconnect (a respawning
+    // backend, a transient empty page) gets the post-turn hydrations' bounded retry.
     const storedSessionId = sessionId ? deps.sessionStateByRuntimeIdRef.current.get(sessionId)?.storedSessionId : null
 
     if (sessionId && storedSessionId) {
-      void deps.hydrateFromStoredSession(1, storedSessionId, sessionId)
+      void deps.hydrateFromStoredSession(3, storedSessionId, sessionId)
     }
 
     return true
