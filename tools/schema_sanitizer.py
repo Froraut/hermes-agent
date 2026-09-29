@@ -58,6 +58,22 @@ def _rename_property_keys(props: dict, path: str) -> dict[str, str]:
     return renames
 
 
+def _resolve_local_ref(ref: str, root: Any) -> Any:
+    """Target of a same-document JSON Pointer ref (``#``, ``#/$defs/X``, ``#/$defs/X/anyOf/0``)
+    in *root*, else None."""
+    if ref != "#" and not ref.startswith("#/"):
+        return None
+    target = root
+    for part in ref[2:].split("/") if ref != "#" else ():
+        part = part.replace("~1", "/").replace("~0", "~")
+        if isinstance(target, list):
+            index = int(part) if part.isascii() and part.isdigit() else len(target)
+            target = target[index] if index < len(target) else None
+        else:
+            target = target.get(part) if isinstance(target, dict) else None
+    return target
+
+
 def _schema_branches(schema: Any, root: Any, refs: tuple = ()):
     """``(branch, refs)`` for *schema* and its ``anyOf``/``oneOf``/``allOf`` branches, local
     ``$ref`` targets resolved against *root*; *refs* are the refs followed to reach the branch (a
@@ -65,12 +81,8 @@ def _schema_branches(schema: Any, root: Any, refs: tuple = ()):
     if not isinstance(schema, dict):
         return
     ref = schema.get("$ref")
-    if isinstance(ref, str) and ref.startswith("#/") and ref not in refs:
-        target = root
-        for part in ref[2:].split("/"):
-            part = part.replace("~1", "/").replace("~0", "~")
-            target = target.get(part) if isinstance(target, dict) else None
-        yield from _schema_branches(target, root, (*refs, ref))
+    if isinstance(ref, str) and ref not in refs:
+        yield from _schema_branches(_resolve_local_ref(ref, root), root, (*refs, ref))
     yield schema, refs
     for key in ("anyOf", "oneOf", "allOf"):
         for branch in schema.get(key) if isinstance(schema.get(key), list) else ():
@@ -144,26 +156,38 @@ def _value_candidates(schemas: list[tuple[int, dict]], key: str) -> list:
     return found if declared else [(rank + 1, schema.get("unevaluatedProperties")) for rank, schema in schemas]
 
 
+def _item_schema(schema: dict, index: int) -> Any:
+    """Schema of array element *index*: its tuple position (``prefixItems``, or legacy list-valued
+    ``items``), else the schema for the remaining elements."""
+    prefix, items = schema.get("prefixItems"), schema.get("items")
+    if isinstance(prefix, list):
+        positional, rest = prefix, items
+    elif isinstance(items, list):
+        positional, rest = items, schema.get("additionalItems")
+    else:
+        positional, rest = [], items
+    return positional[index] if index < len(positional) else rest
+
+
 def _element_candidates(schemas: list[tuple[int, dict]], index: int) -> list:
-    """Candidates for array element *index*: dict ``items``, else ``unevaluatedItems`` for an
-    element no ``prefixItems`` / tuple ``items`` / ``contains`` can have evaluated. ``contains``
-    is not followed: which elements it describes needs a validator, and its renamed keys are
-    legal extra keys on every other element."""
-    items = [(rank, schema["items"]) for rank, schema in schemas if isinstance(schema.get("items"), dict)]
-    prefix = max((len(schema[key]) for _, schema in schemas for key in ("prefixItems", "items")
-                  if isinstance(schema.get(key), list)), default=0)
-    if items or index < prefix or any("contains" in schema for _, schema in schemas):
-        return items
+    """Candidates for array element *index*: each schema's tuple position or rest schema
+    (``_item_schema``) at its rank, else ``unevaluatedItems`` one rank weaker for an element no
+    tuple position, rest schema or ``contains`` can have evaluated. ``contains`` is not followed:
+    which elements it describes needs a validator, and its renamed keys are legal extra keys on
+    every other element."""
+    found = [(rank, _item_schema(schema, index)) for rank, schema in schemas]
+    if any(sub is not None for _, sub in found) or any("contains" in schema for _, schema in schemas):
+        return found
     return [(rank + 1, schema.get("unevaluatedItems")) for rank, schema in schemas]
 
 
 def unrename_tool_args(params_schema: Any, args: Any) -> Any:
     """Map sanitized keys in model-emitted args back to wire names. ``params_schema`` is the
     ORIGINAL registry schema; follows every position ``_sanitize_node`` renames in that describes
-    the args: object properties, array items, local ``$ref`` targets and union branches, and one
-    rank weaker the conditional and active dependent subschemas, pattern / additional /
-    unevaluated properties and unevaluated items, each weaker position only for keys the object's
-    own declarations leave open; unknown keys pass through."""
+    the args: object properties, array items including tuple positions, local ``$ref`` targets and
+    union branches, and one rank weaker the conditional and active dependent subschemas, pattern /
+    additional / unevaluated properties and unevaluated items, each weaker position only for keys
+    the object's own declarations leave open; unknown keys pass through."""
     return _unrename([(0, params_schema)], args, params_schema)
 
 
