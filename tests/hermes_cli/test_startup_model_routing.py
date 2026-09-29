@@ -208,12 +208,15 @@ def test_oneshot_and_tui_qualified_model_never_reaches_default_provider(tmp_path
     assert tui_server._resolve_startup_runtime() == ("nemotron-nano-30b", "custom:jetson-vllm")
 
 
-@pytest.mark.parametrize("current_provider", ["custom", "custom:local", "ollama"])
+@pytest.mark.parametrize("current_provider", [
+    "custom", "custom:local", "ollama", "local", "vllm", "llamacpp", "lmstudio", "LM-Studio"])
 @pytest.mark.parametrize("tag", ["qwen:7b", "nemotron:70b"])
 def test_startup_route_keeps_ollama_tag_on_local_endpoint(monkeypatch, current_provider, tag):
     """``qwen``/``nemotron`` are also provider aliases, but on a local endpoint ``qwen:7b`` is an
     Ollama tag: startup must not re-route the configured default to a cloud provider with model
-    ``7b`` (the guard /model's vendor-colon step already applies). Elsewhere the split stands."""
+    ``7b`` (the guard /model's vendor-colon step already applies). Startup callers pass the raw
+    ``model.provider``, so every local alias counts, not only the canonical spelling. Elsewhere
+    the split stands."""
     monkeypatch.setattr(model_switch, "DIRECT_ALIASES", {})
     assert model_switch.resolve_startup_model_route(tag, current_provider=current_provider) is None
     assert model_switch.resolve_startup_model_route(tag, current_provider="anthropic").model == tag.split(":")[1]
