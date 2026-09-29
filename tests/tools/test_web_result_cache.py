@@ -147,30 +147,39 @@ def test_single_flight_coalesces_concurrent_identical_queries():
 
 def test_search_memo_never_serves_one_profile_another_profiles_results(tmp_path):
     """Multiplexed profiles each reach their own backend: a profile's cached hit (e.g. from a
-    private SearXNG) must not answer the same query for a different profile home."""
-    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+    private SearXNG) must not answer the same query for a different profile, and switching back
+    (A→B→A) still serves A its own cached result. Runs under multiplex through the gateway's real
+    per-turn binding (home override + the profile's own .env as secret scope)."""
+    from agent.secret_scope import get_secret, set_multiplex_active
+    from gateway.run import _profile_runtime_scope
     from tools.web_tools import _memoized_search
 
-    class ProfileBackend:  # results depend on which profile's config/secrets the call runs under
+    calls = []
+
+    class ProfileSearxng:  # endpoint comes from the calling profile's own .env
         name = "searxng"
 
         def search(self, query, limit):
-            return {"success": True, "data": {"web": [
-                {"title": query, "url": f"https://{get_hermes_home().name}.internal/doc"}]}}
+            calls.append(get_secret("SEARXNG_URL"))
+            return {"success": True, "data": {"web": [{"title": query, "url": f"{calls[-1]}/doc"}]}}
 
     def search_as(home):
-        token = set_hermes_home_override(str(home))
-        try:
-            return _memoized_search(ProfileBackend(), "q3 roadmap", 5)["data"]["web"][0]["url"]
-        finally:
-            reset_hermes_home_override(token)
+        with _profile_runtime_scope(home):
+            return _memoized_search(ProfileSearxng(), "q3 roadmap", 5)["data"]["web"][0]["url"]
 
     wrc.search_memo.clear()
-    prof_a, prof_b = tmp_path / "prof-a", tmp_path / "prof-b"
-    prof_a.mkdir()
-    prof_b.mkdir()
-    assert search_as(prof_a) == "https://prof-a.internal/doc"
-    assert search_as(prof_b) == "https://prof-b.internal/doc"
+    homes = {}
+    for name in ("prof-a", "prof-b"):
+        homes[name] = tmp_path / name
+        homes[name].mkdir()
+        (homes[name] / ".env").write_text(f"SEARXNG_URL=https://{name}.internal\n", encoding="utf-8")
+    set_multiplex_active(True)
+    try:
+        seen = [search_as(homes[n]) for n in ("prof-a", "prof-b", "prof-a")]
+    finally:
+        set_multiplex_active(False)
+    assert seen == ["https://prof-a.internal/doc", "https://prof-b.internal/doc", "https://prof-a.internal/doc"]
+    assert calls == ["https://prof-a.internal", "https://prof-b.internal"]  # A's return trip is A's own hit
 
 
 # ── extract cache ────────────────────────────────────────────────────────
