@@ -634,3 +634,36 @@ def test_unrename_restores_conditional_and_pattern_keys_only_where_they_apply():
     assert set(shown["then"]["properties"]) <= set(_as_model_writes(wire))
     assert set(shown["patternProperties"]["^x-"]["properties"]) == set(_as_model_writes(wire["x-meta"]))
     assert unrename_tool_args(params, _as_model_writes(wire)) == wire
+
+
+def test_unrename_restores_keys_renamed_at_every_depth():
+    """The sanitizer renames illegal keys wherever properties live ($ref targets, union branches,
+    additionalProperties values, array items); args the model writes with those keys must map back
+    to the wire keys at the same positions."""
+    from tools.schema_sanitizer import unrename_tool_args
+
+    params = {
+        "type": "object",
+        "$defs": {"Node": {"type": "object", "properties": {
+            "@id": {"type": "string"}, "child$": {"$ref": "#/$defs/Node"}}}},
+        "properties": {
+            "node": {"$ref": "#/$defs/Node"},
+            "either": {"oneOf": [{"type": "object", "properties": {"@type": {"type": "string"}}},
+                                 {"type": "string"}]},
+            "both": {"allOf": [{"type": "object", "properties": {"a:b": {"type": "string"}}}]},
+            "tags": {"type": "object",
+                     "additionalProperties": {"type": "object", "properties": {"$v": {"type": "integer"}}}},
+            "rows": {"type": "array", "items": {"$ref": "#/$defs/Node"}},
+        },
+    }
+    wire = {"node": {"@id": "1", "child$": {"@id": "2"}}, "either": {"@type": "x"}, "both": {"a:b": "y"},
+            "tags": {"k": {"$v": 3}}, "rows": [{"@id": "3"}]}
+
+    def as_model_writes(value):
+        if isinstance(value, dict):
+            return {sanitize_property_key(k): as_model_writes(v) for k, v in value.items()}
+        return [as_model_writes(v) for v in value] if isinstance(value, list) else value
+
+    shown = sanitize_tool_schemas([_tool("t", params)])[0]["function"]["parameters"]
+    assert set(shown["$defs"]["Node"]["properties"]) == set(as_model_writes(wire["node"]))
+    assert unrename_tool_args(params, as_model_writes(wire)) == wire

@@ -58,24 +58,43 @@ def _rename_property_keys(props: dict, path: str) -> dict[str, str]:
     return renames
 
 
-def _with_conditionals(candidates: list, args: Any) -> list[tuple[int, dict]]:
-    """``(rank, schema)`` candidates plus their conditional subschemas one rank weaker (lower rank
-    = stronger): ``if``/``then``/``else`` (which branch holds is not evaluated) and the
-    ``dependentSchemas`` / schema-valued ``dependencies`` whose trigger key *args* contains."""
+def _schema_branches(schema: Any, root: Any, refs: tuple = ()):
+    """``(branch, refs)`` for *schema* and its ``anyOf``/``oneOf``/``allOf`` branches, local
+    ``$ref`` targets resolved against *root*; *refs* are the refs followed to reach the branch (a
+    ref already on this path is not followed again, so recursive schemas end)."""
+    if not isinstance(schema, dict):
+        return
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/") and ref not in refs:
+        target = root
+        for part in ref[2:].split("/"):
+            part = part.replace("~1", "/").replace("~0", "~")
+            target = target.get(part) if isinstance(target, dict) else None
+        yield from _schema_branches(target, root, (*refs, ref))
+    yield schema, refs
+    for key in ("anyOf", "oneOf", "allOf"):
+        for branch in schema.get(key) if isinstance(schema.get(key), list) else ():
+            yield from _schema_branches(branch, root, refs)
+
+
+def _with_conditionals(candidates: list, args: Any, root: Any, refs: tuple = ()) -> list[tuple[int, dict]]:
+    """``(rank, schema)`` candidates (lower rank = stronger) with their union branches and local
+    ``$ref`` targets at the same rank, plus their conditional subschemas one rank weaker:
+    ``if``/``then``/``else`` (which branch holds is not evaluated) and the ``dependentSchemas`` /
+    schema-valued ``dependencies`` whose trigger key *args* contains."""
     found = []
-    for rank, schema in candidates:
-        if not isinstance(schema, dict):
-            continue
-        found.append((rank, schema))
-        nested = [schema.get(key) for key in ("if", "then", "else")]
-        deps = [found_deps for key in ("dependentSchemas", "dependencies")
-                if isinstance(args, dict) and isinstance(found_deps := schema.get(key), dict)]
-        if deps:  # a trigger arrives in the spelling the model was shown
-            props = schema.get("properties")
-            shown = _rename_property_keys(props, "<unrename>") if isinstance(props, dict) else {}
-            nested += [sub for dep in deps for trigger, sub in dep.items()
-                       if trigger in args or shown.get(trigger) in args]
-        found += _with_conditionals([(rank + 1, sub) for sub in nested], args)
+    for rank, candidate in candidates:
+        for schema, path in _schema_branches(candidate, root, refs):
+            found.append((rank, schema))
+            nested = [schema.get(key) for key in ("if", "then", "else")]
+            deps = [found_deps for key in ("dependentSchemas", "dependencies")
+                    if isinstance(args, dict) and isinstance(found_deps := schema.get(key), dict)]
+            if deps:  # a trigger arrives in the spelling the model was shown
+                props = schema.get("properties")
+                shown = _rename_property_keys(props, "<unrename>") if isinstance(props, dict) else {}
+                nested += [sub for dep in deps for trigger, sub in dep.items()
+                           if trigger in args or shown.get(trigger) in args]
+            found += _with_conditionals([(rank + 1, sub) for sub in nested], args, root, path)
     return found
 
 
@@ -94,9 +113,10 @@ def _pattern_schemas(schema: dict, key: str) -> list:
 
 def _wire_key(schemas: list[tuple[int, dict]], shown: dict[int, dict[str, set]], key: str) -> str:
     """Wire name of a key the model sent. The strongest rank that declares it decides: its
-    ``properties`` (one shown key two of them spell differently on the wire stays as sent), else
-    a matching ``patternProperties`` / explicit ``additionalProperties``, which keep it as sent.
-    So a weaker conditional never overrides, nor forges over, what the object itself declares."""
+    ``properties`` (one shown key that two of them, e.g. two union alternatives, spell differently
+    on the wire stays as sent, since which one the model meant is not knowable), else a matching
+    ``patternProperties`` / explicit ``additionalProperties``, which keep it as sent. So a weaker
+    conditional never overrides, nor forges over, what the object itself declares."""
     for rank in sorted({rank for rank, _ in schemas}):
         if names := shown.get(rank, {}).get(key):
             return next(iter(names)) if len(names) == 1 else key
@@ -107,9 +127,10 @@ def _wire_key(schemas: list[tuple[int, dict]], shown: dict[int, dict[str, set]],
 
 
 def _value_candidates(schemas: list[tuple[int, dict]], key: str) -> list:
-    """Candidates for an object's *key* value: ``properties`` entries keep their schema's rank;
-    matching ``patternProperties``, else ``additionalProperties``, are one weaker; and
-    ``unevaluatedProperties`` applies only when no candidate declares *key*."""
+    """Candidates for an object's *key* value: ``properties`` entries keep their schema's rank
+    (every alternative that declares *key* counts); matching ``patternProperties``, else
+    ``additionalProperties``, are one weaker; and ``unevaluatedProperties`` applies only when no
+    candidate declares *key*."""
     found, declared = [], False
     for rank, schema in schemas:
         props = schema.get("properties")
@@ -138,19 +159,20 @@ def _element_candidates(schemas: list[tuple[int, dict]], index: int) -> list:
 
 def unrename_tool_args(params_schema: Any, args: Any) -> Any:
     """Map sanitized keys in model-emitted args back to wire names. ``params_schema`` is the
-    ORIGINAL registry schema; follows object properties and array items as well as the other
-    positions ``_sanitize_node`` renames in that describe the args (conditional and active
-    dependent subschemas, pattern / additional / unevaluated properties, unevaluated items), each
-    only for keys the object's own declarations leave open; unknown keys pass through."""
-    return _unrename([(0, params_schema)], args)
+    ORIGINAL registry schema; follows every position ``_sanitize_node`` renames in that describes
+    the args: object properties, array items, local ``$ref`` targets and union branches, and one
+    rank weaker the conditional and active dependent subschemas, pattern / additional /
+    unevaluated properties and unevaluated items, each weaker position only for keys the object's
+    own declarations leave open; unknown keys pass through."""
+    return _unrename([(0, params_schema)], args, params_schema)
 
 
-def _unrename(candidates: list, args: Any) -> Any:
-    schemas = _with_conditionals(candidates, args)
+def _unrename(candidates: list, args: Any, root: Any) -> Any:
+    schemas = _with_conditionals(candidates, args, root)
     if not schemas:
         return args
     if isinstance(args, list):
-        return [_unrename(_element_candidates(schemas, i), item) for i, item in enumerate(args)]
+        return [_unrename(_element_candidates(schemas, i), item, root) for i, item in enumerate(args)]
     if not isinstance(args, dict):
         return args
     shown: dict[int, dict[str, set]] = {}  # rank -> key the model was shown -> wire keys
@@ -163,7 +185,7 @@ def _unrename(candidates: list, args: Any) -> Any:
     out = {}
     for key, value in args.items():
         orig = _wire_key(schemas, shown, key)
-        out[orig] = _unrename(_value_candidates(schemas, orig), value)
+        out[orig] = _unrename(_value_candidates(schemas, orig), value, root)
     return out
 
 
