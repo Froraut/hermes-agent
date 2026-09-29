@@ -227,6 +227,29 @@ def test_bot_outlives_turns_and_other_sessions(monkeypatch):
         stop_mock.assert_called_once()
 
 
+def test_bot_follows_its_conversation_across_compression():
+    """Compression rotates the session id mid-meeting: finalizing the continuation still ends the
+    conversation that joined the call, while an unrelated session's end leaves the bot alone."""
+    import plugins.google_meet as gm
+    from hermes_state import SessionDB
+    from plugins.google_meet import process_manager as pm
+
+    db = SessionDB()  # the per-test HERMES_HOME's state.db
+    db.create_session("root", source="cli")
+    db.end_session("root", "compression")
+    db.create_session("tip", source="cli", parent_session_id="root")
+    db.create_session("other", source="cli")
+    db.close()
+    pm._write_active({"pid": 4242, "meeting_id": "abc-defg-hij", "out_dir": "/nonexistent",
+                      "url": "https://meet.google.com/abc-defg-hij", "started_at": 0, "session_id": "root"})
+
+    with patch.object(pm, "_pid_alive", return_value=True), patch.object(pm, "stop") as stop_mock:
+        gm._on_session_finalize(session_id="other")
+        stop_mock.assert_not_called()
+        gm._on_session_finalize(session_id="tip")
+        stop_mock.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # Plugin register() — platform gating + tool registration
 # ---------------------------------------------------------------------------

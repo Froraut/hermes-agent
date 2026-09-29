@@ -29,14 +29,27 @@ _TOOLS = (
     ("meet_say",        MEET_SAY_SCHEMA,        handle_meet_say,        "🗣️"))
 
 
+def _owns_meeting(owner: str, session_id: str) -> bool:
+    """Whether the session ending now is the conversation that joined. Compression rotates the
+    session id mid-conversation, so the id recorded at join may be another link of the same
+    compression chain as the one finalizing."""
+    if not owner or not session_id or owner == session_id:
+        return True
+    from hermes_state_registry import acquire, release_or_close
+    db = acquire()
+    try:
+        return owner in db.get_compression_lineage(session_id)
+    finally:
+        release_or_close(db)
+
+
 def _on_session_finalize(session_id: str = "", **kwargs) -> None:
     """Leave a still-running call when the session that joined it really ends, so we don't orphan a
     headless Chromium (never raises). Not ``on_session_end``: that fires after every turn, and the bot
     must outlive the turn that started it."""
     try:
         status = pm.status()
-        owner = status.get("sessionId")
-        if status.get("ok") and status.get("alive") and (not owner or not session_id or owner == session_id):
+        if status.get("ok") and status.get("alive") and _owns_meeting(status.get("sessionId"), session_id):
             pm.stop(reason="session ended")
     except Exception as e:  # pragma: no cover — defensive
         logger.debug("google_meet on_session_finalize cleanup failed: %s", e)
