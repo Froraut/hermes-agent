@@ -12,7 +12,10 @@ still land on the intended region::
 import bisect
 import re
 from difflib import SequenceMatcher
-from typing import Callable, Optional
+from functools import partial
+from typing import Callable, Optional, Sequence
+
+from tools.file_operations_common import _splice_line_endings
 
 Span = tuple[int, int]
 
@@ -336,11 +339,15 @@ def _format_match_locations(content: str, matches: list[Span], cap: int = 5) -> 
 
 
 def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
-                           replace_all: bool = False) -> tuple[str, int, Optional[str], Optional[str]]:
+                           replace_all: bool = False, line_ending: Optional[str] = None,
+                           kept_lines: Optional[Sequence[Optional[int]]] = None,
+                           ) -> tuple[str, int, Optional[str], Optional[str]]:
     """Find and replace via the strategy chain.
 
     Returns ``(new_content, match_count, strategy_name, error)``; on failure
-    ``(content, 0, None, error)``.
+    ``(content, 0, None, error)``. ``line_ending`` (the file's) gives each spliced replacement
+    its line endings by provenance, and ``kept_lines`` names the ``old_string`` line each
+    ``new_string`` line repeats unchanged (see ``_splice_line_endings``).
     """
     if not old_string:
         # Actionable recovery text: a terse "cannot be empty" leaves the model
@@ -391,9 +398,11 @@ def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
         effective_new = _maybe_unescape_new_string(new_string, content, matches)
         if strategy_name == "unicode_normalized":
             effective_new = _preserve_unicode_in_replacement(content, matches, old_string, effective_new)
+        eol = partial(_splice_line_endings, pattern=old_string, ending=line_ending,
+                      kept_lines=kept_lines) if line_ending else None
         new_content = _apply_replacements(
             content, matches, effective_new,
-            old_string=old_string if strategy_name != "exact" else None)
+            old_string=old_string if strategy_name != "exact" else None, eol=eol)
         _note_edit_match(strategy_name)
         return new_content, len(matches), strategy_name, None
 
@@ -538,14 +547,19 @@ def _preserve_unicode_in_replacement(content: str, matches: list[Span],
 
 
 def _apply_replacements(content: str, matches: list[Span],
-                        new_string: str, old_string: Optional[str] = None) -> str:
+                        new_string: str, old_string: Optional[str] = None,
+                        eol: Optional[Callable[[str, str], str]] = None) -> str:
     """Splice ``new_string`` over each span (end-to-start so offsets stay valid);
-    ``old_string`` non-None (non-exact match) re-indents it per region."""
+    ``old_string`` non-None (non-exact match) re-indents it per region, and
+    ``eol(region, text)`` gives it the file's line endings."""
     result = content
     for start, end in sorted(matches, key=lambda x: x[0], reverse=True):
+        region = content[start:end]
         adjusted = new_string
         if old_string is not None:
-            adjusted = _reindent_replacement(content[start:end], old_string, new_string)
+            adjusted = _reindent_replacement(region, old_string, new_string)
+        if eol is not None:
+            adjusted = eol(region, adjusted)
         result = result[:start] + adjusted + result[end:]
     return result
 
