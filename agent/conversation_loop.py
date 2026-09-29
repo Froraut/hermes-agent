@@ -1730,6 +1730,12 @@ def run_conversation(
             moa_config=moa_config,
             turn_author=turn_author,
         )
+    # A /steer with no tool batch left to drain into (it landed after the final response, or the
+    # turn ended on a path that skips finalize_turn) is handed back as the next user turn; left in
+    # the slot, the next turn's pre-API drain would find it with this turn already persisted.
+    _leftover_steer = agent._drain_pending_steer() if isinstance(result, dict) else None
+    if _leftover_steer:
+        result["pending_steer"] = _leftover_steer
     result = export_current_turn_boundary(agent, result, user_message)
     _close_durable_failed_turn(agent, result)
     return result

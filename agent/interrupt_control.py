@@ -225,7 +225,7 @@ class InterruptControlMixin:
         will no longer happen, and re-injecting the note into the post-stop turn would surprise the
         user. Every other caller (redirect rebuild, error recovery, turn-boundary hygiene) continues
         this session, so the already-accepted steer must survive: it stays buffered for the existing
-        drains — the pre-API inject, the post-batch append, or the finalizer's leftover handoff —
+        drains — the pre-API inject, the post-batch append, or the turn-end leftover handoff —
         instead of silently vanishing after the surface was told it was delivered."""
         with _ic_lock(self, "_pending_redirect_lock"):
             if preserve_redirect and not _ic_slot(self, "_pending_redirect_lock", "_pending_redirect"):
