@@ -140,6 +140,37 @@ def _no_match_hint(error: Optional[str], search_pattern: str, content: str) -> s
     return ""
 
 
+# replace_all is a replace-mode flag patch mode ignores. Context lines always disambiguate; an @@
+# hint only does when the other matches sit outside its window (see _replace_hunk), so not advised.
+_V4A_AMBIGUOUS_ADVICE = ("Add unchanged context lines (' ' prefix) around the change until the hunk "
+                         "matches exactly one place.")
+
+
+def _patch_mode_advice(error: Optional[str]) -> Optional[str]:
+    """The matcher's error with its replace-mode ambiguity remedy swapped for one a patch can use."""
+    from tools.fuzzy_match import AMBIGUOUS_MATCH_ADVICE
+    return error.replace(AMBIGUOUS_MATCH_ADVICE, _V4A_AMBIGUOUS_ADVICE) if error else error
+
+
+def _replace_hunk(content: str, hunk: Hunk, search_pattern: str,
+                  replacement: str) -> Tuple[str, int, Optional[str]]:
+    """``(content, count, error)`` for one hunk: file-wide, else inside a window around its context
+    hint (the hint's job is to pick one of several matches). Validation and apply share it so a
+    hunk the apply phase would place is never rejected by the validation phase ahead of it. The
+    file-wide error is kept: its match line numbers are file-relative, the window's are not."""
+    from tools.fuzzy_match import fuzzy_find_and_replace
+    new_content, count, _strategy, error = fuzzy_find_and_replace(
+        content, search_pattern, replacement, replace_all=False)
+    hint_pos = content.find(hunk.context_hint) if hunk.context_hint and not count else -1
+    if hint_pos != -1:
+        start, end = max(0, hint_pos - 500), min(len(content), hint_pos + 2000)
+        window_new, count, _strategy, _window_error = fuzzy_find_and_replace(
+            content[start:end], search_pattern, replacement, replace_all=False)
+        if count:
+            return content[:start] + window_new + content[end:], count, None
+    return new_content, count, error
+
+
 def _hint_ambiguity(content: str, hint: str, tail: str = "") -> Tuple[int, str]:
     """(occurrences, error) for an addition-only hunk's context hint; error is '' when unique."""
     n = _count_occurrences(content, hint)
@@ -149,7 +180,7 @@ def _hint_ambiguity(content: str, hint: str, tail: str = "") -> Tuple[int, str]:
 def _validate_operations(operations: List[PatchOperation], file_ops: Any) -> List[str]:
     """Dry-run every operation -> error strings (empty = safe). UPDATE hunks are simulated in
     order so later hunks see post-earlier-hunk content, exactly as apply will."""
-    from tools.fuzzy_match import fuzzy_find_and_replace, is_already_applied
+    from tools.fuzzy_match import AMBIGUOUS_MATCH_ADVICE, is_already_applied
     errors: List[str] = []
     real_change_count = 0
     # Overlay so inter-op state validates (a MOVE creating the path a later UPDATE targets).
@@ -202,16 +233,16 @@ def _validate_operations(operations: List[PatchOperation], file_ops: Any) -> Lis
                         errors.append(f"{op.file_path}: addition-only hunk {ambiguous}")
                 continue
             search_pattern, replacement = '\n'.join(search_lines), '\n'.join(replace_lines)
-            new_simulated, count, _strategy, match_error = fuzzy_find_and_replace(
-                simulated, search_pattern, replacement, replace_all=False)
+            new_simulated, count, match_error = _replace_hunk(simulated, hunk, search_pattern, replacement)
             if count:
                 simulated = new_simulated
             elif not is_already_applied(simulated or "", search_pattern, replacement):
                 # Already-applied hunks are no-ops (apply performs the same skip).
                 label = f"'{hunk.context_hint}'" if hunk.context_hint else "(no hint)"
+                verdict = "is ambiguous" if match_error and AMBIGUOUS_MATCH_ADVICE in match_error else "not found"
                 errors.append(
-                    f"{op.file_path}: hunk {hunk_index} {label} not found"
-                    + (f" — {match_error}" if match_error else "")
+                    f"{op.file_path}: hunk {hunk_index} {label} {verdict}"
+                    + (f" — {_patch_mode_advice(match_error)}" if match_error else "")
                     + _no_match_hint(match_error, search_pattern, simulated))
         pending_content[op.file_path] = simulated
 
@@ -403,7 +434,7 @@ def _insert_addition_only(new_content: str, hunk: Hunk, insert_text: str) -> Tup
 
 def _apply_update(op: PatchOperation, file_ops: Any) -> ApplyResult:
     """Apply each hunk via fuzzy replace, then write once."""
-    from tools.fuzzy_match import fuzzy_find_and_replace, is_already_applied
+    from tools.fuzzy_match import is_already_applied
     read_result = file_ops.read_file_raw(op.file_path)  # raw: no line numbers / truncation
     if read_result.error:
         return _fail(f"Cannot read file: {read_result.error}")
@@ -418,26 +449,13 @@ def _apply_update(op: PatchOperation, file_ops: Any) -> ApplyResult:
             if err:
                 return _fail(err)
             continue
-        new_content, count, _strategy, error = fuzzy_find_and_replace(
-            new_content, search_pattern, replacement, replace_all=False)
-        if not (error and count == 0):
-            continue
-        # Retry inside a window around the context hint, if any.
-        hint_pos = new_content.find(hunk.context_hint) if hunk.context_hint else -1
-        if hint_pos != -1:
-            window_start = max(0, hint_pos - 500)
-            window_end = min(len(new_content), hint_pos + 2000)
-            window_new, count, _strategy, error = fuzzy_find_and_replace(
-                new_content[window_start:window_end], search_pattern, replacement, replace_all=False)
-            if count > 0:
-                new_content = new_content[:window_start] + window_new + new_content[window_end:]
-                error = None
-        if error:
+        new_content, count, error = _replace_hunk(new_content, hunk, search_pattern, replacement)
+        if not count:
             # Mirror validation's already-applied skip, else the two phases disagree and fail here.
             if is_already_applied(new_content, search_pattern, replacement):
                 continue
             hint = _no_match_hint(error, search_pattern, new_content)
-            return _fail(f"Could not apply hunk: {error}" + hint)
+            return _fail(f"Could not apply hunk: {_patch_mode_advice(error)}" + hint)
     # Pass pre_content to skip a redundant re-read inside write_file when supported.
     extra = {"pre_content": current_content} if _write_file_accepts_pre_content(file_ops) else {}
     write_result = file_ops.write_file(op.file_path, new_content, **extra)
