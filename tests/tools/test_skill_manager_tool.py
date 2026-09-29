@@ -1078,6 +1078,30 @@ class TestCategorizedSpelling:
         assert clobber["success"] is False and "already touched" in clobber["error"], clobber
         assert not (skill_dir / "references" / "a.md").exists()
 
+    @pytest.mark.parametrize("named_index", [0, 1], ids=["bare-name-target", "other-sibling"])
+    def test_staged_write_replays_on_the_skill_its_locator_named(self, named_index):
+        """The categorized path is the locator (it disambiguates same-name skills); only guard
+        and record keys drop the category. A staged write keeps it, so if the named skill is gone
+        by approval time, a same-name sibling in another category never takes the write."""
+        import shutil
+        import hermes_cli.config as cfg
+        from hermes_cli.write_approval_commands import handle_pending_subcommand
+        from tools import write_approval as wa
+        dirs = [self._make("research/foo"), self._make("devops/foo")]
+        config = cfg.load_config()
+        config.setdefault("skills", {})["write_approval"] = True
+        cfg.save_config(config)
+        bare_target = _find_skill("foo")["path"]
+        named = sorted(dirs, key=lambda d: d != bare_target)[named_index]
+        sibling = next(d for d in dirs if d != named)
+
+        staged = json.loads(skill_manage(action="delete", name=f"{named.parent.name}/foo"))
+        assert staged.get("staged"), staged
+        shutil.rmtree(named)
+        handle_pending_subcommand(wa.SKILLS, ["approve", staged["pending_id"]])
+
+        assert (sibling / "SKILL.md").exists()
+
 
 # ---------------------------------------------------------------------------
 # _delete_skill — recursive-delete safety (port of Kilo Code #11240)

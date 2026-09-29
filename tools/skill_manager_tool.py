@@ -246,18 +246,6 @@ def _find_skill(name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _canonical_skill_name(name: str) -> str:
-    """The bare name for a categorized spelling (``research/my-skill`` -> ``my-skill``), so pin and
-    essential guards, usage and ledger records, and batch bookkeeping all key on one identity
-    whichever accepted spelling named the skill. Kept as given when it resolves to no skill, or when
-    the bare name reaches a different one (the collision the categorized path disambiguates)."""
-    if not name or "/" not in name:
-        return name
-    found = _find_skill(name)
-    bare = found and _find_skill(found["path"].name)
-    return found["path"].name if bare and bare["path"] == found["path"] else name
-
-
 def _find_skill_in_other_profiles(name: str) -> List[Tuple[str, Path]]:
     """``(profile, skill_dir)`` pairs for OTHER profiles holding ``name`` (so the not-found
     error can explain a wrong-profile mistake). Fail-quiet."""
@@ -355,7 +343,7 @@ def _locate_for_write(name: str, action: str, not_found_suffix: str = "", *,
         return None, _err(_skill_not_found_error(name, not_found_suffix))
     skill_dir = existing["path"]
     guard = ((org_guard and _org_mirror_write_guard(name, skill_dir, action))
-             or _background_review_write_guard(name, skill_dir, action))
+             or _background_review_write_guard(skill_dir.name, skill_dir, action))
     return (None, guard) if guard else (skill_dir, None)
 
 
@@ -740,7 +728,9 @@ _ACTION_HANDLERS = {
 def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
                     session_id, ledger_before) -> None:
     """Best-effort post-mutation side effects (never break the tool): ledger, prompt-cache
-    clear, curator telemetry, debounced sync push."""
+    clear, curator telemetry, debounced sync push. ``name`` is the locator the caller used; the
+    records key on the skill's own name, so ``research/my-skill`` and ``my-skill`` share one."""
+    skill = Path(name).name
     with suppress(Exception):
         from tools import skill_ledger as _ledger
         _post = _find_skill(name)
@@ -749,7 +739,7 @@ def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
                      if action == "delete" else {})
         _evidence.update({k: v for k, v in (("session_id", session_id), ("file_path", file_path)) if v})
         _ledger.record_mutation(
-            action, name, before=ledger_before if ledger_before is not None else [],
+            action, skill, before=ledger_before if ledger_before is not None else [],
             after_root=_post["path"] if _post else None, evidence=_evidence)
     with suppress(Exception):
         from agent.prompt_builder import clear_skills_system_prompt_cache
@@ -769,12 +759,12 @@ def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
             record_created(name, agent_created=is_background_review(),
                            task_id=task_id, session_id=session_id)
         elif action in {"patch", "edit", "write_file", "remove_file"}:
-            bump_patch(name, action=action, task_id=task_id, session_id=session_id)
+            bump_patch(skill, action=action, task_id=task_id, session_id=session_id)
         elif action == "delete" and not result.get("_archived"):
-            forget(name)
+            forget(skill)
     # Only AFTER the write gate passed (staged writes returned early): never push un-reviewed content.
     with suppress(Exception):
-        _maybe_debounced_sync_push(name)
+        _maybe_debounced_sync_push(skill)
 
 
 def skill_manage(
@@ -787,8 +777,6 @@ def skill_manage(
     if operations is not None:
         return _skill_manage_batch(
             operations, default_name=name or None, task_id=task_id, session_id=session_id)
-    if action != "create":
-        name = _canonical_skill_name(name)
     if (preflight := _background_review_preflight(action, name)) is not None:
         return json.dumps(preflight, ensure_ascii=False)
     # Approval gate: skills are too large to review inline, so they always stage regardless
