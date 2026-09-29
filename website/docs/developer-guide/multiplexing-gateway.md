@@ -126,7 +126,11 @@ the env frozen at activation** (`launch_profile_policy.served_secret_scope` /
 profile: a provider key, bot token or `TERMINAL_ENV` that systemd
 `Environment=`, `op run` or a shell export injected has no file to rebuild
 from. Every other served home, the default root under a named launcher
-included, is built from its own files only.
+included, is built from its own files only. Cron fires bind the same pair
+(`cron/scheduler.py::_run_one_job_body`); the restart-safe cron worker hands
+the frozen env only to the launch profile's worker, and a secondary's worker
+freezes an empty launch env so the launch residue left in its env never
+enters its scope.
 
 All three are `contextvars`, so they propagate into executor worker threads
 via `copy_context()` and unwind deterministically — nothing is written to

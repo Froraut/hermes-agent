@@ -3170,8 +3170,8 @@ def _run_one_job_body(
             job["id"], source="direct", scheduled_instant=job.get("_scheduled_instant"))["id"]
     delivery_attempted = False
     delivery_error = None
-    from agent.secret_scope import (
-        build_profile_secret_scope, reset_secret_scope, set_secret_scope)
+    from agent.secret_scope import reset_secret_scope, set_secret_scope
+    from tui_gateway.launch_profile_policy import served_secret_scope, served_terminal_overlay
 
     _scope_token = None
     _terminal_scope_token = None
@@ -3199,8 +3199,10 @@ def _run_one_job_body(
 
         # get_secret() fails closed outside a scope; the ticker thread has none. Delivery adapters
         # resolve credentials, so the scope must span delivery too (reset in the outer finally).
+        # A multiplexing host's launch profile also keeps the env frozen at activation (systemd /
+        # `op run` keys have no file to rebuild from); every other profile resolves from its files.
         _scope_token = set_secret_scope(
-            build_profile_secret_scope(_get_hermes_home()), profile_home=str(_get_hermes_home()))
+            served_secret_scope(_get_hermes_home()), profile_home=str(_get_hermes_home()))
         # Same for terminal policy (gateway/run.py _profile_runtime_scope): else the ticker reads
         # process-global TERMINAL_* env a concurrent profile pinned. Resolution failure installs a
         # refusal scope — terminal execution raises instead of using the launch process's policy.
@@ -3220,7 +3222,8 @@ def _run_one_job_body(
         from tools.terminal_scope import (
             install_profile_terminal_scope)
 
-        _terminal_scope_token = install_profile_terminal_scope(_get_hermes_home())
+        _terminal_scope_token = install_profile_terminal_scope(
+            _get_hermes_home(), env_overlay=served_terminal_overlay(_get_hermes_home()))
         # Defer agent teardown until AFTER delivery; closing first races the live send against a
         # torn-down async client. run_job hands the agent back via this list.
         # Defer the cron agent's async-resource teardown until AFTER delivery. run_job normally closes the
@@ -3485,18 +3488,18 @@ def _launch_external_cron_worker(job: dict) -> bool:
         str(ack_path),
     ]
 
-    from agent.secret_scope import (
-        build_profile_secret_scope,
-        is_multiplex_active,
-        reset_secret_scope,
-        set_secret_scope,
-    )
+    from agent.secret_scope import is_multiplex_active, reset_secret_scope, set_secret_scope
     from hermes_cli.env_loader import hydrate_profile_secret_sources
     from tools.environments.local import build_subprocess_env, strip_launch_profile_env
     from tools.process_registry import (
         restart_safe_gateway_child_argv,
         scoped_spawn_lost_user_bus,
         systemd_user_bus_env,
+    )
+    from tui_gateway.launch_profile_policy import (
+        capture_launch_env,
+        is_multiplexed_launch_home,
+        served_secret_scope,
     )
 
     try:
@@ -3519,6 +3522,12 @@ def _launch_external_cron_worker(job: dict) -> bool:
             "cron execution claim changed before external worker handoff"
         )
 
+    profile_home = _get_hermes_home().resolve()
+    # Only a multiplexing host's LAUNCH profile hands its worker the env frozen at activation
+    # (systemd / `op run` keys have no file to rebuild from), unscrubbed like a single-profile
+    # worker's. A secondary's worker gets a scrubbed base and resolves from its own files; the
+    # payload tells the child which of the two it was granted.
+    launch_worker = is_multiplexed_launch_home(profile_home)
     _ensure_cron_dir(handoff_dir)
     try:
         handoff_dir.chmod(0o700)
@@ -3530,8 +3539,9 @@ def _launch_external_cron_worker(job: dict) -> bool:
             json.dump(
                 {
                     "job": job,
-                    "profile_home": str(_get_hermes_home().resolve()),
+                    "profile_home": str(profile_home),
                     "multiplex_active": multiplex_active,
+                    "launch_env": launch_worker,
                 },
                 payload_file,
             )
@@ -3541,12 +3551,12 @@ def _launch_external_cron_worker(job: dict) -> bool:
         payload_path.unlink(missing_ok=True)
         raise
 
-    profile_home = _get_hermes_home().resolve()
     hydrate_profile_secret_sources(profile_home)
-    secret_token = set_secret_scope(build_profile_secret_scope(profile_home), profile_home=str(profile_home))
+    secret_token = set_secret_scope(served_secret_scope(profile_home), profile_home=str(profile_home))
     try:
         worker_env = strip_launch_profile_env(build_subprocess_env(
-            scrub_secrets=multiplex_active,
+            base=capture_launch_env() if launch_worker else None,
+            scrub_secrets=multiplex_active and not launch_worker,
             inherit_profile_home=True,
             extra={"HERMES_HOME": str(profile_home)},
         ))
@@ -3710,7 +3720,6 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
             pass
 
     from agent.secret_scope import (
-        build_profile_secret_scope,
         is_multiplex_active,
         reset_secret_scope,
         set_multiplex_active,
@@ -3722,6 +3731,7 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
         reset_hermes_home_override,
         set_hermes_home_override,
     )
+    from tui_gateway.launch_profile_policy import capture_launch_env, served_secret_scope
 
     previous_multiplex = is_multiplex_active()
     home_token = secret_token = None
@@ -3729,6 +3739,12 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
         home_token = set_hermes_home_override(profile_home)
         multiplex_active = bool(payload.get("multiplex_active", False))
         set_multiplex_active(multiplex_active)
+        if multiplex_active:
+            # This process's own home is the payload's, so every worker looks like a launch home to
+            # the scope helpers: freeze exactly what the host granted — the launch profile's frozen
+            # env for its own worker, nothing for a secondary's (whose env still carries launch
+            # residue that is never that profile's).
+            capture_launch_env(None if payload.get("launch_env") else {})
         # Plugin secret sources (``ctx.register_secret_source()``) only exist after plugin
         # discovery; this process starts with the builtin registry alone, so hydrating without it
         # silently dropped every plugin-sourced credential (#121929). Runs under the home override
@@ -3737,7 +3753,7 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
 
         discover_plugins()
         hydrate_profile_secret_sources(profile_home)
-        secret_token = set_secret_scope(build_profile_secret_scope(profile_home), profile_home=str(profile_home))
+        secret_token = set_secret_scope(served_secret_scope(profile_home), profile_home=str(profile_home))
         with use_cron_store(profile_home):
             if adopt_claimed_execution(execution_id) is None:
                 logger.error(

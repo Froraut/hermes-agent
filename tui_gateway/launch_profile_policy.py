@@ -22,7 +22,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Dict, Iterator, Optional
+from typing import Dict, Iterator, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -30,16 +30,18 @@ _lock = threading.Lock()
 _snapshot: Optional[Dict[str, str]] = None
 
 
-def capture_launch_env() -> Dict[str, str]:
+def capture_launch_env(env: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
     """Freeze the process env as the launch profile's own; the first capture wins.
 
     Called at activation, immediately before the first secondary home is registered as
-    served — the last moment ambient env is provably the launch profile's.
+    served — the last moment ambient env is provably the launch profile's. ``env`` freezes what a
+    spawning host granted instead (a cron worker for a secondary profile freezes nothing: the
+    launch residue its env still carries is never that profile's).
     """
     global _snapshot
     with _lock:
         if _snapshot is None:
-            _snapshot = dict(os.environ)
+            _snapshot = dict(os.environ if env is None else env)
         return dict(_snapshot)
 
 
@@ -148,7 +150,7 @@ def launch_secret_scope(launch_home: "str | Path") -> Dict[str, str]:
     return scope
 
 
-def _is_multiplexed_launch_home(home: "str | Path") -> bool:
+def is_multiplexed_launch_home(home: "str | Path") -> bool:
     """Once this process multiplexes, the launch home is the ONE served home whose scope carries the
     frozen launch env. Identity is the routing home pinned at activation
     (``agent.secret_scope._is_process_home``), not the default root: a host launched by a named
@@ -163,7 +165,7 @@ def served_secret_scope(home: "str | Path") -> Dict[str, str]:
     only systemd / ``op run`` injected must come from the frozen env), every other home's files only.
     Before activation every home gets its file mapping: a launch-home miss still reaches
     ``os.environ`` there."""
-    if _is_multiplexed_launch_home(home):
+    if is_multiplexed_launch_home(home):
         return launch_secret_scope(home)
     from agent.secret_scope import build_profile_secret_scope
     return build_profile_secret_scope(Path(home))
@@ -173,7 +175,7 @@ def served_terminal_overlay(home: "str | Path") -> Optional[Dict[str, str]]:
     """``env_overlay`` for the terminal scope a multiplexing host binds for ``home``: the frozen
     launch ``TERMINAL_*`` for the launch home (an env-only ``TERMINAL_ENV=docker`` must not become
     host execution), none for any other home."""
-    return launch_terminal_env() if _is_multiplexed_launch_home(home) else None
+    return launch_terminal_env() if is_multiplexed_launch_home(home) else None
 
 
 @contextlib.contextmanager
