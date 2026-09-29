@@ -15,11 +15,22 @@ from typing import Iterator
 _daybreak_requested: ContextVar[bool] = ContextVar("hermes_daybreak_requested", default=False)
 
 
+def daybreak_requested() -> bool:
+    """Whether this turn requires Daybreak treatment."""
+    return _daybreak_requested.get()
+
+
 @contextmanager
-def daybreak_turn(enabled: bool | None, *, provider: str, api_mode: str) -> Iterator[None]:
-    if enabled and (provider != "openai-codex" or api_mode not in {"codex_responses", "codex_app_server"}):
+def daybreak_turn(enabled: bool | None, *, provider: str, api_mode: str, model: str = "") -> Iterator[None]:
+    subscription = provider == "openai-codex" and api_mode in {"codex_responses", "codex_app_server"}
+    if enabled and not subscription:
         raise ValueError("Daybreak requires a ChatGPT/Codex subscription model.")
-    token = _daybreak_requested.set(enabled is True)
+    # These model ids cannot run with standard treatment. Make their implicit
+    # requirement explicit so transport selection and fallback use the same rule.
+    required_by_model = subscription and (model or "").strip().lower().startswith(
+        ("gpt-daybreak-blue-", "gpt-daybreak-red-", "gpt-5.6-cyber")
+    )
+    token = _daybreak_requested.set(enabled is True or required_by_model)
     try:
         yield
     finally:
@@ -28,7 +39,7 @@ def daybreak_turn(enabled: bool | None, *, provider: str, api_mode: str) -> Iter
 
 def requested_program(model: str) -> str | None:
     """Responses wire value; OpenAI remains authoritative for access and model compatibility."""
-    if not _daybreak_requested.get():
+    if not daybreak_requested():
         return None
     slug = (model or "").strip().lower()
     if slug.startswith(("gpt-daybreak-red-", "gpt-5.6-cyber")):

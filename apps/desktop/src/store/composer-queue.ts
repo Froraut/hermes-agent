@@ -2,6 +2,7 @@ import { SLASH_COMMAND_RE } from '@hermes/shared'
 import { atom } from 'nanostores'
 
 import { type ComposerAttachment, revokeAttachmentPreviewUrls, revokeDiscardedAttachmentPreviews } from './composer'
+import { daybreakSelectionFor } from './daybreak'
 
 export interface RemoveQueuedPromptOptions {
   /**
@@ -14,6 +15,8 @@ export interface RemoveQueuedPromptOptions {
 export interface QueuedPromptEntry {
   id: string
   text: string
+  /** Choice captured when queued, so later switch clicks cannot change this turn. */
+  daybreakEnabled?: boolean
   /** What the queue panel and the sent bubble show, when it differs from the
    *  text the agent receives. A queued `/skill` invocation carries the whole
    *  expanded skill body as `text` — the UI shows the invocation instead. */
@@ -34,10 +37,17 @@ export interface QueuedPromptEntry {
 /** Whether a queued entry can ride a mid-turn redirect: text-only, non-empty,
  *  not a slash command — the same gate `steerDraft` applies to the live draft
  *  (attachments can't ride a redirect; slash commands execute, not steer). */
-export const isSteerableEntry = (entry: Pick<QueuedPromptEntry, 'attachments' | 'text'>): boolean => {
+export const isSteerableEntry = (entry: Pick<QueuedPromptEntry, 'attachments' | 'text' | 'daybreakEnabled'>): boolean => {
   const text = entry.text.trim()
 
-  return Boolean(text) && entry.attachments.length === 0 && !SLASH_COMMAND_RE.test(text)
+  // A redirect inherits the running turn's program; an explicit selection
+  // must wait for its own turn instead.
+  return (
+    Boolean(text) &&
+    entry.attachments.length === 0 &&
+    !SLASH_COMMAND_RE.test(text) &&
+    entry.daybreakEnabled === undefined
+  )
 }
 
 type QueueState = Record<string, QueuedPromptEntry[]>
@@ -171,9 +181,12 @@ export const enqueueQueuedPrompt = (
     return null
   }
 
+  const daybreakEnabled = daybreakSelectionFor(sid)
+
   const entry: QueuedPromptEntry = {
     id: nextId(),
     text: payload.text,
+    ...(daybreakEnabled !== undefined ? { daybreakEnabled } : {}),
     ...(payload.displayText ? { displayText: payload.displayText } : {}),
     ...(payload.displayKind ? { displayKind: payload.displayKind } : {}),
     attachments: cloneAttachments(payload.attachments),

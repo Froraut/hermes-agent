@@ -10,7 +10,7 @@ import { Switch } from '@/components/ui/switch'
 import { useI18n } from '@/i18n'
 import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { cn } from '@/lib/utils'
-import { $daybreakSelections, daybreakSelectionFor, setDaybreakSelection } from '@/store/daybreak'
+import { $daybreakSelections, daybreakOnlyModel, daybreakSelectionFor, setDaybreakSelection } from '@/store/daybreak'
 import { $currentModelSource } from '@/store/session'
 
 import { ModelCatalogMenu } from './model-catalog-menu'
@@ -40,6 +40,7 @@ export function ModelMenuPanel({ onFollowDefaultModel, ...props }: ModelMenuPane
   const runtimeId = useStore(view.$runtimeId)
   useStore($daybreakSelections)
   const { activeSessionId, controller } = useModelMenuController(props)
+  const daybreakRequiredByModel = daybreakOnlyModel(controller.current.model)
   // Same condition as the pill's pin dot: a draft whose next session.create
   // ships the manual pick instead of the Settings default (#107410).
   const pinnedDraft = view.kind === 'primary' && !activeSessionId && modelSource === 'manual'
@@ -110,12 +111,17 @@ export function ModelMenuPanel({ onFollowDefaultModel, ...props }: ModelMenuPane
         controller.current.provider === 'openai-codex' ? (
           <div
             className="flex items-center justify-between gap-3 px-3 py-2"
-            title="Request Daybreak for this conversation. Approved access and a compatible model are required."
+            title={
+              daybreakRequiredByModel
+                ? 'This model requires Daybreak. Choose a mainline model to turn the switch off.'
+                : 'Request Daybreak for subsequent turns. Off uses the provider default. Approved access and a compatible model are required.'
+            }
           >
             <span className="text-sm">Daybreak</span>
             <Switch
               aria-label="Daybreak"
-              checked={daybreakSelectionFor(storedSessionId, runtimeId) ?? false}
+              checked={daybreakRequiredByModel || (daybreakSelectionFor(storedSessionId, runtimeId) ?? false)}
+              disabled={daybreakRequiredByModel}
               onCheckedChange={enabled => setDaybreakSelection(storedSessionId, enabled, runtimeId)}
               size="xs"
             />

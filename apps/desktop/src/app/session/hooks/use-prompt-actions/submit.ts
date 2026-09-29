@@ -21,7 +21,7 @@ import {
   revokeDiscardedAttachmentPreviews,
   terminalContextBlocksFromDraft
 } from '@/store/composer'
-import { adoptDraftDaybreakSelection, daybreakSelectionFor } from '@/store/daybreak'
+import { adoptDraftDaybreakSelection, daybreakKeyFor, daybreakSelectionFor } from '@/store/daybreak'
 import { noteMessageSent } from '@/store/desktop-metrics'
 import { $hudMode } from '@/store/hud'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
@@ -348,6 +348,14 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         targetStoredSessionId = routedStoredSessionId
         targetStartedInCurrentView = true
       }
+
+      // Freeze the user's selection at Send. Attachments and session recovery
+      // can take time; a later switch click must govern the next message.
+      const draftDaybreakKeyAtSend = daybreakKeyFor(null)
+
+      const daybreakSelectionAtSend = options?.fromQueue
+        ? options.daybreakEnabled
+        : daybreakSelectionFor(targetStoredSessionId, sessionId)
 
       let startingStoredSessionId = routedSessionNeedsResume
         ? routedStoredSessionId
@@ -795,7 +803,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // to the ambient socket — the fresh-chat owner loss behind #94071.
         targetStoredSessionId = selectedStoredSessionIdRef.current
 
-        adoptDraftDaybreakSelection(targetStoredSessionId ?? sessionId)
+        adoptDraftDaybreakSelection(targetStoredSessionId ?? sessionId, draftDaybreakKeyAtSend)
 
         seedOptimistic(sessionId)
       }
@@ -881,14 +889,12 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           const provider =
             $sessionStates.get()[targetId]?.provider || (targetIsCurrentView() ? $currentProvider.get() : '')
 
-          const daybreakSelection = daybreakSelectionFor(targetStoredSessionId, targetId)
-
           return {
             session_id: targetId,
             text,
-            ...(daybreakSelection !== undefined &&
+            ...(daybreakSelectionAtSend !== undefined &&
               (!provider || provider === 'openai-codex') && {
-                daybreak_enabled: daybreakSelection
+                daybreak_enabled: daybreakSelectionAtSend
               }),
             ...(interrupted && { interrupted }),
             // Off-screen widget intent: the gateway types the persisted user

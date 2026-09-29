@@ -17,7 +17,7 @@ from typing import Any, Optional
 import pytest
 
 import agent.transports.codex_app_server_session as session_mod
-from agent.transports.codex_app_server import CodexAppServerTransportError
+from agent.transports.codex_app_server import CodexAppServerError, CodexAppServerTransportError
 from agent.transports.codex_app_server_session import (
     CodexAppServerSession,
     _ServerRequestRouting,
@@ -46,6 +46,7 @@ class FakeClient:
     # API matching CodexAppServerClient
     def initialize(self, **kwargs):
         self._initialized = True
+        self._capabilities = kwargs.get("capabilities", {})
         return {"userAgent": "fake/0.0.0", "codexHome": "/tmp",
                 "platformOs": "linux", "platformFamily": "unix"}
 
@@ -56,8 +57,13 @@ class FakeClient:
         # Sensible defaults for protocol methods used by the session
         if method == "thread/start":
             return {"thread": {"id": "thread-fake-001"},
+                    "modelProvider": "openai",
                     "activePermissionProfile": {"id": "workspace-write"}}
+        if method == "account/read":
+            return {"account": {"type": "chatgpt"}}
         if method == "turn/start":
+            if (params or {}).get("cyberAccessProgram") and not self._capabilities.get("experimentalApi"):
+                raise CodexAppServerError(code=-32600, message="cyberAccessProgram requires experimentalApi")
             return {"turn": {"id": "turn-fake-001"}}
         if method == "turn/interrupt":
             return {}
@@ -267,19 +273,38 @@ class TestLifecycle:
 # ---- turn loop ----
 
 class TestRunTurn:
+    @pytest.mark.parametrize("provider,auth", [("openai", "apiKey"), ("custom", "chatgpt")])
+    def test_daybreak_rejects_non_subscription_codex_configuration_before_inference(self, provider, auth):
+        client = FakeClient()
+
+        def handle(method, params):
+            if method == "thread/start":
+                return {"thread": {"id": "thread-fake-001"}, "modelProvider": provider}
+            if method == "account/read":
+                return {"account": {"type": auth}}
+            pytest.fail(f"Daybreak must reject this route before {method}")
+
+        client._request_handler = handle
+        result = make_session(client).run_turn("review", cyber_access_program="daybreakBlue", model="gpt-6-sol")
+        assert "Daybreak requires" in result.error
+        assert all(method != "turn/start" for method, _ in client.requests)
+
     def test_daybreak_turn_selects_program_and_model_without_changing_next_turn(self):
         client = FakeClient()
-        client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
-        )
         session = make_session(client)
-        session.run_turn("review", turn_timeout=2.0, cyber_access_program="daybreakBlue", model="gpt-6-sol")
+        # The handshake can precede the user's first click on the toggle.
+        session.ensure_started()
         client.queue_notification(
             "turn/completed", threadId="t",
             turn={"id": "tu1", "status": "completed", "error": None},
         )
-        session.run_turn("ordinary", turn_timeout=2.0)
+        result = session.run_turn("review", turn_timeout=2.0, cyber_access_program="daybreakBlue", model="gpt-6-sol")
+        assert result.error is None
+        client.queue_notification(
+            "turn/completed", threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        assert session.run_turn("ordinary", turn_timeout=2.0).error is None
         turns = [params for method, params in client.requests if method == "turn/start"]
         assert turns[0]["cyberAccessProgram"] == "daybreakBlue"
         assert turns[0]["model"] == "gpt-6-sol"
