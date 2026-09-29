@@ -132,6 +132,16 @@ the frozen env only to the launch profile's worker, and a secondary's worker
 freezes an empty launch env so the launch residue left in its env never
 enters its scope.
 
+`served_terminal_overlay` is not gated on activation the way
+`served_secret_scope` is: a secret miss still reaches `os.environ` before
+activation, but a bound terminal scope is the whole policy. On a host that
+never multiplexes, the launch home's cron fires therefore overlay the live
+env's `TERMINAL_*`, the same policy that profile's unscoped turns read. The
+host computes the worker's overlay and sends it in the payload
+(`terminal_overlay`), because the worker's own home is the fired profile's
+and cannot tell the launch profile from a secondary. A secondary's worker
+gets a credential-scrubbed env whether or not the host multiplexes.
+
 All three are `contextvars`, so they propagate into executor worker threads
 via `copy_context()` and unwind deterministically — nothing is written to
 `os.environ`, ever.

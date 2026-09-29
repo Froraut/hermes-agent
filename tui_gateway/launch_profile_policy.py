@@ -172,10 +172,19 @@ def served_secret_scope(home: "str | Path") -> Dict[str, str]:
 
 
 def served_terminal_overlay(home: "str | Path") -> Optional[Dict[str, str]]:
-    """``env_overlay`` for the terminal scope a multiplexing host binds for ``home``: the frozen
-    launch ``TERMINAL_*`` for the launch home (an env-only ``TERMINAL_ENV=docker`` must not become
-    host execution), none for any other home."""
-    return launch_terminal_env() if is_multiplexed_launch_home(home) else None
+    """``env_overlay`` for a terminal scope a host binds for ``home``: the launch home's ``TERMINAL_*``
+    from the launch env (``_launch_env``: live before activation, frozen after), none for any other
+    home.
+
+    Not gated on multiplexing like ``served_secret_scope``: a secret miss still reaches ``os.environ``
+    before activation, but a bound terminal scope is the whole policy. Without the overlay a
+    single-profile host's cron fire turned an env-only ``TERMINAL_ENV=docker`` (systemd
+    ``Environment=``, ``op run``) into host execution while the same profile's unscoped turns ran in
+    the sandbox."""
+    from agent.secret_scope import _is_process_home
+    if not _is_process_home(Path(home)):
+        return None
+    return {k: v for k, v in _launch_env().items() if k.startswith("TERMINAL_")}
 
 
 @contextlib.contextmanager
