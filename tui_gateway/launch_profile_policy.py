@@ -120,8 +120,8 @@ def _launch_env() -> Dict[str, str]:
 def launch_terminal_env() -> Dict[str, str]:
     """The frozen launch ``TERMINAL_*`` overlay for a launch-profile turn's terminal scope.
 
-    Production always captured at activation; a first capture here only happens when the
-    multiplexer flag was set by another owner (the messaging gateway) or a harness.
+    Production always captured at activation (the messaging gateway included); a first capture
+    here only happens when a harness set the multiplexer flag directly.
     """
     return {k: v for k, v in capture_launch_env().items() if k.startswith("TERMINAL_")}
 
@@ -146,6 +146,34 @@ def launch_secret_scope(launch_home: "str | Path") -> Dict[str, str]:
     scope = {k: v for k, v in _launch_env().items() if not _is_global_env(k)}
     scope.update(build_profile_secret_scope(Path(launch_home)))
     return scope
+
+
+def _is_multiplexed_launch_home(home: "str | Path") -> bool:
+    """Once this process multiplexes, the launch home is the ONE served home whose scope carries the
+    frozen launch env. Identity is the routing home pinned at activation
+    (``agent.secret_scope._is_process_home``), not the default root: a host launched by a named
+    profile hands its env to that profile, never to ``default``."""
+    from agent.secret_scope import _is_process_home, is_multiplex_active
+    return is_multiplex_active() and _is_process_home(Path(home))
+
+
+def served_secret_scope(home: "str | Path") -> Dict[str, str]:
+    """Secret mapping for a home a multiplexing host binds per turn / callback / tick: the launch
+    home's own ``launch_secret_scope`` (a scoped miss no longer reaches ``os.environ``, so a key that
+    only systemd / ``op run`` injected must come from the frozen env), every other home's files only.
+    Before activation every home gets its file mapping: a launch-home miss still reaches
+    ``os.environ`` there."""
+    if _is_multiplexed_launch_home(home):
+        return launch_secret_scope(home)
+    from agent.secret_scope import build_profile_secret_scope
+    return build_profile_secret_scope(Path(home))
+
+
+def served_terminal_overlay(home: "str | Path") -> Optional[Dict[str, str]]:
+    """``env_overlay`` for the terminal scope a multiplexing host binds for ``home``: the frozen
+    launch ``TERMINAL_*`` for the launch home (an env-only ``TERMINAL_ENV=docker`` must not become
+    host execution), none for any other home."""
+    return launch_terminal_env() if _is_multiplexed_launch_home(home) else None
 
 
 @contextlib.contextmanager
