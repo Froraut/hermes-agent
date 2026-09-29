@@ -434,14 +434,32 @@ _DASHBOARD_EMBEDDED_CHAT_ENABLED = True
 _DESKTOP_ATTACHMENT_WS_MAX_BYTES = 384 * 1024 * 1024
 
 
-# CORS: localhost origins only — allow_origins=["*"] on 0.0.0.0 would let any
-# website read/modify config and secrets.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS: the documented loopback origins only (web-dashboard.md § CORS) — :9119, :3000, the dashboard
+# Vite dev server :5173, the desktop renderer's dev/preview servers :5174/:4174 (strictPort in
+# apps/desktop/vite.config.ts), plus the port actually bound. allow_origins=["*"] on 0.0.0.0 would let
+# any website read/modify config and secrets; ANY local port would let a page previewed from another
+# port (an agent-built site, Live Server, a compromised dev app) read index.html's session token and
+# drive /api/pty. The WebSocket Origin gate applies the same rule (web_server_chat).
+_TRUSTED_LOCAL_ORIGIN_PORTS = frozenset({9119, 3000, 5173, 5174, 4174})
+
+
+def _is_trusted_local_origin(origin: str) -> bool:
+    """True for an http(s) loopback origin on a documented dashboard port or the bound port."""
+    parsed = urllib.parse.urlparse(origin)
+    try:
+        port = parsed.port or {"http": 80, "https": 443}.get(parsed.scheme)
+    except ValueError:  # out-of-range / non-numeric port
+        return False
+    return (parsed.scheme in {"http", "https"} and parsed.hostname in _LOOPBACK_HOST_VALUES
+            and (port in _TRUSTED_LOCAL_ORIGIN_PORTS or port == getattr(app.state, "bound_port", None)))
+
+
+class _LocalOriginCORSMiddleware(CORSMiddleware):
+    def is_allowed_origin(self, origin: str) -> bool:
+        return _is_trusted_local_origin(origin)
+
+
+app.add_middleware(_LocalOriginCORSMiddleware, allow_methods=["*"], allow_headers=["*"])
 
 # Endpoints that do NOT require the session token; everything else under /api/
 # is gated below. Shared with the OAuth gate so the two allowlists cannot
