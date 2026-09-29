@@ -22,6 +22,49 @@ export const DESKTOP_PLUGINS_DIR = 'desktop-plugins'
 /** Marker inside a materialized desktop half: which agent package it came from. */
 export const PACKAGE_MARKER = '.hermes-package.json'
 
+function hasControlCharacters(value: string): boolean {
+  return [...value].some(character => {
+    const codePoint = character.codePointAt(0) ?? 0
+
+    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)
+  })
+}
+
+/** A plugin destination is exactly one portable, canonical folder name. */
+export function canonicalDesktopPluginName(rawName: unknown): string {
+  if (
+    typeof rawName !== 'string' ||
+    !rawName ||
+    rawName !== rawName.trim() ||
+    rawName === '.' ||
+    rawName === '..' ||
+    /[\\/]/.test(rawName) ||
+    path.posix.isAbsolute(rawName) ||
+    path.win32.isAbsolute(rawName) ||
+    hasControlCharacters(rawName)
+  ) {
+    throw new Error('Invalid desktop plugin name: expected one safe folder name.')
+  }
+
+  return rawName
+}
+
+/** Resolve one validated direct child and prove it remains under the app root. */
+export function resolveDesktopPluginTarget(
+  desktopPluginsRoot: string,
+  rawName: unknown
+): { name: string; target: string } {
+  const name = canonicalDesktopPluginName(rawName)
+  const root = path.resolve(desktopPluginsRoot)
+  const target = path.resolve(root, name)
+
+  if (path.dirname(target) !== root || path.relative(root, target) !== name) {
+    throw new Error('Invalid desktop plugin name: destination escapes the desktop-plugins folder.')
+  }
+
+  return { name, target }
+}
+
 export interface DesktopHalfMarker {
   /** Agent package folder name (the `plugins/<name>` key). */
   package: string
@@ -173,6 +216,7 @@ export async function materializeDesktopHalf(
   appRoot: string,
   packageName = path.basename(packageDir)
 ): Promise<null | string> {
+  const { name, target } = resolveDesktopPluginTarget(appRoot, packageName)
   const sourceDir = path.join(packageDir, 'desktop')
   const entry = path.join(sourceDir, 'plugin.js')
 
@@ -182,7 +226,7 @@ export async function materializeDesktopHalf(
     stat = await fs.promises.stat(entry)
   } catch (error) {
     if (!isMissing(error)) {
-      console.warn(`[desktop-plugins] cannot read ${packageName}: ${String(error)}`)
+      console.warn(`[desktop-plugins] cannot read ${name}: ${String(error)}`)
     }
 
     return null
@@ -192,11 +236,10 @@ export async function materializeDesktopHalf(
     return null
   }
 
-  const target = path.join(appRoot, packageName)
   const existing = await readMarker(target)
 
   const marker: DesktopHalfMarker = {
-    package: packageName,
+    package: name,
     source: sourceDir,
     sourceMtimeMs: stat.mtimeMs,
     ...(await packageOrigin(packageDir))

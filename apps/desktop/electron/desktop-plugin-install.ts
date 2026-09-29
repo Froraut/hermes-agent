@@ -10,7 +10,12 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { publishDesktopTree, writeDesktopHalfMarker } from './desktop-plugins-root'
+import {
+  canonicalDesktopPluginName,
+  publishDesktopTree,
+  resolveDesktopPluginTarget,
+  writeDesktopHalfMarker
+} from './desktop-plugins-root'
 import { execGit, hiddenGitSpawnSpec } from './no-console-git'
 
 const GITHUB_BROWSER_SEGMENTS = new Set(['tree', 'blob', 'commit'])
@@ -130,11 +135,11 @@ export function desktopPluginFolderName(gitUrl: string, subdir: string | null): 
       .pop()
 
     if (last) {
-      return last
+      return canonicalDesktopPluginName(last)
     }
   }
 
-  return repoNameFromUrl(gitUrl)
+  return canonicalDesktopPluginName(repoNameFromUrl(gitUrl))
 }
 
 export function resolveSubdirWithin(cloneRoot: string, subdir: string): string {
@@ -208,9 +213,11 @@ export async function detectPluginComponents(pluginRoot: string): Promise<Plugin
   let agentName: string | null = null
 
   if (agent) {
-    agentName = path.basename(pluginRoot)
+    agentName = canonicalDesktopPluginName(path.basename(pluginRoot))
 
     if (hasYaml) {
+      let manifestName: string | null = null
+
       try {
         const yamlPath = pathExistsSync(path.join(pluginRoot, 'plugin.yaml'))
           ? path.join(pluginRoot, 'plugin.yaml')
@@ -219,30 +226,40 @@ export async function detectPluginComponents(pluginRoot: string): Promise<Plugin
         const text = await fsp.readFile(yamlPath, 'utf8')
         const match = text.match(/^name:\s*['"]?([^'"\n]+)['"]?\s*$/m)
 
-        if (match?.[1]) {
-          agentName = match[1].trim()
+        manifestName = match?.[1]?.trim() ?? null
+      } catch {
+        // Fall back to directory name.
+      }
+
+      if (manifestName !== null) {
+        agentName = canonicalDesktopPluginName(manifestName)
+      }
+    } else if (hasPortable) {
+      let manifestName: unknown
+
+      try {
+        const raw = await fsp.readFile(path.join(pluginRoot, 'plugin.json'), 'utf8')
+        const parsed = JSON.parse(raw) as unknown
+
+        if (parsed && typeof parsed === 'object' && 'name' in parsed && parsed.name) {
+          manifestName = parsed.name
         }
       } catch {
         // Fall back to directory name.
       }
-    } else if (hasPortable) {
-      try {
-        const raw = await fsp.readFile(path.join(pluginRoot, 'plugin.json'), 'utf8')
-        const parsed = JSON.parse(raw) as { name?: string }
 
-        if (parsed.name) {
-          agentName = parsed.name
-        }
-      } catch {
-        // Fall back to directory name.
+      if (manifestName !== undefined) {
+        agentName = canonicalDesktopPluginName(manifestName)
       }
     }
   }
 
   const desktopName = desktop
-    ? desktopEntry!.sourceSubdir === '.'
-      ? path.basename(pluginRoot)
-      : path.basename(path.dirname(desktopEntry!.entryFile))
+    ? canonicalDesktopPluginName(
+        desktopEntry!.sourceSubdir === '.'
+          ? path.basename(pluginRoot)
+          : path.basename(path.dirname(desktopEntry!.entryFile))
+      )
     : null
 
   return {
@@ -435,9 +452,13 @@ export async function installDesktopPluginFromGit(
       // `reconcileUnifiedDesktopHalves` would make are the same folder (#100412)
       // and the Plugins page pairs them into one row. A desktop-only repo keeps
       // the git-derived folder name and stays a standalone plugin.
-      const packageName = detected.agent ? (detected.agentName ?? desktopPluginFolderName(gitUrl, subdir)) : null
-      const pluginName = packageName ?? desktopPluginFolderName(gitUrl, subdir)
-      const targetDir = path.join(desktopPluginsRoot, pluginName)
+      const destinationName = detected.agent
+        ? (detected.agentName ?? desktopPluginFolderName(gitUrl, subdir))
+        : desktopPluginFolderName(gitUrl, subdir)
+
+      const { name: pluginName, target: targetDir } = resolveDesktopPluginTarget(desktopPluginsRoot, destinationName)
+
+      const packageName = detected.agent ? pluginName : null
       const targetPlugin = path.join(targetDir, 'plugin.js')
 
       if ((await pathIsDirectory(targetDir)) || (await pathIsFile(targetPlugin))) {

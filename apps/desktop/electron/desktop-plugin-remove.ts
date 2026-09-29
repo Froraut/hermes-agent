@@ -10,7 +10,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { PACKAGE_MARKER } from './desktop-plugins-root'
+import { PACKAGE_MARKER, resolveDesktopPluginTarget } from './desktop-plugins-root'
 
 export interface RemoveDesktopPluginResult {
   ok: boolean
@@ -20,17 +20,13 @@ export interface RemoveDesktopPluginResult {
 }
 
 export async function removeDesktopPlugin(appRoot: string, rawName: unknown): Promise<RemoveDesktopPluginResult> {
-  const name = String(rawName ?? '').trim()
+  let name: string
+  let target: string
 
-  if (!name || name === '.' || name === '..' || /[\\/]/.test(name)) {
+  try {
+    ;({ name, target } = resolveDesktopPluginTarget(appRoot, rawName))
+  } catch {
     return { ok: false, error: 'invalid plugin folder name' }
-  }
-
-  const root = path.resolve(appRoot)
-  const target = path.resolve(root, name)
-
-  if (path.relative(root, target) !== name) {
-    return { ok: false, error: `${name} is not inside the desktop-plugins folder` }
   }
 
   let stat: fs.Stats

@@ -122,6 +122,38 @@ describe('detectPluginComponents', () => {
       desktopName: 'desktop'
     })
   })
+
+  it('rejects unsafe manifest and repository-derived destination names', async () => {
+    const unsafeNames = [
+      'nested/plugin',
+      'nested\\plugin',
+      path.resolve(os.tmpdir(), 'absolute-plugin'),
+      '.',
+      '..',
+      '../victim',
+      'control\u0007name'
+    ]
+
+    for (const name of unsafeNames) {
+      const root = mkdtemp('hermes-plugin-unsafe-name-')
+      roots.push(root)
+      fs.writeFileSync(path.join(root, 'plugin.yaml'), `name: ${name}\n`)
+      fs.writeFileSync(path.join(root, '__init__.py'), 'def register(ctx): pass\n')
+
+      await expect(detectPluginComponents(root), name).rejects.toThrow(/invalid desktop plugin name/i)
+    }
+
+    for (const [gitUrl, subdir] of [
+      ['file:///tmp/..', null],
+      ['https://example.invalid/nested\\plugin.git', null],
+      ['https://example.invalid/control\u0007.git', null],
+      ['https://example.invalid/repo.git', 'plugins/../desktop']
+    ] as const) {
+      expect(() => desktopPluginFolderName(gitUrl, subdir), `${gitUrl}#${subdir ?? ''}`).toThrow(
+        /invalid desktop plugin name/i
+      )
+    }
+  })
 })
 
 describe('probePluginRepo', () => {
@@ -199,6 +231,23 @@ describe('installDesktopPluginFromGit', () => {
     const marker = JSON.parse(fs.readFileSync(path.join(appRoot, 'hermes-talk', PACKAGE_MARKER), 'utf8'))
     expect(marker.package).toBe('hermes-talk')
     expect(marker.repo).toBe(pathToFileURL(repo).href)
+  })
+
+  it('rejects a traversing manifest name before force reinstall can touch an outside folder', async () => {
+    const repo = pluginRepo('../../victim')
+    const home = mkdtemp('hermes-plugin-containment-')
+    roots.push(home)
+    const appRoot = path.join(home, 'nested', 'desktop-plugins')
+    const sentinel = path.join(home, 'victim', 'sentinel.txt')
+    fs.mkdirSync(appRoot, { recursive: true })
+    fs.mkdirSync(path.dirname(sentinel), { recursive: true })
+    fs.writeFileSync(sentinel, 'outside')
+
+    const result = await installDesktopPluginFromGit('git', pathToFileURL(repo).href, appRoot, true)
+
+    expect(fs.readFileSync(sentinel, 'utf8')).toBe('outside')
+    expect(result.ok).toBe(false)
+    expect(fs.existsSync(path.join(home, 'victim', 'plugin.js'))).toBe(false)
   })
 
   it('keeps a git-installed unified half when no local agent package exists', async () => {
