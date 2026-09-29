@@ -32,6 +32,28 @@ def test_write_queue_ignores_enqueue_after_shutdown(tmp_path):
     assert not queue._connections
 
 
+def test_second_queue_on_same_db_does_not_resend_rows_in_flight(tmp_path):
+    """A new provider's queue replays the shared db; rows another live writer holds are sent once."""
+    release, sent = retaindb.threading.Event(), []
+
+    class SlowClient:
+        def ingest_session(self, user_id, session_id, messages, timeout=15.0):
+            release.wait(10)
+            sent.append(messages[0]["content"])
+
+    db = tmp_path / "retaindb_queue.db"
+    first = retaindb._WriteQueue(SlowClient(), db)
+    for i in range(3):
+        first.enqueue("u", "s1", [{"role": "user", "content": f"turn-{i}"}])
+    second = retaindb._WriteQueue(SlowClient(), db)  # e.g. another gateway chat's agent initializing
+    release.set()
+    first.shutdown()
+    second.shutdown()
+
+    assert sorted(sent) == ["turn-0", "turn-1", "turn-2"]
+    assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM pending").fetchone()[0] == 0
+
+
 def test_prefetch_does_not_spawn_when_previous_batch_is_alive(monkeypatch):
     provider = RetainDBMemoryProvider()
     provider._client = object()

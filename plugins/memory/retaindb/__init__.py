@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "https://api.retaindb.com"
 _ASYNC_SHUTDOWN = object()
+_CLAIM_LEASE_S = 300.0  # a writer that died mid-ingest holds its row this long before a replay may re-send it
 _TEXT_EXTS = (".txt", ".md", ".json", ".csv", ".yaml", ".yml", ".xml", ".html")
 
 
@@ -182,7 +183,12 @@ class _Client:
 
 
 class _WriteQueue:
-    """SQLite-backed async write queue. Survives crashes — pending rows replay on startup."""
+    """SQLite-backed async write queue. Survives crashes — pending rows replay on startup.
+
+    Every provider instance and process on a home shares the db and replays its pending rows, so
+    each row is claimed before it is sent: a replayed copy of a row another writer is already
+    sending (or has sent) is skipped instead of ingested twice.
+    """
 
     def __init__(self, client: _Client, db_path: Path):
         self._client, self._db_path, self._q = client, db_path, queue.Queue()
@@ -192,7 +198,10 @@ class _WriteQueue:
         self._connections: set[sqlite3.Connection] = set()
         self._connections_lock, self._shutdown_lock, self._shutdown = threading.Lock(), threading.Lock(), False
         conn = self._execute("CREATE TABLE IF NOT EXISTS pending (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, "
-                             "session_id TEXT, messages_json TEXT, created_at TEXT, last_error TEXT)").connection
+                             "session_id TEXT, messages_json TEXT, created_at TEXT, last_error TEXT, claimed_at REAL)").connection
+        if "claimed_at" not in {col[1] for col in conn.execute("PRAGMA table_info(pending)")}:
+            with suppress(sqlite3.OperationalError):  # db from before claims; a concurrent writer may add it first
+                self._execute("ALTER TABLE pending ADD COLUMN claimed_at REAL")
         self._thread.start()
         replay = conn.execute("SELECT id, user_id, session_id, messages_json FROM pending ORDER BY id ASC LIMIT 200").fetchall()
         for row_id, user_id, session_id, msgs_json in replay:  # rows left from a previous crash
@@ -232,13 +241,21 @@ class _WriteQueue:
                                 (user_id, session_id, json.dumps(messages, ensure_ascii=False), now))
             self._q.put((cur.lastrowid, user_id, session_id, messages))
 
+    def _claim(self, row_id: int) -> bool:
+        """Mark *row_id* as being sent by this writer; False when it is gone or another writer's live claim holds it."""
+        now = time.time()
+        return self._execute("UPDATE pending SET claimed_at = ? WHERE id = ? AND (claimed_at IS NULL OR claimed_at < ?)",
+                             (now, row_id, now - _CLAIM_LEASE_S)).rowcount == 1
+
     def _flush_row(self, row_id: int, user_id: str, session_id: str, messages: list) -> None:
+        if not self._claim(row_id):
+            return
         try:
             self._client.ingest_session(user_id, session_id, messages)
             self._execute("DELETE FROM pending WHERE id = ?", (row_id,))
         except Exception as exc:
             logger.warning("RetainDB ingest failed (will retry): %s", exc)
-            self._execute("UPDATE pending SET last_error = ? WHERE id = ?", (str(exc), row_id))
+            self._execute("UPDATE pending SET last_error = ?, claimed_at = NULL WHERE id = ?", (str(exc), row_id))
             time.sleep(2)
 
     def _loop(self) -> None:
