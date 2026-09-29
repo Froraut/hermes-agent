@@ -382,8 +382,10 @@ function ToolEntry({ part }: ToolEntryProps) {
   const dismissed = useStore($toolRowDismissed(disclosureId))
   const isPending = messageRunning && result === undefined && completedAt === undefined
   // Subscribe to this tool's diff only, so a live patch for one tool doesn't
-  // re-render every mounted tool row (the factory caches a per-id atom).
-  const sideDiff = useStore($toolInlineDiff(toolCallId ?? ''))
+  // re-render every mounted tool row. Keep the row's atom reference stable even
+  // after the bounded factory cache releases it under transcript pressure.
+  const toolDiffAtom = useMemo(() => $toolInlineDiff(toolCallId ?? ''), [toolCallId])
+  const sideDiff = useStore(toolDiffAtom)
   const inlineDiff = stripInlineDiffChrome(sideDiff) || inlineDiffFromResult(toolResultRecord(stablePart))
   const isFileEdit = isFileEditTool(toolName)
   const defaultOpen = Boolean(inlineDiff) && !hideCodeDiffs

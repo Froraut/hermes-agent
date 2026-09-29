@@ -147,7 +147,7 @@ export function handleToolEvent(ctx: GatewayEventContext): boolean {
     }
 
     if (typeof payload?.inline_diff === 'string' && payload.inline_diff.trim()) {
-      recordToolDiff(payload.tool_id || payload.name || '', payload.inline_diff)
+      recordToolDiff(payload.tool_id || payload.name || '', payload.inline_diff, sessionId || undefined)
     }
 
     // A file-mutating tool just finished — nudge the git-mirroring surfaces

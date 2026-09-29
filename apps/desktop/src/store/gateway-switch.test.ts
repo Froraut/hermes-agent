@@ -24,6 +24,7 @@ import {
 } from '@/store/session'
 import { $stalledSessionIds } from '@/store/session-states'
 import { $retainedTodosBySession, restoreSessionTodosFromSnapshot } from '@/store/todos'
+import { $toolInlineDiff, getToolDiff, recordToolDiff } from '@/store/tool-diffs'
 import {
   $transcriptTailBySessionId,
   clearTranscriptTailPaging,
@@ -80,6 +81,8 @@ describe('wipeSessionListsForGatewaySwitch', () => {
   })
 
   it('clears lists and arms loading so sidebar skeletons retrigger', () => {
+    const oldGatewayTool = $toolInlineDiff('old-gateway-tool')
+    recordToolDiff('old-gateway-tool', 'old gateway diff', 's1')
     restoreSessionTodosFromSnapshot(
       's1',
       {
@@ -100,6 +103,8 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     expect($sessionsLoading.get()).toBe(true)
     expect($sessionsLimit.get()).toBe(SIDEBAR_SESSIONS_PAGE_SIZE)
     expect($freshDraftReady.get()).toBe(true)
+    expect(getToolDiff('old-gateway-tool')).toBe('')
+    expect(oldGatewayTool.get()).toBe('')
   })
 
   it("drops the outgoing gateway's draft workspace so the next gateway seeds its own (#114306)", () => {

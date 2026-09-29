@@ -140,6 +140,7 @@ import { broadcastSessionsChanged } from '@/store/session-sync'
 import { forgetSessionUnread } from '@/store/session-unread'
 import { $archivedSessions } from '@/store/sidebar-archive'
 import { restoreSessionTodosFromSnapshot } from '@/store/todos'
+import { clearToolDiffsForSession } from '@/store/tool-diffs'
 import { dropTranscriptTail, dropTranscriptTailEverywhere, saveTranscriptTail } from '@/store/transcript-tail-cache'
 import { isWatchWindow } from '@/store/windows'
 import type {
@@ -2986,6 +2987,10 @@ export function useSessionActions({
         }
 
         await deleteSession(storedSessionId, removedOwner)
+
+        if (closingRuntimeId) {
+          clearToolDiffsForSession(closingRuntimeId)
+        }
 
         dropTranscriptTailEverywhere(storedSessionId)
         // Only after the RPC lands — the optimistic eviction above can roll

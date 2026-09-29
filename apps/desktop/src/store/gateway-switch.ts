@@ -32,6 +32,7 @@ import { clearAllSessionControl } from '@/store/session-control'
 import { resetSessionPinMirror } from '@/store/session-pin-sync'
 import { clearAllSessionStates } from '@/store/session-states'
 import { clearAllSessionTodos } from '@/store/todos'
+import { clearAllToolDiffs } from '@/store/tool-diffs'
 import { clearTranscriptTailPaging } from '@/store/transcript-tail'
 import { clearTranscriptTails } from '@/store/transcript-tail-cache'
 
@@ -221,6 +222,7 @@ export function wipeSessionListsForGatewaySwitch(): void {
   // checklist and its review snapshot before any new session is bound.
   clearAllSessionTodos()
   clearAllSessionStates()
+  clearAllToolDiffs()
   // Structured goal/loop/heartbeat entries are keyed by runtime id, which the
   // next backend re-mints, so a full wipe is exact (and stale-response-safe).
   clearAllSessionControl()

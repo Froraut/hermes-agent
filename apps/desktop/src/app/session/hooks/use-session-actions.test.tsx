@@ -99,6 +99,7 @@ import {
 } from '@/store/session-states'
 import { $sessionSeenCounts, $unreadFinishedMarkers } from '@/store/session-unread'
 import { $retainedTodosBySession, clearSessionTodos } from '@/store/todos'
+import { clearAllToolDiffs, getToolDiff, recordToolDiff } from '@/store/tool-diffs'
 import { loadTranscriptTail, saveTranscriptTail } from '@/store/transcript-tail-cache'
 
 import sessionResumeActiveTurn from '../../../../../../tests/fixtures/session-resume-active-turn.json'
@@ -363,6 +364,7 @@ describe('connection-qualified session deletion', () => {
   afterEach(() => {
     cleanup()
     setSessions([])
+    clearAllToolDiffs()
     vi.clearAllMocks()
   })
 
@@ -379,6 +381,7 @@ describe('connection-qualified session deletion', () => {
     ])
     vi.mocked(deleteSession).mockResolvedValue({ ok: true })
     vi.mocked(requestGatewayForAgent).mockResolvedValue({} as never)
+    recordToolDiff('owned-tool', 'owned diff', 'runtime-shared')
 
     render(
       <Harness
@@ -404,6 +407,7 @@ describe('connection-qualified session deletion', () => {
       session_id: 'runtime-shared'
     })
     expect(requestGateway).not.toHaveBeenCalledWith('session.close', expect.anything())
+    expect(getToolDiff('owned-tool')).toBe('')
   })
 
   it('tears down the selected session from synchronous refs when render state is stale', async () => {
