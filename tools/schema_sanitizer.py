@@ -58,77 +58,112 @@ def _rename_property_keys(props: dict, path: str) -> dict[str, str]:
     return renames
 
 
-def _same_instance_schemas(schema: Any) -> list[dict]:
-    """*schema* plus the conditional subschemas that also describe its instance (``if``/``then``/
-    ``else``, ``dependentSchemas``, schema-valued ``dependencies``), nested ones included. Which
-    condition holds is not evaluated: the sanitizer renamed keys in all of them."""
-    if not isinstance(schema, dict):
-        return []
-    nested = [schema.get(key) for key in ("if", "then", "else")]
-    for key in ("dependentSchemas", "dependencies"):
-        if isinstance(schema.get(key), dict):
-            nested.extend(schema[key].values())
-    return [schema, *(found for sub in nested for found in _same_instance_schemas(sub))]
+def _with_conditionals(candidates: list, args: Any) -> list[tuple[int, dict]]:
+    """``(rank, schema)`` candidates plus their conditional subschemas one rank weaker (lower rank
+    = stronger): ``if``/``then``/``else`` (which branch holds is not evaluated) and the
+    ``dependentSchemas`` / schema-valued ``dependencies`` whose trigger key *args* contains."""
+    found = []
+    for rank, schema in candidates:
+        if not isinstance(schema, dict):
+            continue
+        found.append((rank, schema))
+        nested = [schema.get(key) for key in ("if", "then", "else")]
+        deps = [found_deps for key in ("dependentSchemas", "dependencies")
+                if isinstance(args, dict) and isinstance(found_deps := schema.get(key), dict)]
+        if deps:  # a trigger arrives in the spelling the model was shown
+            props = schema.get("properties")
+            shown = _rename_property_keys(props, "<unrename>") if isinstance(props, dict) else {}
+            nested += [sub for dep in deps for trigger, sub in dep.items()
+                       if trigger in args or shown.get(trigger) in args]
+        found += _with_conditionals([(rank + 1, sub) for sub in nested], args)
+    return found
 
 
-def _value_schemas(schemas: list[dict], listed: dict[str, list], key: str) -> list:
-    """Schemas an object's *key* value must satisfy: its ``properties`` entries and every matching
-    ``patternProperties`` entry; for a key neither covers, ``additionalProperties``, else
-    ``unevaluatedProperties`` (which never sees a key ``additionalProperties`` evaluated)."""
-    found = list(listed.get(key, ()))
-    for schema in schemas:
-        patterns = schema.get("patternProperties")
-        for pattern, sub in patterns.items() if isinstance(patterns, dict) else ():
-            try:
-                if re.search(pattern, key):
-                    found.append(sub)
-            except re.error:  # ECMA-only syntax Python cannot compile: no match claimed
-                continue
-    return found or ([schema["additionalProperties"] for schema in schemas
-                      if "additionalProperties" in schema]
-                     or [schema.get("unevaluatedProperties") for schema in schemas])
+def _pattern_schemas(schema: dict, key: str) -> list:
+    """``patternProperties`` entries of *schema* whose pattern matches *key*."""
+    patterns = schema.get("patternProperties")
+    found = []
+    for pattern, sub in patterns.items() if isinstance(patterns, dict) else ():
+        try:
+            if re.search(pattern, key):
+                found.append(sub)
+        except re.error:  # ECMA-only syntax Python cannot compile: no match claimed
+            continue
+    return found
 
 
-def _item_schemas(schemas: list[dict]) -> list[dict]:
-    """Schemas array elements must satisfy: ``items`` (else ``unevaluatedItems``) and ``contains``."""
-    items = [schema["items"] for schema in schemas if isinstance(schema.get("items"), dict)]
-    rest = [] if items else [schema.get("unevaluatedItems") for schema in schemas]
-    return [sub for sub in items + rest + [schema.get("contains") for schema in schemas]
-            if isinstance(sub, dict)]
+def _wire_key(schemas: list[tuple[int, dict]], shown: dict[int, dict[str, set]], key: str) -> str:
+    """Wire name of a key the model sent. The strongest rank that declares it decides: its
+    ``properties`` (one shown key two of them spell differently on the wire stays as sent), else
+    a matching ``patternProperties`` / explicit ``additionalProperties``, which keep it as sent.
+    So a weaker conditional never overrides, nor forges over, what the object itself declares."""
+    for rank in sorted({rank for rank, _ in schemas}):
+        if names := shown.get(rank, {}).get(key):
+            return next(iter(names)) if len(names) == 1 else key
+        if any(_pattern_schemas(schema, key) or schema.get("additionalProperties", False) is not False
+               for level, schema in schemas if level == rank):
+            return key
+    return key
+
+
+def _value_candidates(schemas: list[tuple[int, dict]], key: str) -> list:
+    """Candidates for an object's *key* value: ``properties`` entries keep their schema's rank;
+    matching ``patternProperties``, else ``additionalProperties``, are one weaker; and
+    ``unevaluatedProperties`` applies only when no candidate declares *key*."""
+    found, declared = [], False
+    for rank, schema in schemas:
+        props = schema.get("properties")
+        listed = isinstance(props, dict) and key in props
+        matched = _pattern_schemas(schema, key)
+        found += [(rank, props[key])] if listed else []
+        found += [(rank + 1, sub) for sub in matched]
+        if not listed and not matched and "additionalProperties" in schema:
+            found.append((rank + 1, schema["additionalProperties"]))
+        declared = declared or listed or bool(matched) or "additionalProperties" in schema
+    return found if declared else [(rank + 1, schema.get("unevaluatedProperties")) for rank, schema in schemas]
+
+
+def _element_candidates(schemas: list[tuple[int, dict]], index: int) -> list:
+    """Candidates for array element *index*: dict ``items``, else ``unevaluatedItems`` for an
+    element no ``prefixItems`` / tuple ``items`` / ``contains`` can have evaluated. ``contains``
+    is not followed: which elements it describes needs a validator, and its renamed keys are
+    legal extra keys on every other element."""
+    items = [(rank, schema["items"]) for rank, schema in schemas if isinstance(schema.get("items"), dict)]
+    prefix = max((len(schema[key]) for _, schema in schemas for key in ("prefixItems", "items")
+                  if isinstance(schema.get(key), list)), default=0)
+    if items or index < prefix or any("contains" in schema for _, schema in schemas):
+        return items
+    return [(rank + 1, schema.get("unevaluatedItems")) for rank, schema in schemas]
 
 
 def unrename_tool_args(params_schema: Any, args: Any) -> Any:
     """Map sanitized keys in model-emitted args back to wire names. ``params_schema`` is the
-    ORIGINAL registry schema; follows every object/array position ``_sanitize_node`` renames in
-    that describes the args (conditional subschemas, pattern / additional / unevaluated
-    properties, items / unevaluated items / contains); unknown keys pass through."""
-    return _unrename([params_schema], args)
+    ORIGINAL registry schema; follows object properties and array items as well as the other
+    positions ``_sanitize_node`` renames in that describe the args (conditional and active
+    dependent subschemas, pattern / additional / unevaluated properties, unevaluated items), each
+    only for keys the object's own declarations leave open; unknown keys pass through."""
+    return _unrename([(0, params_schema)], args)
 
 
 def _unrename(candidates: list, args: Any) -> Any:
-    schemas = [schema for candidate in candidates for schema in _same_instance_schemas(candidate)]
-    if isinstance(args, list):
-        items = _item_schemas(schemas)
-        return [_unrename(items, item) for item in args] if items else args
-    if not isinstance(args, dict) or not schemas:
+    schemas = _with_conditionals(candidates, args)
+    if not schemas:
         return args
-    wire_names: dict[str, set[str]] = {}  # key the model was shown -> wire keys it stands for
-    listed: dict[str, list] = {}
-    for schema in schemas:
+    if isinstance(args, list):
+        return [_unrename(_element_candidates(schemas, i), item) for i, item in enumerate(args)]
+    if not isinstance(args, dict):
+        return args
+    shown: dict[int, dict[str, set]] = {}  # rank -> key the model was shown -> wire keys
+    for rank, schema in schemas:
         props = schema.get("properties")
         if isinstance(props, dict):
             renames = _rename_property_keys(props, "<unrename>")
-            for key, sub in props.items():
-                wire_names.setdefault(renames.get(key, key), set()).add(key)
-                listed.setdefault(key, []).append(sub)
+            for wire in props:
+                shown.setdefault(rank, {}).setdefault(renames.get(wire, wire), set()).add(wire)
     out = {}
     for key, value in args.items():
-        # One properties dict never maps two wire keys to one shown key, but two conditional
-        # subschemas can ("$id" in ``then``, "@id" in ``else``); which one applies is not known
-        # here, so such a key stays as sent.
-        names = wire_names.get(key, ())
-        orig = next(iter(names)) if len(names) == 1 else key
-        out[orig] = _unrename(_value_schemas(schemas, listed, orig), value)
+        orig = _wire_key(schemas, shown, key)
+        out[orig] = _unrename(_value_candidates(schemas, orig), value)
     return out
 
 
