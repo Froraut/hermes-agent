@@ -2129,16 +2129,30 @@ def _default_export_ignore(root_dir: Path):
 _EXPORT_CREDENTIAL_FILES = frozenset({"auth.json", ".env", "bot-desktop"})
 
 
+# Credential stores the file tools never reach but an archive would, as their owners lay them out.
+# ``platforms/`` is the adapters' runtime root (never in the default-profile allow-list): pairing
+# approvals (``gateway/pairing.py::_default_pairing_dir``), the WhatsApp session, the Matrix E2EE
+# store; the pre-``platforms/`` legacy locations are still read when populated (``get_hermes_dir``).
+_EXPORT_CREDENTIAL_STORES = (
+    "platforms", "pairing", "whatsapp/session", "matrix/store",
+    # Chromium user-data dirs holding Cookies / Login Data: the ``hermes browser connect`` CDP
+    # profile (``browser_connect.chrome_debug_data_dir``), the live CDP profiles and Browser Use
+    # CLI dir that ``hermes_cli/backup.py`` keeps out of archives.
+    "chrome-debug", "browser-profiles", "browser_profiles",
+    # Byte-exact config.yaml copies whose timestamp suffix escapes the redact pass (inline keys ship
+    # verbatim), and the 1Password bootstrap token.
+    "backups", ".op.env",
+)
+
+
 def _export_credential_root_paths() -> frozenset[str]:
     """Profile-root-relative POSIX paths of credential stores a named-profile export drops: all the
-    file tools read-deny as credentials (``agent.file_safety``), plus stores they never reach but an
-    archive would — config backups (byte-exact config.yaml copies whose timestamp suffix escapes the
-    redact pass, so inline keys ship verbatim), the 1Password bootstrap token, pairing state and the
-    backup-excluded ``browser_profiles/``. Root-scoped: a skill's own ``backups/`` is user data."""
+    file tools read-deny as credentials (``agent.file_safety``) plus ``_EXPORT_CREDENTIAL_STORES``.
+    Root-scoped: a skill's own ``backups/`` is user data."""
     from agent.file_safety import _CREDENTIAL_FILE_NAMES, _READ_DENIED_DIRS
     return frozenset({*(Path(name).as_posix() for name in _CREDENTIAL_FILE_NAMES),
                       *(subdir for subdir, *_ in _READ_DENIED_DIRS),
-                      "backups", ".op.env", "pairing", "browser_profiles"})
+                      *_EXPORT_CREDENTIAL_STORES})
 
 # Text/config suffixes secret-scrubbed on export; binary DBs, images etc. are left alone.
 _EXPORT_REDACT_SUFFIXES = frozenset({
