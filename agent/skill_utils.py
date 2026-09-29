@@ -725,6 +725,9 @@ def _resolve_dotpath(config: Dict[str, Any], dotted_key: str):
 
 _HOME_VAR_RE = re.compile(r"\$(?:\{HOME\}|HOME)(?=$|[/\\])")
 _ENV_REF_RE = re.compile(r"\$(\w+|\{[^}]*\})", re.ASCII)  # posixpath.expandvars' reference shapes
+# Secret-shaped names never expand into the prompt. Deliberately broad: a false positive only leaves
+# the reference literal, and a tool's shell still expands it at run time.
+_SECRET_ENV_NAME_RE = re.compile(r"KEY|TOKEN|SECRET|PASSW(?:OR)?D|CREDENTIAL|AUTH|COOKIE|SESSION", re.IGNORECASE)
 
 
 def _expand_skill_config_path(value: str) -> str:
@@ -737,7 +740,9 @@ def _expand_skill_config_path(value: str) -> str:
     is printed into the model-visible skill message, so it must never see more than a tool does:
     ``os.path.expandvars`` read the live process env — every ``.env`` credential, and under
     multiplex the LAUNCH profile's — so a skill default of ``${OPENAI_API_KEY}`` put the key in
-    the prompt. Credentials (and unknown names) now stay literal.
+    the prompt. Credentials the subprocess scrub does not know about (skill secrets such as
+    ``TENOR_API_KEY``) stay literal too: any name defined in the profile's ``.env`` (secrets only, by
+    policy) or shaped like a secret is never expanded.
     """
     subprocess_home = get_subprocess_home()
     if subprocess_home:
@@ -747,9 +752,20 @@ def _expand_skill_config_path(value: str) -> str:
         # as regex escapes.
         value = _HOME_VAR_RE.sub(lambda _m: subprocess_home, value)
     if "$" in value:
+        from agent.secret_scope import load_env_file
+        from hermes_constants import get_env_path
         from tools.environments.local import hermes_subprocess_env, strip_launch_profile_env
         env = hermes_subprocess_env(base_env=strip_launch_profile_env(dict(os.environ)))
-        value = _ENV_REF_RE.sub(lambda m: env.get(m.group(1).strip("{}"), m.group(0)), value)
+        dotenv_names = set(load_env_file(get_env_path()))
+
+        def _expand(m: re.Match) -> str:
+            ref = m.group(1)
+            name = ref[1:-1] if ref.startswith("{") else ref  # exactly one brace pair: ${{X}} stays literal
+            if name in dotenv_names or _SECRET_ENV_NAME_RE.search(name):
+                return m.group(0)
+            return env.get(name, m.group(0))
+
+        value = _ENV_REF_RE.sub(_expand, value)
     return os.path.expanduser(value)
 
 
