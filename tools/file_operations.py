@@ -26,8 +26,7 @@ from tools.binary_extensions import has_binary_extension
 from agent.file_safety import get_write_denied_error
 from tools.file_operations_common import (
     ExecuteResult, PatchResult, ReadResult, SearchResult, WriteResult,
-    _UTF8_BOM, _detect_line_ending, _has_bom, _normalize_changed_line_endings, _normalize_line_endings,
-    _strip_bom,
+    _UTF8_BOM, _detect_line_ending, _has_bom, _normalize_line_endings, _strip_bom,
     _strip_terminal_fence_leaks, normalize_read_pagination, normalize_search_pagination)
 from tools.file_operations_lint import LINTERS_INPROC, LintMixin, _FAIL_CLOSED_INPROC_EXTS
 from tools.file_operations_search import SearchMixin
@@ -1489,8 +1488,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         has_bom, pre_content, original_ending = self._probe_write_target(path, pre_content, want_pre)
         # read_file strips the BOM and models send bare-LF text, so a round-trip would
         # otherwise normalize CRLF files and drop the BOM (prepend only when absent).
-        # ``keep_line_endings``: an edit that already applied the file's ending to the lines it
-        # changed (patch) — converting the whole buffer would rewrite untouched bytes.
+        # ``keep_line_endings``: an edit that already gave the text it inserted the file's ending
+        # (patch) — converting the whole buffer would rewrite untouched bytes.
         if original_ending == "\r\n" and not keep_line_endings:
             content = _normalize_line_endings(content, "\r\n")
         if has_bom and not _has_bom(content):
@@ -1585,15 +1584,12 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         content, _ = _strip_bom(raw_content)
 
         from tools.fuzzy_match import fuzzy_find_and_replace
+        # Models send bare-LF old/new strings: the line breaks new_string inserts take the file's
+        # ending so CRLF files stay consistent, and bytes outside it keep theirs.
         new_content, match_count, _strategy, error = fuzzy_find_and_replace(
-            content, old_string, new_string, replace_all)
+            content, old_string, new_string, replace_all, line_ending=_detect_line_ending(content))
         if error or match_count == 0:
             return self._no_match_result(path, content, old_string, new_string, match_count, error)
-        # Models send bare-LF old/new strings; give the lines the replacement produced the file's
-        # ending so CRLF files stay consistent — only those lines: untouched lines keep their bytes.
-        file_ending = _detect_line_ending(content)
-        if file_ending:
-            new_content = _normalize_changed_line_endings(content, new_content, file_ending)
         write_result = self.write_file(path, new_content, pre_content=raw_content, keep_line_endings=True)
         if write_result.error:
             return PatchResult(error=f"Failed to write changes: {write_result.error}")

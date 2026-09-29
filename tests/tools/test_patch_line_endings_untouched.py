@@ -35,3 +35,19 @@ def test_patch_rewrites_only_the_edited_line(tmp_path, shape, mode):
     assert result.success, result.error
     first_eol = original.index(ending) + len(ending)
     assert target.read_bytes() == b"status: done" + ending + original[first_eol:]
+
+
+def test_v4a_context_lines_keep_their_bytes_among_repeated_lines(tmp_path):
+    """A V4A context line is one the hunk leaves unchanged, so it keeps its own ending even when
+    repeated text would let a line diff align it with a produced line. The hunk turns the second
+    ``c`` into ``b`` and the final ``a`` into ``c``: the produced lines take the file's CRLF, and
+    the context lines ``c`` and ``b`` keep their LF."""
+    target = tmp_path / "data.txt"
+    target.write_bytes(b"c\nc\nb\na\r\n")
+    ops = ShellFileOperations(LocalEnvironment(cwd=str(tmp_path)), cwd=str(tmp_path))
+
+    result = ops.patch_v4a(
+        f"*** Begin Patch\n*** Update File: {target}\n c\n-c\n+b\n b\n-a\n+c\n*** End Patch")
+
+    assert result.success, result.error
+    assert target.read_bytes() == b"c\n" + b"b\r\n" + b"b\n" + b"c\r\n"

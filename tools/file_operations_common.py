@@ -5,10 +5,9 @@ behavior — key names, order and omission rules are pinned by tests and read by
 the model.
 """
 
-import difflib
 import re
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Sequence
 
 
 @dataclass
@@ -249,30 +248,45 @@ def _normalize_line_endings(text: str, target: str) -> str:
     return text
 
 
-_LF_LINE_RE = re.compile(r"[^\n]*\n|[^\n]+\Z")
+_BARE_LF_RE = re.compile(r"(?<!\r)\n")
 
 
-def _normalize_changed_line_endings(old: str, new: str, ending: str) -> str:
-    """``new`` with ``ending`` applied only to the lines an edit produced. Lines equal to ``old``'s
-    keep their exact bytes — a CRLF past the 4 KB detection window of an LF file, an LF-only line
-    in a CRLF file, a lone-CR progress line — so an edit never rewrites bytes it did not touch.
-    Lines split after each ``\n`` (a lone CR stays inside its line); the common prefix/suffix is
-    trimmed first so the line diff only runs over the edited span."""
-    old_lines, new_lines = _LF_LINE_RE.findall(old), _LF_LINE_RE.findall(new)
-    head = 0
-    while head < min(len(old_lines), len(new_lines)) and old_lines[head] == new_lines[head]:
-        head += 1
-    tail = 0
-    while (tail < min(len(old_lines), len(new_lines)) - head
-           and old_lines[-1 - tail] == new_lines[-1 - tail]):
-        tail += 1
-    old_mid, new_mid = old_lines[head:len(old_lines) - tail], new_lines[head:len(new_lines) - tail]
-    out = new_lines[:head]
-    for tag, _i1, _i2, j1, j2 in difflib.SequenceMatcher(None, old_mid, new_mid, autojunk=False).get_opcodes():
-        chunk = new_mid[j1:j2]
-        out.extend(chunk if tag == "equal" else (_normalize_line_endings(line, ending) for line in chunk))
-    out.extend(new_lines[len(new_lines) - tail:])
-    return "".join(out)
+def _with_line_ending(text: str, ending: str) -> str:
+    """``text`` an edit inserts, with its bare-LF line breaks as the file's ``ending`` (models send
+    bare LF). A CRLF or lone CR the text already carries stays."""
+    return _BARE_LF_RE.sub(ending, text)
+
+
+def _splice_line_endings(region: str, replacement: str, *, pattern: str, ending: str,
+                         kept_lines: Optional[Sequence[Optional[int]]] = None) -> str:
+    """``replacement``, about to be spliced over the matched ``region``, with line endings by
+    provenance, so an edit never rewrites bytes it did not write (a CRLF past the 4 KB detection
+    window of an LF file, an LF-only line in a CRLF file, a lone-CR progress line):
+
+    - a line break the replacement inserts takes the file's ``ending``;
+    - a kept line (``kept_lines[j]`` is the index of the ``pattern`` line that replacement line
+      ``j`` repeats unchanged, a V4A context line) keeps its region line's ending;
+    - the last line ends in the file's own terminator after the region, so a CR the match took
+      from that terminator (a line-window match stops before the ``\\n``) goes back, unless
+      ``pattern`` named it.
+
+    A CR the replacement itself puts at a line end stays. Linear: no diff is inferred."""
+    region_lines = region.split("\n")
+    if kept_lines is None or len(region_lines) != pattern.count("\n") + 1:
+        kept_lines = ()  # the region's lines do not line up with the pattern's
+    lines = replacement.split("\n")
+    last = len(lines) - 1
+    out = []
+    for j, line in enumerate(lines):
+        source = kept_lines[j] if j < len(kept_lines) else None
+        if source is not None:
+            cr = region_lines[source].endswith("\r")
+        elif j < last:
+            cr = line.endswith("\r") or ending == "\r\n"
+        else:
+            cr = line.endswith("\r") or (region_lines[-1].endswith("\r") and not pattern.endswith("\r"))
+        out.append(line.removesuffix("\r") + ("\r" if cr else ""))
+    return "\n".join(out)
 
 
 # UTF-8 BOM (EF BB BF == U+FEFF), prepended by some Windows editors. Stripped on

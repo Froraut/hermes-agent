@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 if TYPE_CHECKING:  # annotations only; the real import is per-call in apply_v4a_operations
     from tools.file_operations_common import PatchResult
 
-from tools.file_operations_common import PatchResult, _detect_line_ending, _normalize_changed_line_endings
+from tools.file_operations_common import PatchResult, _detect_line_ending, _with_line_ending
 
 
 class OperationType(Enum):
@@ -132,6 +132,19 @@ def _split_hunk(hunk: Hunk) -> Tuple[List[str], List[str]]:
             [l.content for l in hunk.lines if l.prefix != '-'])
 
 
+def _line_ending_kwargs(hunk: Hunk, ending: Optional[str]) -> Dict[str, Any]:
+    """fuzzy_find_and_replace kwargs that splice a hunk with the file's line ``ending``: an added
+    line takes it, a context line keeps its own (``kept_lines`` maps each replace line to the
+    search line it repeats, or None when added)."""
+    kept: List[Optional[int]] = []
+    search_index = 0
+    for line in hunk.lines:
+        if line.prefix != '-':
+            kept.append(search_index if line.prefix == ' ' else None)
+        search_index += line.prefix != '+'
+    return {"line_ending": ending, "kept_lines": kept}
+
+
 def _no_match_hint(error: Optional[str], search_pattern: str, content: str) -> str:
     """Best-effort 'Did you mean...' suffix; never lets a hint failure mask the real error."""
     with contextlib.suppress(Exception):
@@ -152,22 +165,24 @@ def _patch_mode_advice(error: Optional[str]) -> Optional[str]:
     return error.replace(AMBIGUOUS_MATCH_ADVICE, _V4A_AMBIGUOUS_ADVICE) if error else error
 
 
-def _replace_hunk(content: str, hunk: Hunk, search_pattern: str,
-                  replacement: str) -> Tuple[str, int, Optional[str]]:
+def _replace_hunk(content: str, hunk: Hunk, search_pattern: str, replacement: str,
+                  ending: Optional[str] = None) -> Tuple[str, int, Optional[str]]:
     """``(content, count, error)`` for one hunk: file-wide, else inside a window around its context
     hint (the hint's job is to pick one of several matches). Validation and apply share it so a
     hunk the apply phase would place is never rejected by the validation phase ahead of it. The
     file-wide error is kept: its match line numbers are file-relative, the window's are not.
     A hint that occurs more than once names no single window, so the file-wide result stands
-    (as for addition-only hunks): the first hint's window would edit its block unasked."""
+    (as for addition-only hunks): the first hint's window would edit its block unasked.
+    Both searches splice with the file's line ``ending`` (``_line_ending_kwargs``)."""
     from tools.fuzzy_match import fuzzy_find_and_replace
+    splice = _line_ending_kwargs(hunk, ending)
     new_content, count, _strategy, error = fuzzy_find_and_replace(
-        content, search_pattern, replacement, replace_all=False)
+        content, search_pattern, replacement, replace_all=False, **splice)
     hint_pos = content.find(hunk.context_hint) if hunk.context_hint and not count else -1
     if hint_pos != -1 and content.find(hunk.context_hint, hint_pos + 1) == -1:
         start, end = max(0, hint_pos - 500), min(len(content), hint_pos + 2000)
         window_new, count, _strategy, _window_error = fuzzy_find_and_replace(
-            content[start:end], search_pattern, replacement, replace_all=False)
+            content[start:end], search_pattern, replacement, replace_all=False, **splice)
         if count:
             return content[:start] + window_new + content[end:], count, None
     return new_content, count, error
@@ -217,6 +232,7 @@ def _validate_operations(operations: List[PatchOperation], file_ops: Any) -> Lis
         if read_err:
             errors.append(f"{op.file_path}: {read_err}")
             return
+        ending = _detect_line_ending(simulated or "")
         for hunk_index, hunk in enumerate(op.hunks, start=1):
             search_lines, replace_lines = _split_hunk(hunk)
             if search_lines == replace_lines:
@@ -235,7 +251,8 @@ def _validate_operations(operations: List[PatchOperation], file_ops: Any) -> Lis
                         errors.append(f"{op.file_path}: addition-only hunk {ambiguous}")
                 continue
             search_pattern, replacement = '\n'.join(search_lines), '\n'.join(replace_lines)
-            new_simulated, count, match_error = _replace_hunk(simulated, hunk, search_pattern, replacement)
+            new_simulated, count, match_error = _replace_hunk(
+                simulated, hunk, search_pattern, replacement, ending)
             if count:
                 simulated = new_simulated
             elif not is_already_applied(simulated or "", search_pattern, replacement):
@@ -418,8 +435,12 @@ def _apply_move(op: PatchOperation, file_ops: Any) -> ApplyResult:
         True, f"# Moved: {op.file_path} -> {op.new_path}", None, None)
 
 
-def _insert_addition_only(new_content: str, hunk: Hunk, insert_text: str) -> Tuple[Optional[str], Optional[str]]:
-    """Place an addition-only hunk after its context hint (or at EOF). Returns (content, error)."""
+def _insert_addition_only(new_content: str, hunk: Hunk, insert_text: str,
+                          ending: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+    """Place an addition-only hunk after its context hint (or at EOF). Returns (content, error).
+    The line breaks it inserts take the file's ``ending``; the file's own keep their bytes."""
+    newline = ending or '\n'
+    insert_text = _with_line_ending(insert_text, newline)
     if hunk.context_hint:
         occurrences, ambiguous = _hint_ambiguity(
             new_content, hunk.context_hint, " — provide a more unique hint")
@@ -428,10 +449,12 @@ def _insert_addition_only(new_content: str, hunk: Hunk, insert_text: str) -> Tup
         if occurrences == 1:
             eol = new_content.find('\n', new_content.find(hunk.context_hint))
             if eol == -1:
-                return new_content + '\n' + insert_text, None
-            return new_content[:eol + 1] + insert_text + '\n' + new_content[eol + 1:], None
-    # No hint / hint not found — append at end as a safe fallback.
-    return new_content.rstrip('\n') + '\n' + insert_text + '\n', None
+                return new_content + newline + insert_text, None
+            return new_content[:eol + 1] + insert_text + newline + new_content[eol + 1:], None
+    # No hint / hint not found — append at end as a safe fallback. Re-adding a stripped '\n'
+    # restores the last line's own terminator (a CRLF's CR stays on ``body``).
+    body = new_content.rstrip('\n')
+    return body + ('\n' if body != new_content else newline) + insert_text + newline, None
 
 
 def _apply_update(op: PatchOperation, file_ops: Any) -> ApplyResult:
@@ -441,30 +464,30 @@ def _apply_update(op: PatchOperation, file_ops: Any) -> ApplyResult:
     if read_result.error:
         return _fail(f"Cannot read file: {read_result.error}")
     current_content = new_content = read_result.content
+    # Hunk lines arrive bare-LF: what each hunk inserts takes the file's ending, while every byte
+    # it does not write (context lines included) keeps its own.
+    ending = _detect_line_ending(current_content or "")
     for hunk in op.hunks:
         search_lines, replace_lines = _split_hunk(hunk)
         if search_lines and search_lines == replace_lines:
             continue
         search_pattern, replacement = '\n'.join(search_lines), '\n'.join(replace_lines)
         if not search_lines:
-            new_content, err = _insert_addition_only(new_content, hunk, replacement)
+            new_content, err = _insert_addition_only(new_content, hunk, replacement, ending)
             if err:
                 return _fail(err)
             continue
-        new_content, count, error = _replace_hunk(new_content, hunk, search_pattern, replacement)
+        new_content, count, error = _replace_hunk(new_content, hunk, search_pattern, replacement, ending)
         if not count:
             # Mirror validation's already-applied skip, else the two phases disagree and fail here.
             if is_already_applied(new_content, search_pattern, replacement):
                 continue
             hint = _no_match_hint(error, search_pattern, new_content)
             return _fail(f"Could not apply hunk: {_patch_mode_advice(error)}" + hint)
-    # Pass pre_content to skip a redundant re-read inside write_file when supported.
-    # Hunk lines arrive bare-LF: give the lines the patch produced the file's ending, and ask
-    # write_file not to re-normalize the whole buffer (untouched lines keep their bytes).
+    # Pass pre_content to skip a redundant re-read inside write_file when supported, and ask
+    # write_file not to re-normalize the whole buffer: the hunks already set their own endings.
     extra = {"pre_content": current_content} if _write_file_accepts(file_ops, "pre_content") else {}
-    ending = _detect_line_ending(current_content or "")
     if ending and _write_file_accepts(file_ops, "keep_line_endings"):
-        new_content = _normalize_changed_line_endings(current_content, new_content, ending)
         extra["keep_line_endings"] = True
     write_result = file_ops.write_file(op.file_path, new_content, **extra)
     return _written(write_result, _unified_diff(op.file_path, current_content, new_content))
