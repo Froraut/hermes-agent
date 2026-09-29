@@ -218,3 +218,11 @@ class TestResumeRowIdentity:
         run_dataset(rows, resume=False, fail={"img-b"})
 
         assert run_dataset(rows, resume=True) == [(1, "img-b")]
+
+    def test_resume_tells_rows_sharing_a_prompt_apart_after_a_reorder(self, run_dataset):
+        """The completed img-a row now sits where the failed img-b row was recorded: resume must
+        still run img-b (and not img-a again), so identity includes the row's own data."""
+        img_a, img_b = ({"prompt": "Fix the failing tests in /repo.", "image": img} for img in ("img-a", "img-b"))
+        run_dataset([img_a, img_b], resume=False, fail={"img-b"})
+
+        assert run_dataset([img_b, img_a], resume=True) == [(0, "img-b")]

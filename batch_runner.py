@@ -14,6 +14,7 @@ except ModuleNotFoundError as exc:
     if exc.name != "hermes_bootstrap":
         raise  # the bootstrap exists but cannot load: skipping it would skip PM activation
 
+import hashlib
 import json
 import logging
 import contextlib
@@ -345,6 +346,7 @@ def _process_batch_worker(args: Tuple) -> Dict[str, Any]:
                     "prompt_index": prompt_index,
                     "discarded": "no_reasoning",
                     "prompt": _entry_prompt_text(prompt_data),
+                    "entry_key": _entry_key(prompt_data),
                 })
                 continue
 
@@ -363,7 +365,8 @@ def _process_batch_worker(args: Tuple) -> Dict[str, Any]:
                 "api_calls": result["api_calls"],
                 "toolsets_used": result["toolsets_used"],
                 "tool_stats": _normalize_tool_stats(raw_tool_stats),  # {tool: {count, success, failure}}
-                "tool_error_counts": _normalize_tool_error_counts(raw_error_counts)  # {tool: failure_count}
+                "tool_error_counts": _normalize_tool_error_counts(raw_error_counts),  # {tool: failure_count}
+                "entry_key": _entry_key(prompt_data),  # resume identity; stripped from trajectories.jsonl
             })
         _merge_tool_stats(batch_tool_stats, result.get("tool_stats", {}))
         _merge_reasoning_stats(batch_reasoning_stats, result.get("reasoning_stats", {}))
@@ -386,6 +389,12 @@ def _process_batch_worker(args: Tuple) -> Dict[str, Any]:
         "discarded_no_reasoning": discarded_no_reasoning,
         "completed_prompts": completed_in_batch
     }
+
+
+def _entry_key(entry: Dict) -> str:
+    """Identity of a dataset row: its whole entry, so rows sharing a prompt but not their
+    per-row data (image, cwd, ...) stay distinct, and identical rows stay interchangeable."""
+    return hashlib.sha256(json.dumps(entry, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
 
 
 def _entry_prompt_text(entry: Dict) -> str:
@@ -540,16 +549,16 @@ class BatchRunner:
         else:
             atomic_json_write(self.checkpoint_file, checkpoint_data)
 
-    def _scan_completed_prompts_by_content(self) -> Dict[str, List[Optional[int]]]:
-        """Completed prompt text -> the ``prompt_index`` of every row recording it, scanned
-        from every ``batch_*.jsonl``.
+    def _scan_completed_prompts_by_content(self) -> Dict[str, List[Tuple[Optional[int], Optional[str]]]]:
+        """Completed prompt text -> ``(prompt_index, entry_key)`` of every row recording it,
+        scanned from every ``batch_*.jsonl`` (rows written before ``entry_key`` carry None).
 
         Matching on content rather than index lets resume recover even when indices
-        don't line up; one index per row keeps rows that share a prompt text apart.
+        don't line up; one record per row keeps rows that share a prompt text apart.
         Failed entries are skipped (retried); discard tombstones count as completed
         (#93527) — re-running would just re-discard.
         """
-        completed_prompts: Dict[str, List[Optional[int]]] = {}
+        completed_prompts: Dict[str, List[Tuple[Optional[int], Optional[str]]]] = {}
         batch_files = sorted(self.output_dir.glob("batch_*.jsonl"))
 
         if not batch_files:
@@ -566,7 +575,8 @@ class BatchRunner:
                                 continue
                             prompt_text = _entry_prompt_text(entry)
                             if prompt_text:
-                                completed_prompts.setdefault(prompt_text, []).append(entry.get("prompt_index"))
+                                completed_prompts.setdefault(prompt_text, []).append(
+                                    (entry.get("prompt_index"), entry.get("entry_key")))
                         except json.JSONDecodeError:
                             continue
             except Exception as e:
@@ -575,29 +585,36 @@ class BatchRunner:
         return completed_prompts
 
     def _filter_dataset_by_completed(
-            self, completed_prompts: Dict[str, List[Optional[int]]]) -> Tuple[List[Tuple[int, Dict]], List[int]]:
+            self, completed_prompts: Dict[str, List[Tuple[Optional[int], Optional[str]]]],
+    ) -> Tuple[List[Tuple[int, Dict]], List[int]]:
         """Return ``([(index, entry)] not yet completed, [skipped indices])``.
 
-        Each completed row accounts for ONE dataset row: the one at its recorded index when
-        that row still carries its prompt text, else (dataset reordered or edited) the first
-        unclaimed row with that text. Rows sharing a prompt (repeated samples, per-row
-        image/cwd) therefore stay pending until each of them has completed.
+        Each completed row accounts for ONE dataset row, wherever it now sits: the first
+        unclaimed row with the same ``entry_key`` (the whole entry, so rows sharing a prompt
+        but not their image/cwd stay distinct). Rows written before ``entry_key`` fall back to
+        the row at their recorded index when it still carries their prompt text, else the
+        first unclaimed row with that text.
         """
         texts = [_entry_prompt_text(entry) for entry in self.dataset]
+        keys = [_entry_key(entry) for entry in self.dataset]
         claimed: set = set()
-        unplaced: Counter = Counter()
-        for prompt_text, indices in completed_prompts.items():
-            for idx in indices:
-                if isinstance(idx, int) and 0 <= idx < len(texts) and texts[idx] == prompt_text:
+        by_key: Counter = Counter()
+        by_text: Counter = Counter()
+        for prompt_text, records in completed_prompts.items():
+            for idx, key in records:
+                if key is not None:
+                    by_key[key] += 1
+                elif isinstance(idx, int) and 0 <= idx < len(texts) and texts[idx] == prompt_text:
                     claimed.add(idx)
                 else:
-                    unplaced[prompt_text] += 1
+                    by_text[prompt_text] += 1
         filtered_dataset = []
         skipped_indices = []
         for idx, entry in enumerate(self.dataset):
-            if idx not in claimed and unplaced[texts[idx]] > 0:
-                unplaced[texts[idx]] -= 1
-                claimed.add(idx)
+            for unplaced, identity in ((by_key, keys[idx]), (by_text, texts[idx])):
+                if idx not in claimed and unplaced[identity] > 0:
+                    unplaced[identity] -= 1
+                    claimed.add(idx)
             if idx in claimed:
                 skipped_indices.append(idx)
             else:
@@ -746,6 +763,8 @@ class BatchRunner:
                             if data.get("discarded"):
                                 tombstone_entries += 1
                                 continue
+                            if data.pop("entry_key", None) is not None:  # resume bookkeeping only
+                                line = json.dumps(data, ensure_ascii=False) + "\n"
                             tool_stats = data.get('tool_stats', {})
                             invalid_tools = [k for k in tool_stats if k not in ALL_POSSIBLE_TOOLS]
 
