@@ -3095,6 +3095,7 @@ export interface Translations {
       reveal: string
       copyPath: string
       removeFromSidebar: string
+      createdInPreviousContext: string
       createFailed: string
       staleBackend: string
       deleteConfirm: string
