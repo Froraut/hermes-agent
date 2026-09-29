@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ClientSessionState } from '@/app/types'
 import { chatMessageText, textPart } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
-import { errorRecoveryPlan } from '@/lib/error-surface'
+import { errorRecoveryPlan, formatErrorDiagnostics } from '@/lib/error-surface'
 import { requestGatewayForAgent } from '@/store/gateway'
 
 import { $activeSessionId, $selectedStoredSessionId, $unreadFinishedSessionIds } from './session'
@@ -296,6 +296,45 @@ describe('live turn event silence', () => {
     expect(failed?.errorSurface?.code).toBe('no_reply')
     expect(errorRecoveryPlan(failed?.errorSurface).retry).toBe(true)
     expect(failed?.error).not.toMatch(/connection/i)
+  })
+
+  it('keeps a submitted turn the backend has not accepted yet, instead of ending it', async () => {
+    // No message.start and no running=true edge yet: the backend honestly lists
+    // the session idle (or not at all), exactly like the snapshot rule in
+    // rehydrateLiveSessionStatuses. Ending it would arm a Retry for a prompt
+    // that may still start.
+    publishSessionState('rt-queued', state({ awaitingResponse: true, busy: true, storedSessionId: 's-queued' }))
+    const request = backend(async () => listing('rt-queued', 'idle'))
+    noteSessionEvent('rt-queued')
+
+    await vi.advanceTimersByTimeAsync(SILENCE_MS * 2)
+
+    expect(request).toHaveBeenCalledTimes(2)
+    expect($workingSessionIds.get()).toContain('s-queued')
+    expect(card('rt-queued')).toBeUndefined()
+
+    // Once accepted, the same answer is a real turn end.
+    publishSessionState('rt-queued', { ...$sessionStates.get()['rt-queued']!, turnLive: true })
+    noteSessionEvent('rt-queued')
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
+
+    expect($workingSessionIds.get()).not.toContain('s-queued')
+  })
+
+  it('stamps the runtime id on the no-reply card for the copied error details', async () => {
+    $activeSessionId.set('rt-traced')
+    publishSessionState(
+      'rt-traced',
+      state({ awaitingResponse: true, busy: true, storedSessionId: 's-traced', turnLive: true })
+    )
+    backend(async () => ({ sessions: [] }))
+    noteSessionEvent('rt-traced')
+
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
+
+    const surface = card('rt-traced')?.errorSurface
+    expect(surface).toMatchObject({ code: 'no_reply', session: 'rt-traced' })
+    expect(formatErrorDiagnostics({ errorText: 'x', surface })).toContain('session: rt-traced')
   })
 
   it('pulls the stored reply for a turn on screen before deciding it had none', async () => {
