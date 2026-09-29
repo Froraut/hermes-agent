@@ -172,6 +172,32 @@ class TestPeerIdentity:
                 assert context.authenticate(header, "5.6.7.8") is None, (peer_tokens, header)
             assert context.authenticate("Bearer shared-tok", "5.6.7.8") == "ip:5.6.7.8"
 
+    def test_live_server_answers_a_non_ascii_authorization_header(self, monkeypatch):
+        """Over the wire (urllib sends the header as latin-1 byte 0xE9, http.server decodes it back): POST
+        gets a real 401 and GET /health a real 200 without topology, never a dropped connection."""
+        monkeypatch.setenv("A2A_BEARER_TOKEN", "shared-tok")
+        monkeypatch.delenv("A2A_PEER_TOKENS", raising=False)
+        adapter, base = _make_live_adapter(monkeypatch)
+        bad = {"Authorization": "Bearer n\xe9"}
+
+        def post_status():
+            try:
+                _post_json(base + "/", _send_body("x"), bad)
+            except urllib.error.HTTPError as e:
+                return e.code
+            return 200
+
+        async def run():
+            assert await adapter.connect() is True
+            try:
+                assert await asyncio.to_thread(post_status) == 401
+                health = await asyncio.to_thread(_get_json, base + "/health", bad)
+                assert health["status"] == "ok" and "served_agents" not in health
+            finally:
+                await adapter.disconnect()
+
+        asyncio.run(run())
+
 
 class TestTrustedPeers:
     def test_localhost_trusts_all(self, monkeypatch):
