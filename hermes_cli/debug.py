@@ -258,11 +258,13 @@ def _resolve_log_path(log_name: str) -> Optional[Path]:
 
 def _redact_log_text(text: str) -> str:
     """``redact_sensitive_text(force=True)`` + email scrub — fires regardless of the operator's
-    ``security.redact_secrets`` setting; only the in-memory upload copy is sanitized."""
+    ``security.redact_secrets`` setting; only the in-memory upload copy is sanitized. URL
+    credentials (``?token=``, ``user:pass@``) are masked too: log lines keep them, since default
+    redaction spares OAuth/magic-link URLs, but nothing follows a link out of an uploaded report."""
     if not text:
         return text
     from agent.redact import redact_sensitive_text
-    text = redact_sensitive_text(text, force=True)
+    text = redact_sensitive_text(text, force=True, redact_url_credentials=True)
     return _EMAIL_ADDRESS_RE.sub("[REDACTED_EMAIL]", text)
 
 
