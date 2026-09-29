@@ -4,6 +4,7 @@
 ``hermes logs list`` shows the available files.
 """
 
+import os
 import re
 import sys
 import time
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from hermes_constants import get_hermes_home, display_hermes_home
+from hermes_platform.host.facts import os_family
 
 # Known log files (name → filename)
 LOG_FILES = {
@@ -229,10 +231,36 @@ def _read_last_n_lines(path: Path, n: int) -> list:
         return _read_all_lines(path)[-n:]
 
 
+def _open_follow_handle(path: Path):
+    """Open *path* for ``-f`` without blocking the writer's rollover.
+
+    Windows refuses to rename a file while any handle on it lacks ``FILE_SHARE_DELETE``, and
+    CPython's ``open()`` never passes that flag. A follower that holds the log open would make
+    every rollover's rename fail (concurrent-log-handler swallows it and retries on the next
+    emit), so the log grows past its size cap for as long as ``hermes logs -f`` runs.
+    """
+    if os_family() != "win32":
+        return open(path, "r", encoding="utf-8-sig", errors="replace")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create_file.restype = wintypes.HANDLE
+    # GENERIC_READ; FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE; OPEN_EXISTING
+    handle = create_file(str(path), 0x80000000, 0x7, None, 3, 0x80, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    fd = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    return open(fd, "r", encoding="utf-8-sig", errors="replace")
+
+
 def _follow_log(path: Path, **filters) -> None:
     """Poll a log file for new content and print matching lines."""
     keep = _LineFilter(**filters)
-    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+    with _open_follow_handle(path) as f:
         # Seek to end
         f.seek(0, 2)
         while True:

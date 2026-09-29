@@ -1,6 +1,10 @@
 """Tests for hermes_cli.logs — log viewing and filtering."""
 
+import logging
 from datetime import datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
 
 from hermes_cli.logs import (
     LOG_FILES,
@@ -198,3 +202,50 @@ def test_every_log_file_writes_a_stamp_hermes_logs_since_can_read():
     # gateway.error.log (launchd stderr, not in LOG_FILES) uses the shared stamper.
     from hermes_cli.stderr_timestamp import stamp_line
     assert _parse_line_timestamp(stamp_line("raw gateway stderr")) is not None
+
+
+# ---------------------------------------------------------------------------
+# hermes logs -f
+# ---------------------------------------------------------------------------
+
+@pytest.mark.platforms("windows")
+def test_follow_does_not_block_the_writers_rollover(monkeypatch, capsys):
+    """An attached ``hermes logs -f`` must not stop Hermes' own writer from rotating the log.
+
+    Windows-only: only a Windows handle opened without FILE_SHARE_DELETE refuses the rename, and
+    only there is the writer concurrent-log-handler, which swallows the failed rename.
+    """
+    import hermes_cli.logs as logs_mod
+    import hermes_logging
+    from hermes_constants import get_hermes_home
+
+    path = get_hermes_home() / "logs" / "agent.log"
+    handler = hermes_logging._new_file_handler(
+        path, level=logging.INFO, max_bytes=1_000_000, backup_count=1,
+        formatter=logging.Formatter("%(message)s"),
+    )
+
+    def log(message):
+        handler.handle(logging.LogRecord("test", logging.INFO, "", 0, message, (), None))
+
+    # Each idle poll of the attached follower performs the next writer step, then Ctrl+C stops it.
+    steps = [lambda: log("MARK-1 before the rollover"), handler.doRollover,
+             lambda: log("MARK-2 after the rollover")]
+
+    def idle_poll(_seconds):
+        if not steps:
+            raise KeyboardInterrupt
+        steps.pop(0)()
+
+    log("seed")
+    monkeypatch.setattr(logs_mod, "time", SimpleNamespace(sleep=idle_poll))
+    try:
+        logs_mod.tail_log("agent", num_lines=1, follow=True)
+    finally:
+        handler.close()
+
+    assert "MARK-1" in capsys.readouterr().out
+    backup = path.with_name("agent.log.1")
+    assert backup.exists(), "the rollover's rename was refused while the follower held agent.log"
+    assert "MARK-1" in backup.read_text(encoding="utf-8-sig")
+    assert "MARK-2" in path.read_text(encoding="utf-8-sig")
