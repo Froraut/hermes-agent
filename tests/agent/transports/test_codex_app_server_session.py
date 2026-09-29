@@ -267,6 +267,24 @@ class TestLifecycle:
 # ---- turn loop ----
 
 class TestRunTurn:
+    def test_daybreak_turn_selects_program_and_model_without_changing_next_turn(self):
+        client = FakeClient()
+        client.queue_notification(
+            "turn/completed", threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        session = make_session(client)
+        session.run_turn("review", turn_timeout=2.0, cyber_access_program="daybreakBlue", model="gpt-6-sol")
+        client.queue_notification(
+            "turn/completed", threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        session.run_turn("ordinary", turn_timeout=2.0)
+        turns = [params for method, params in client.requests if method == "turn/start"]
+        assert turns[0]["cyberAccessProgram"] == "daybreakBlue"
+        assert turns[0]["model"] == "gpt-6-sol"
+        assert "cyberAccessProgram" not in turns[1]
+
     def test_simple_text_turn_returns_final_message(self):
         client = FakeClient()
         client.queue_notification("turn/started", threadId="t", turn={"id": "tu1"})

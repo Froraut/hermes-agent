@@ -21,6 +21,7 @@ import {
   revokeDiscardedAttachmentPreviews,
   terminalContextBlocksFromDraft
 } from '@/store/composer'
+import { adoptDraftDaybreakSelection, daybreakSelectionFor } from '@/store/daybreak'
 import { noteMessageSent } from '@/store/desktop-metrics'
 import { $hudMode } from '@/store/hud'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
@@ -28,6 +29,7 @@ import { consumePendingCredentialWarning, requestDesktopOnboarding } from '@/sto
 import { isStoredTranscriptReadOnly } from '@/store/read-only-transcript'
 import {
   $activeSessionId,
+  $currentProvider,
   $sessions,
   resolveComposerSessionKey,
   setActiveSessionId,
@@ -807,6 +809,8 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // to the ambient socket — the fresh-chat owner loss behind #94071.
         targetStoredSessionId = selectedStoredSessionIdRef.current
 
+        adoptDraftDaybreakSelection(targetStoredSessionId ?? sessionId)
+
         seedOptimistic(sessionId)
       }
 
@@ -887,29 +891,40 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           }
         }
 
-        const submitParams = (targetId: string) => ({
-          session_id: targetId,
-          text,
-          ...(interrupted && { interrupted }),
-          // Off-screen widget intent: the gateway types the persisted user
-          // row display_kind=hidden so no client renders it as a bubble.
-          ...(options?.displayKind === 'hidden' && { display_kind: 'hidden' }),
-          // Typed into the floating HUD, so the user is looking at another app
-          // rather than at Hermes. The gateway turns this into a per-turn hint
-          // to read the window underneath and work in it.
-          ...($hudMode.get() && { surface: 'hud' }),
-          // A GPT-Live delegation: the text is a voice transcript and the reply
-          // will be spoken by the voice model. Wins over HUD for this turn.
-          ...(options?.surface && { surface: options.surface }),
-          ...(options?.surface && options.voiceContext && { voice_context: options.voiceContext }),
-          // A queue drain is a "run after" message, never a live-turn
-          // correction. The flag tells the gateway's busy path to hold it for
-          // the next turn untouched — without it, losing the settle race
-          // (client saw idle, server still unwinding) redirects or interrupts
-          // the live turn with text the user explicitly queued.
-          ...(options?.fromQueue && { queued: true }),
-          ...(titlePreview && { title_preview: titlePreview })
-        })
+        const submitParams = (targetId: string) => {
+          const provider =
+            $sessionStates.get()[targetId]?.provider || (targetIsCurrentView() ? $currentProvider.get() : '')
+
+          const daybreakSelection = daybreakSelectionFor(targetStoredSessionId, targetId)
+
+          return {
+            session_id: targetId,
+            text,
+            ...(daybreakSelection !== undefined &&
+              (!provider || provider === 'openai-codex') && {
+                daybreak_enabled: daybreakSelection
+              }),
+            ...(interrupted && { interrupted }),
+            // Off-screen widget intent: the gateway types the persisted user
+            // row display_kind=hidden so no client renders it as a bubble.
+            ...(options?.displayKind === 'hidden' && { display_kind: 'hidden' }),
+            // Typed into the floating HUD, so the user is looking at another app
+            // rather than at Hermes. The gateway turns this into a per-turn hint
+            // to read the window underneath and work in it.
+            ...($hudMode.get() && { surface: 'hud' }),
+            // A GPT-Live delegation: the text is a voice transcript and the reply
+            // will be spoken by the voice model. Wins over HUD for this turn.
+            ...(options?.surface && { surface: options.surface }),
+            ...(options?.surface && options.voiceContext && { voice_context: options.voiceContext }),
+            // A queue drain is a "run after" message, never a live-turn
+            // correction. The flag tells the gateway's busy path to hold it for
+            // the next turn untouched — without it, losing the settle race
+            // (client saw idle, server still unwinding) redirects or interrupts
+            // the live turn with text the user explicitly queued.
+            ...(options?.fromQueue && { queued: true }),
+            ...(titlePreview && { title_preview: titlePreview })
+          }
+        }
 
         // On sleep/wake the gateway's in-memory session may have been cleared
         // while the desktop app still holds the old session ID. The shared

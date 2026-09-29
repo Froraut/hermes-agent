@@ -6,9 +6,11 @@ import { useState } from 'react'
 import { useSessionView } from '@/app/chat/session-view'
 import { Codicon } from '@/components/ui/codicon'
 import { DropdownMenuItem, dropdownMenuRow } from '@/components/ui/dropdown-menu'
+import { Switch } from '@/components/ui/switch'
 import { useI18n } from '@/i18n'
 import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { cn } from '@/lib/utils'
+import { $daybreakSelections, daybreakSelectionFor, setDaybreakSelection } from '@/store/daybreak'
 import { $currentModelSource } from '@/store/session'
 
 import { ModelCatalogMenu } from './model-catalog-menu'
@@ -34,6 +36,9 @@ export function ModelMenuPanel({ onFollowDefaultModel, ...props }: ModelMenuPane
   const queryClient = useQueryClient()
   const view = useSessionView()
   const modelSource = useStore($currentModelSource)
+  const storedSessionId = useStore(view.$storedId)
+  const runtimeId = useStore(view.$runtimeId)
+  useStore($daybreakSelections)
   const { activeSessionId, controller } = useModelMenuController(props)
   // Same condition as the pill's pin dot: a draft whose next session.create
   // ships the manual pick instead of the Settings default (#107410).
@@ -101,6 +106,22 @@ export function ModelMenuPanel({ onFollowDefaultModel, ...props }: ModelMenuPane
         </>
       }
       gateway={gateway}
+      header={
+        controller.current.provider === 'openai-codex' ? (
+          <div
+            className="flex items-center justify-between gap-3 px-3 py-2"
+            title="Request Daybreak for this conversation. Approved access and a compatible model are required."
+          >
+            <span className="text-sm">Daybreak</span>
+            <Switch
+              aria-label="Daybreak"
+              checked={daybreakSelectionFor(storedSessionId, runtimeId) ?? false}
+              onCheckedChange={enabled => setDaybreakSelection(storedSessionId, enabled, runtimeId)}
+              size="xs"
+            />
+          </div>
+        ) : null
+      }
       includeMoa
       ownerConnectionId={ownerConnectionId}
       profile={profile}

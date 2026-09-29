@@ -47,6 +47,12 @@ Type in the filter box to narrow by provider name, slug, or model ID.
 
 Pick a model, hit **Switch**, and Hermes writes it to `~/.hermes/config.yaml` under the `model` section. **This applies to new sessions only** — any chat tab you already have open keeps running whatever model it started with. To hot-swap the current chat, use the `/model` slash command inside it.
 
+### Daybreak in Desktop with a ChatGPT subscription
+
+After signing in to **ChatGPT or Codex Subscription** (`openai-codex`), open the model menu in a Desktop chat and turn on **Daybreak** above the model list. The choice belongs to that conversation, starts off, and resets when Desktop restarts. Hermes requests Daybreak on every model call in the selected turn, including tool follow-ups and live goal continuations. Turning it off returns to the provider's ordinary default selection. API-key and other provider routes are unaffected.
+
+The toggle does not grant access or change the model. Your ChatGPT workspace must already be approved for Daybreak, and OpenAI checks the selected model and access level. Hermes requests Blue for ordinary compatible models and the Blue alias; it requests Red for `gpt-daybreak-red-*` and `gpt-5.6-cyber` models. If the account or model is ineligible, OpenAI returns the error. See [OpenAI's Daybreak troubleshooting](https://help.openai.com/en/articles/20001259-openai-daybreak-common-issues-and-troubleshooting) for workspace access and supported models.
+
 ### Mid-session switches and context warnings
 
 When you switch models **inside an active session** (Herm TUI model picker, `hermes` CLI, or `/model` on Telegram/Discord), Hermes estimates whether your **next message** will run **preflight context compression** against the new model's window. If the session is already near or above that model's compression threshold (see [Context Compression](./configuration.md#context-compression)), the switch reply includes a warning — the same `warning_message` path used for expensive-model notices. The switch still applies immediately; compression runs on the **first user message after the switch**, before the model answers.

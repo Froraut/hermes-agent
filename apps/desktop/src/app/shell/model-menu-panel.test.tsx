@@ -4,8 +4,16 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 import { DropdownMenu, DropdownMenuContent } from '@/components/ui/dropdown-menu'
 import { $customModels } from '@/store/custom-models'
+import { $daybreakSelections, daybreakSelectionFor } from '@/store/daybreak'
 import { $collapsedProviders, toggleCollapsedProvider } from '@/store/provider-collapse'
-import { $activeSessionId, $currentModel, $currentProvider, setCurrentModelSource } from '@/store/session'
+import {
+  $activeSessionId,
+  $currentModel,
+  $currentProvider,
+  $selectedStoredSessionId,
+  setCurrentModelSource
+} from '@/store/session'
+import { dropSessionState } from '@/store/session-states'
 
 import { ModelMenuPanel } from './model-menu-panel'
 
@@ -53,6 +61,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  $daybreakSelections.set({})
+  $selectedStoredSessionId.set(null)
   vi.clearAllMocks()
 })
 
@@ -139,6 +149,25 @@ describe('ModelMenuPanel MoA presets', () => {
 })
 
 describe('ModelMenuPanel current selection', () => {
+  it('shows a working Daybreak toggle for the subscription provider only', async () => {
+    dropSessionState('runtime-1')
+    $selectedStoredSessionId.set('stored-1')
+    $currentProvider.set('openai-codex')
+    $currentModel.set('gpt-6-sol')
+    getGlobalModelOptions.mockResolvedValue({
+      providers: [{ name: 'ChatGPT or Codex Subscription', slug: 'openai-codex', models: ['gpt-6-sol'] }]
+    })
+
+    renderPanel()
+    const toggle = screen.getByRole('switch', { name: 'Daybreak' })
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    fireEvent.click(toggle)
+    expect(daybreakSelectionFor('stored-1', 'runtime-1')).toBe(true)
+
+    $currentProvider.set('deepseek')
+    await vi.waitFor(() => expect(screen.queryByRole('switch', { name: 'Daybreak' })).toBeNull())
+  })
+
   it('keeps the checkmark on the live SessionView model when a stale options response disagrees', async () => {
     $currentProvider.set('google')
     $currentModel.set('gemini-3.1-pro')

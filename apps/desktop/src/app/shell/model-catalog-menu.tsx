@@ -156,6 +156,8 @@ export interface ModelMenuController {
 
 interface ModelCatalogMenuProps {
   controller: ModelMenuController
+  /** Optional control above search; the composer uses it for the Daybreak choice. */
+  header?: ReactNode
   /** Rows appended under the catalog (Refresh Models, Edit Models, …). */
   footer?: ReactNode
   gateway?: HermesGateway
@@ -191,6 +193,7 @@ interface ProviderGroup {
 export function ModelCatalogMenu({
   controller,
   footer,
+  header,
   gateway,
   includeMoa = false,
   ownerConnectionId,
@@ -591,6 +594,7 @@ export function ModelCatalogMenu({
 
   return (
     <>
+      {header}
       <DropdownMenuSearch
         aria-label={copy.search}
         onKeyDown={event => {

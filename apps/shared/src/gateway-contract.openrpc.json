@@ -26176,6 +26176,18 @@
             "default": null,
             "title": "Voice Context"
           },
+          "daybreak_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Daybreak Enabled"
+          },
           "title_preview": {
             "anyOf": [
               {
