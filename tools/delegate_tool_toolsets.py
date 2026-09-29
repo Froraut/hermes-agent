@@ -55,14 +55,23 @@ def _expand_parent_toolsets(parent_toolsets: set) -> set:
 
 def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     """Remove toolsets whose tools are ALL blocked (derived from DELEGATE_BLOCKED_TOOLS so the two can't drift) plus
-    composite toolsets children must never get (``delegation``, ``kanban``)."""
+    composite toolsets children must never get (``delegation``, ``kanban``). An MCP server sharing a blocked name
+    ("memory") is not blocked: it stays under its canonical ``mcp-<name>`` toolset."""
+    from tools.registry import registry
+
     blocked_toolset_names = {"delegation", "kanban"} | {
         name
         for name in TOOLSETS
         if (resolved_tools := resolve_toolset(name, include_registry=False))
         and all(tool in DELEGATE_BLOCKED_TOOLS for tool in resolved_tools)
     }
-    return [t for t in toolsets if t not in blocked_toolset_names]
+    kept = []
+    for name in toolsets:
+        if name not in blocked_toolset_names:
+            kept.append(name)
+        elif (target := registry.get_toolset_alias_target(name) or "").startswith("mcp-") and target not in toolsets:
+            kept.append(target)
+    return kept
 
 def _blocked_toolsets_for_role(role: str) -> List[str]:
     """One-tool deny toolsets for the role; passed as ``disabled_toolsets`` so
