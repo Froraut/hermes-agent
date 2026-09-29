@@ -522,3 +522,39 @@ def test_monitor_url_obeys_the_ssrf_policy_on_every_hop(hermes_env, monkeypatch,
         assert not ok and ("169.254.169.254" in body) is allow_private, body
     finally:
         server.shutdown()
+
+
+def test_monitor_url_cap_bounds_decoded_bytes(hermes_env, monkeypatch):
+    """The body cap must bound DECODED bytes. A model-chosen endpoint polled every tick can serve a
+    gzip bomb (~64 KiB on the wire, 64 MiB inflated); decoding it must never hold more than a small
+    multiple of the cap in memory, and a coding that cannot be bounded is a failed tick, not a
+    pass-through."""
+    import gzip
+    import tracemalloc
+
+    import cron.monitor as monitor
+    import tools.url_safety as url_safety
+
+    monkeypatch.setattr(url_safety, "_allow_private_resolved", False)
+    monkeypatch.setenv("HERMES_ALLOW_PRIVATE_URLS", "1")
+    cap = monitor.MAX_URL_BYTES
+    server = _serve({
+        "/warm": (200, {}, b"ok"),
+        "/bomb": (200, {"Content-Encoding": "gzip"}, gzip.compress(b"A" * (256 * cap), 9)),
+        "/br": (200, {"Content-Encoding": "br"}, b"\x0b\x02\x80status\x03"),
+    })
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        assert monitor._fetch_monitor_url(f"{base}/warm") == (True, "ok")  # imports out of the trace
+        tracemalloc.start()
+        try:
+            ok, body = monitor._fetch_monitor_url(f"{base}/bomb")
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert ok and body == "A" * cap, body[:200]
+        assert peak < 16 * cap, f"peak {peak} bytes while decoding a {256 * cap}-byte bomb"
+        ok, body = monitor._fetch_monitor_url(f"{base}/br")
+        assert not ok and "'br'" in body, body
+    finally:
+        server.shutdown()
