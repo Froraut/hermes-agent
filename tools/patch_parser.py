@@ -259,8 +259,8 @@ def _validate_operations(operations: List[PatchOperation], file_ops: Any) -> Lis
                 errors.append(f"{op.file_path}: {add_taken}")
             else:
                 removed_paths.discard(op.file_path)
-                pending_content[op.file_path] = '\n'.join(
-                    line.content for hunk in op.hunks for line in hunk.lines if line.prefix == '+')
+                pending_content[op.file_path] = ''.join(
+                    line.content + '\n' for hunk in op.hunks for line in hunk.lines if line.prefix == '+')
     if not errors and real_change_count == 0:
         errors.append("Patch contains no changes (only context lines were provided)")
     return errors
@@ -356,7 +356,8 @@ def _apply_add(op: PatchOperation, file_ops: Any) -> ApplyResult:
         # writes the Add payload over whatever is actually there.
         return _fail(f"{op.file_path}: could not confirm the path is free — {read_back.error}")
     content_lines = [line.content for hunk in op.hunks for line in hunk.lines if line.prefix == '+']
-    result = file_ops.write_file(op.file_path, '\n'.join(content_lines))
+    # Newline-terminate every '+' line, the last one included, as Codex's apply_patch does.
+    result = file_ops.write_file(op.file_path, ''.join(line + '\n' for line in content_lines))
     diff = f"--- /dev/null\n+++ b/{op.file_path}\n" + '\n'.join(f"+{line}" for line in content_lines)
     return _written(result, diff)
 
