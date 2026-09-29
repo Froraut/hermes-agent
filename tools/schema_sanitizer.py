@@ -58,55 +58,92 @@ def _rename_property_keys(props: dict, path: str) -> dict[str, str]:
     return renames
 
 
+def _resolve_local_ref(ref: str, root: Any) -> Any:
+    """Target of a same-document JSON Pointer ref (``#``, ``#/$defs/X``, ``#/$defs/X/anyOf/0``)
+    in *root*, else None."""
+    if ref != "#" and not ref.startswith("#/"):
+        return None
+    target = root
+    for part in ref[2:].split("/") if ref != "#" else ():
+        part = part.replace("~1", "/").replace("~0", "~")
+        if isinstance(target, list):
+            index = int(part) if part.isascii() and part.isdigit() else len(target)
+            target = target[index] if index < len(target) else None
+        else:
+            target = target.get(part) if isinstance(target, dict) else None
+    return target
+
+
 def _schema_branches(schema: Any, root: Any, refs: tuple = ()):
     """*schema* plus its ``anyOf``/``oneOf``/``allOf`` branches, local ``$ref`` targets resolved
     against *root* (a ref already on this path is not followed again, so recursive schemas end)."""
     if not isinstance(schema, dict):
         return
     ref = schema.get("$ref")
-    if isinstance(ref, str) and ref.startswith("#/") and ref not in refs:
-        target = root
-        for part in ref[2:].split("/"):
-            part = part.replace("~1", "/").replace("~0", "~")
-            target = target.get(part) if isinstance(target, dict) else None
-        yield from _schema_branches(target, root, (*refs, ref))
+    if isinstance(ref, str) and ref not in refs:
+        yield from _schema_branches(_resolve_local_ref(ref, root), root, (*refs, ref))
     yield schema
     for key in ("anyOf", "oneOf", "allOf"):
         for branch in schema.get(key) if isinstance(schema.get(key), list) else ():
             yield from _schema_branches(branch, root, refs)
 
 
+def _item_schema(schema: dict, index: int) -> Any:
+    """Schema of array element *index*: its tuple position (``prefixItems``, or legacy list-valued
+    ``items``), else the schema for the remaining elements."""
+    prefix, items = schema.get("prefixItems"), schema.get("items")
+    if isinstance(prefix, list):
+        positional, rest = prefix, items
+    elif isinstance(items, list):
+        positional, rest = items, schema.get("additionalItems")
+    else:
+        positional, rest = [], items
+    return positional[index] if index < len(positional) else rest
+
+
+def _any_of(schemas: list) -> Any:
+    """One schema for every candidate that applies at a position (None when none does), so the
+    nested unrename sees all union alternatives instead of the first one's."""
+    found: list = []
+    for schema in schemas:
+        if isinstance(schema, dict) and schema not in found:
+            found.append(schema)
+    return found[0] if len(found) == 1 else {"anyOf": found} if found else None
+
+
 def unrename_tool_args(params_schema: Any, args: Any, _root: Any = None) -> Any:
     """Map sanitized keys in model-emitted args back to wire names. ``params_schema`` is the
     ORIGINAL registry schema; follows every position ``_sanitize_node`` renames in (object
-    properties, array items, ``additionalProperties``, local ``$ref`` targets, union branches);
-    unknown keys pass through."""
+    properties, ``additionalProperties``, array items including tuple positions, local ``$ref``
+    targets, union branches); unknown keys pass through."""
     root = params_schema if _root is None else _root
     branches = list(_schema_branches(params_schema, root))
     if isinstance(args, list):
-        items = next((b["items"] for b in branches if isinstance(b.get("items"), dict)), None)
-        return [unrename_tool_args(items, item, root) for item in args] if items else args
+        items = [_any_of([_item_schema(b, i) for b in branches]) for i in range(len(args))]
+        return [unrename_tool_args(s, item, root) for s, item in zip(items, args)] if any(items) else args
     if not isinstance(args, dict):
         return args
-    reverse: dict[str, str] = {}
-    subs: dict[str, Any] = {}
-    extra = None
+    wire_names: dict[str, set[str]] = {}  # key the model was shown -> wire keys it stands for
+    subs: dict[str, list] = {}
+    extra = _any_of([b.get("additionalProperties") for b in branches])
     for branch in branches:
         props = branch.get("properties")
         if isinstance(props, dict):
-            for orig, renamed in _rename_property_keys(props, "<unrename>").items():
-                reverse.setdefault(renamed, orig)
+            renames = _rename_property_keys(props, "<unrename>")
             for key, sub in props.items():
-                subs.setdefault(key, sub)
-        if extra is None and isinstance(branch.get("additionalProperties"), dict):
-            extra = branch["additionalProperties"]
+                wire_names.setdefault(renames.get(key, key), set()).add(key)
+                subs.setdefault(key, []).append(sub)
     if not subs and extra is None:
         return args
     out = {}
     for key, value in args.items():
-        # A renamed key never equals a real key of the same properties dict (_rename_property_keys).
-        orig = key if key in subs else reverse.get(key, key)
-        out[orig] = unrename_tool_args(subs.get(orig, extra), value, root)
+        # One properties dict never maps two wire keys to one shown key (_rename_property_keys), but
+        # union alternatives can ("$id" in one, "@id" in another, both shown as "_id"). Which one
+        # the model meant is not knowable here, so such a key stays as sent rather than taking
+        # another alternative's wire name.
+        names = wire_names.get(key, ())
+        orig = next(iter(names)) if len(names) == 1 else key
+        out[orig] = unrename_tool_args(_any_of(subs[orig]) if orig in subs else extra, value, root)
     return out
 
 

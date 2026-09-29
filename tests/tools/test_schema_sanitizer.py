@@ -593,12 +593,21 @@ def test_builtin_tool_without_required_gets_empty_required_list():
     assert nested["properties"]["opts"]["required"] == []
 
 
+def _as_model_writes(value):
+    """Args as a model writes them from the sanitized schema: every key in its shown spelling."""
+    if isinstance(value, dict):
+        return {sanitize_property_key(k): _as_model_writes(v) for k, v in value.items()}
+    return [_as_model_writes(v) for v in value] if isinstance(value, list) else value
+
+
 def test_unrename_restores_keys_renamed_at_every_depth():
-    """The sanitizer renames illegal keys wherever properties live ($ref targets, union branches,
-    additionalProperties values, array items); args the model writes with those keys must map back
-    to the wire keys at the same positions."""
+    """The sanitizer renames illegal keys wherever properties live ($ref targets, including the root
+    and array-index pointers; union branches; additionalProperties values; array items, including
+    tuple positions); args the model writes with those keys must map back to the wire keys at the
+    same positions."""
     from tools.schema_sanitizer import unrename_tool_args
 
+    obj = {"type": "object", "properties": {"$v": {"type": "integer"}}}
     params = {
         "type": "object",
         "$defs": {"Node": {"type": "object", "properties": {
@@ -607,20 +616,43 @@ def test_unrename_restores_keys_renamed_at_every_depth():
             "node": {"$ref": "#/$defs/Node"},
             "either": {"oneOf": [{"type": "object", "properties": {"@type": {"type": "string"}}},
                                  {"type": "string"}]},
+            "pick": {"$ref": "#/properties/either/oneOf/0"},
             "both": {"allOf": [{"type": "object", "properties": {"a:b": {"type": "string"}}}]},
-            "tags": {"type": "object",
-                     "additionalProperties": {"type": "object", "properties": {"$v": {"type": "integer"}}}},
+            "tags": {"type": "object", "additionalProperties": obj},
             "rows": {"type": "array", "items": {"$ref": "#/$defs/Node"}},
+            "pair": {"type": "array", "prefixItems": [{"$ref": "#/$defs/Node"}, {"$ref": "#/properties/pick"}],
+                     "items": obj},
+            "legacy": {"type": "array", "items": [{"$ref": "#/$defs/Node"}], "additionalItems": obj},
+            "again": {"type": "array", "items": {"$ref": "#"}},
         },
     }
-    wire = {"node": {"@id": "1", "child$": {"@id": "2"}}, "either": {"@type": "x"}, "both": {"a:b": "y"},
-            "tags": {"k": {"$v": 3}}, "rows": [{"@id": "3"}]}
-
-    def as_model_writes(value):
-        if isinstance(value, dict):
-            return {sanitize_property_key(k): as_model_writes(v) for k, v in value.items()}
-        return [as_model_writes(v) for v in value] if isinstance(value, list) else value
+    wire = {"node": {"@id": "1", "child$": {"@id": "2"}}, "either": {"@type": "x"}, "pick": {"@type": "p"},
+            "both": {"a:b": "y"}, "tags": {"k": {"$v": 3}}, "rows": [{"@id": "3"}],
+            "pair": [{"@id": "4"}, {"@type": "q"}, {"$v": 5}], "legacy": [{"@id": "6"}, {"$v": 7}],
+            "again": [{"node": {"@id": "8"}, "pair": [{"child$": {}}]}]}
 
     shown = sanitize_tool_schemas([_tool("t", params)])[0]["function"]["parameters"]
-    assert set(shown["$defs"]["Node"]["properties"]) == set(as_model_writes(wire["node"]))
-    assert unrename_tool_args(params, as_model_writes(wire)) == wire
+    assert set(shown["$defs"]["Node"]["properties"]) == set(_as_model_writes(wire["node"]))
+    assert unrename_tool_args(params, _as_model_writes(wire)) == wire
+
+
+def test_unrename_never_gives_a_key_another_union_alternatives_wire_name():
+    """Union alternatives can show one key for different wire keys ("$id" in one, "@id" in the other,
+    both shown as "_id"). That key stays as the model sent it instead of taking the first
+    alternative's wire key, while a key only one alternative renames is restored even when another
+    alternative is listed first."""
+    from tools.schema_sanitizer import unrename_tool_args
+
+    def alternative(id_key, meta_props):
+        return {"type": "object", "properties": {
+            id_key: {"type": "string"}, "meta": {"type": "object", "properties": meta_props}}}
+
+    params = {"type": "object", "properties": {"x": {"oneOf": [
+        alternative("$id", {"note": {"type": "string"}}), alternative("@id", {"$rev": {"type": "integer"}})]}}}
+    first, second = sanitize_tool_schemas([_tool("t", params)])[0]["function"]["parameters"][
+        "properties"]["x"]["oneOf"]
+    (shared_id,) = set(first["properties"]) & set(second["properties"]) - {"meta"}
+    (rev,) = second["properties"]["meta"]["properties"]
+
+    sent = {shared_id: "1", "meta": {rev: 2}}
+    assert unrename_tool_args(params, {"x": sent}) == {"x": {shared_id: "1", "meta": {"$rev": 2}}}
