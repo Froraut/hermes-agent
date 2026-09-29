@@ -24,7 +24,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from agent.i18n import t
 from gateway.platforms.base import (
     BasePlatformAdapter, SendResult,
-    cache_document_from_bytes_async, cache_image_from_bytes_async, validate_inbound_media_size,
+    cache_document_from_bytes_async, cache_image_from_bytes_async, get_inbound_media_max_bytes,
+    validate_inbound_media_size,
 )
 from gateway.platforms.helpers import cancel_task
 from gateway.platforms.event import MessageEvent, MessageType
@@ -408,8 +409,11 @@ async def _cache_attachments(attachments: List[Dict[str, Any]]) -> List[Dict[str
             else:
                 validate_inbound_media_size(len(payload), media_type="document")
                 cached_path, kind = await cache_document_from_bytes_async(payload, filename), "document"
-        except ValueError as exc:
+        except ValueError as exc:  # oversized, or not really an image
             logger.debug("Skipping attachment %s: %s", filename, exc)
+            continue
+        except OSError as exc:  # full or unwritable cache: deliver the mail without this file
+            logger.warning("[Email] Could not cache attachment %s: %s", filename, exc)
             continue
         cached.append({"path": cached_path, "filename": filename, "type": kind, "media_type": att["media_type"]})
     return cached
@@ -609,7 +613,9 @@ class EmailAdapter(BasePlatformAdapter):
 
     async def _check_inbox(self) -> None:
         """Check INBOX for unseen messages and dispatch them."""
-        messages = await asyncio.get_running_loop().run_in_executor(None, self._fetch_new_messages)
+        # Resolved here: the fetch runs on an executor thread, outside the profile's scope.
+        messages = await asyncio.get_running_loop().run_in_executor(
+            None, self._fetch_new_messages, get_inbound_media_max_bytes())
         # Dispatch partial results BEFORE escalating a failure — a mid-batch exception returns what was fetched (already marked seen).
         for msg_data in messages:
             await self._dispatch_message(msg_data)
@@ -622,15 +628,20 @@ class EmailAdapter(BasePlatformAdapter):
             self._set_fatal_error("email_imap_fetch_failed", self._last_fetch_error or "IMAP fetch failed", retryable=True)
             await self._notify_fatal_error()
 
-    def _fetch_new_messages(self) -> List[Dict[str, Any]]:
-        """Fetch new (unseen) messages from IMAP. Runs in executor thread."""
-        results = []
+    def _fetch_new_messages(self, attachment_budget: int = 0) -> List[Dict[str, Any]]:
+        """Fetch new (unseen) messages from IMAP. Runs in executor thread.
+
+        Attachment bytes stay in memory until dispatch gates the sender, so once the batch holds
+        ``attachment_budget`` bytes (<= 0 = unbounded) it ends: later UIDs stay unseen for the next poll."""
+        results, held = [], 0
         try:
             with self._inbox() as imap:
                 status, data = imap.uid("search", None, "UNSEEN")
                 for uid in (data[0].split() if status == "OK" and data and data[0] else []):
                     if uid in self._seen_uids:
                         continue
+                    if 0 < attachment_budget <= held:
+                        break
                     status, msg_data = imap.uid("fetch", uid, "(RFC822)")
                     if status != "OK":
                         continue  # transient per-UID refusal: leave unseen so the next poll retries
@@ -657,6 +668,8 @@ class EmailAdapter(BasePlatformAdapter):
                         continue
                     if parsed is not None:
                         results.append(parsed)
+                        if attachment_budget > 0:
+                            held += sum(len(att["payload"]) for att in parsed["attachments"])
         except Exception as e:
             # _close_imap guarantees the socket dies even when logout() raises IMAP4.abort on a broken
             # connection (#79889).
