@@ -145,6 +145,34 @@ def test_single_flight_coalesces_concurrent_identical_queries():
     assert len(results) == 2 and all(r["success"] for r in results)
 
 
+def test_search_memo_never_serves_one_profile_another_profiles_results(tmp_path):
+    """Multiplexed profiles each reach their own backend: a profile's cached hit (e.g. from a
+    private SearXNG) must not answer the same query for a different profile home."""
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+    from tools.web_tools import _memoized_search
+
+    class ProfileBackend:  # results depend on which profile's config/secrets the call runs under
+        name = "searxng"
+
+        def search(self, query, limit):
+            return {"success": True, "data": {"web": [
+                {"title": query, "url": f"https://{get_hermes_home().name}.internal/doc"}]}}
+
+    def search_as(home):
+        token = set_hermes_home_override(str(home))
+        try:
+            return _memoized_search(ProfileBackend(), "q3 roadmap", 5)["data"]["web"][0]["url"]
+        finally:
+            reset_hermes_home_override(token)
+
+    wrc.search_memo.clear()
+    prof_a, prof_b = tmp_path / "prof-a", tmp_path / "prof-b"
+    prof_a.mkdir()
+    prof_b.mkdir()
+    assert search_as(prof_a) == "https://prof-a.internal/doc"
+    assert search_as(prof_b) == "https://prof-b.internal/doc"
+
+
 # ── extract cache ────────────────────────────────────────────────────────
 
 def test_extract_cache_roundtrip(_isolated_cache):
