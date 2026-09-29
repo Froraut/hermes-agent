@@ -91,12 +91,18 @@ def _posix_key_reader(read: Callable[[], str]) -> Callable[[], str]:
     """Wrap a raw one-char terminal reader so each escape sequence comes back as one ``"\\x1b"``.
 
     A raw-mode terminal sends navigation keys as multi-char sequences — CSI (``ESC [`` params
-    final: arrows, Home/End, Delete, the bracketed-paste markers ``ESC[200~``/``ESC[201~``) and
-    SS3 (``ESC O`` + one char: application-mode arrows, F1-F4). Consuming them whole keeps their
-    tails out of the secret; text pasted between the paste markers still arrives as typed input.
-    After an ESC that starts neither (a lone ESC, Alt+key), the next char is ordinary input.
+    final: arrows, Home/End, Delete, the bracketed-paste markers ``ESC[200~``/``ESC[201~``; the
+    Linux console's F1-F5 are ``ESC [ [ A``-``E``) and SS3 (``ESC O`` + one char: application-mode
+    arrows, F1-F4). Consuming them whole keeps their tails out of the secret; text pasted between
+    the paste markers still arrives as typed input. After an ESC that starts neither (a lone ESC,
+    Alt+key), the next char is ordinary input, and so is a char that cannot end the sequence
+    (EOF, Ctrl+C, Enter after Alt+O, ...) — it is handed back, never swallowed.
     """
     pending: list[str] = []
+
+    def end_sequence(ch: str) -> None:
+        if not "\x40" <= ch <= "\x7e":  # not a final byte: keep it as input
+            pending.append(ch)
 
     def read_key() -> str:
         ch = pending.pop() if pending else read()
@@ -105,12 +111,13 @@ def _posix_key_reader(read: Callable[[], str]) -> Callable[[], str]:
         intro = read()
         if intro == "[":
             ch = read()
+            if ch == "[":  # Linux console function key
+                ch = read()
             while "\x20" <= ch <= "\x3f":  # parameter and intermediate bytes
                 ch = read()
-            if not "\x40" <= ch <= "\x7e":  # no final byte (EOF, Ctrl+C, ...): keep it as input
-                pending.append(ch)
+            end_sequence(ch)
         elif intro == "O":
-            read()
+            end_sequence(read())
         else:
             pending.append(intro)
         return "\x1b"
