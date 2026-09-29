@@ -69,6 +69,28 @@ def _make_codex_agent(**kwargs):
 
 
 class TestRunConversationCodexPath:
+    def test_daybreak_sends_base_model_for_hermes_context_variant(self, monkeypatch):
+        from agent.daybreak import daybreak_turn
+
+        seen = {}
+
+        def fake_run_turn(self, user_input, **kwargs):
+            seen.update(kwargs)
+            return TurnResult(final_text="done", projected_messages=[{"role": "assistant", "content": "done"}])
+
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+        monkeypatch.setattr(CodexAppServerSession, "ensure_started", lambda self: "thread-stub-1")
+        agent = run_agent.AIAgent(
+            model="gpt-daybreak-blue-latest-900k", provider="openai-codex", api_mode="codex_app_server",
+            api_key="stub", base_url="https://stub.invalid", quiet_mode=True,
+            skip_context_files=True, skip_memory=True,
+        )
+        with daybreak_turn(True, provider=agent.provider, api_mode=agent.api_mode):
+            with patch.object(agent, "_spawn_background_review", return_value=None):
+                agent.run_conversation("review")
+
+        assert seen == {"cyber_access_program": "daybreakBlue", "model": "gpt-daybreak-blue-latest"}
+
     def test_run_conversation_returns_codex_shape(self, fake_session):
         agent = _make_codex_agent()
         # No background review fork during tests
