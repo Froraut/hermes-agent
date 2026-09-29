@@ -670,7 +670,12 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
     _ensure_codex_session(agent, messages)
     try:
         _start_codex_thread(agent)
-        turn = agent._codex_session.run_turn(user_input=user_message)
+        from agent.daybreak import requested_app_server_program
+        turn = agent._codex_session.run_turn(
+            user_input=user_message,
+            cyber_access_program=requested_app_server_program(getattr(agent, "model", "")),
+            model=getattr(agent, "model", None),
+        )
     except Exception as exc:
         logger.exception("codex app-server turn failed")
         _close_codex_session(agent)
