@@ -89,6 +89,35 @@ def test_hosted_callback_bypasses_gated_cookie_auth(monkeypatch):
     assert flow._callback == ("abc", "expected", None)
 
 
+def test_non_ascii_callback_state_is_rejected_as_a_mismatch_not_a_500():
+    """``compare_digest`` raises TypeError on a non-ASCII str, and ``state`` is a browser-controlled
+    query parameter: a forged one gets the ordinary "flow expired" 404 / state-mismatch answer and
+    leaves the pending flow usable for the real redirect."""
+    from starlette.testclient import TestClient
+
+    from hermes_cli import web_server
+    from tools.mcp_dashboard_oauth import DashboardOAuthFlow
+
+    flow = DashboardOAuthFlow(
+        flow_id="flow-non-ascii",
+        server_name="reports",
+        profile=None,
+        hermes_home="/tmp/hermes-test",
+        redirect_uri="https://agent.example/api/mcp/oauth/callback/reports",
+    )
+    asyncio.run(flow.publish_authorization_url("https://idp.example/authorize?state=expected"))
+    _web_server_mcp._mcp_oauth_flows[flow.flow_id] = flow
+    client = TestClient(web_server.app, raise_server_exceptions=False)
+
+    forged = client.get("/api/mcp/oauth/callback/reports", params={"code": "forged", "state": "expécted"})
+    assert forged.status_code == 404
+    with pytest.raises(ValueError, match="state mismatch"):
+        flow.deliver_callback(code="forged", state="expécted", error=None)
+
+    assert client.get("/api/mcp/oauth/callback/reports?code=abc&state=expected").status_code == 200
+    assert flow._callback == ("abc", "expected", None)
+
+
 def test_hosted_auth_allows_same_server_name_in_different_profiles(tmp_path, monkeypatch):
     from hermes_cli import web_server
     from tools.mcp_dashboard_oauth import DashboardOAuthFlow

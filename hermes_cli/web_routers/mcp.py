@@ -352,7 +352,8 @@ async def mcp_oauth_callback(
         ]
     flow = next(
         (c for c in candidates
-         if c.expected_state is not None and state is not None and secrets.compare_digest(c.expected_state, state)),
+         if c.expected_state is not None and state is not None
+         and secrets.compare_digest(c.expected_state.encode(), state.encode())),
         None,
     )
     if flow is None:
