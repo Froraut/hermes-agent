@@ -419,9 +419,10 @@ def test_stream_event_translation_emits_tool_call_delta_with_stable_index():
 # deterministic refusal handler; anything else walks the empty-response retry ladder.
 _SAFETY_BLOCKS = [
     pytest.param({"candidates": [{"content": {"parts": []}, "finishReason": reason}]}, id=reason)
-    for reason in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT")
+    for reason in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT",
+                   "MODEL_ARMOR")  # MODEL_ARMOR: Vertex (express base URL) Model Armor response block
 ] + [pytest.param({"promptFeedback": {"blockReason": reason}}, id=f"prompt-{reason}")
-     for reason in ("SAFETY", "PROHIBITED_CONTENT", "OTHER")]
+     for reason in ("SAFETY", "PROHIBITED_CONTENT", "OTHER", "MODEL_ARMOR")]
 
 
 @pytest.mark.parametrize("payload", _SAFETY_BLOCKS)

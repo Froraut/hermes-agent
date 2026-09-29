@@ -86,6 +86,7 @@ _FINISH_REASON_MAP = {
     **dict.fromkeys((
         "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
         "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION",
+        "MODEL_ARMOR",  # Vertex (express base URL): the response was blocked by Model Armor
     ), "content_filter"),
 }
 _HTTP_ERROR_CODES = {401: "gemini_unauthorized", 429: "gemini_rate_limited", 404: "gemini_model_not_found"}
