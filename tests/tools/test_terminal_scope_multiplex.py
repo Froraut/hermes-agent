@@ -305,25 +305,32 @@ def test_launch_turn_binds_terminal_scope_once_multiplexing_is_active(
 
 
 def test_sandbox_roots_wait_limit_and_memory_cap_follow_the_routed_profile(tmp_path, monkeypatch):
-    """terminal.sandbox_dir, terminal.timeout, TERMINAL_SCRATCH_DIR and
-    TERMINAL_LOCAL_MEMORY_MAX_MB resolve from the routed profile, A -> B -> A,
-    never from the launch profile's values bridged into ``os.environ``."""
+    """terminal.sandbox_dir, terminal.timeout and TERMINAL_SCRATCH_DIR resolve from the routed
+    profile, A -> B -> A, never from the launch profile's values bridged into ``os.environ``.
+    TERMINAL_LOCAL_MEMORY_MAX_MB is a host safety cap, not a profile setting: the process env's
+    value (frozen at activation) binds every served profile, and a profile's own value may only
+    tighten it."""
     from tools.environments.base import get_sandbox_dir
     from tools.environments.singularity import _get_scratch_dir
     from tools.process_registry import ProcessRegistry, ProcessSession, _worker_memory_max_bytes
+    from tui_gateway.launch_profile_policy import activate_multi_profile_hosting
 
     profiles = {}
-    for name, timeout, dotenv_extra in (("a", 5, "TERMINAL_LOCAL_MEMORY_MAX_MB=64\n"), ("b", 600, "")):
+    for name, timeout, cap_mb in (("a", 5, 64), ("b", 600, 1024)):
         sandbox, scratch = tmp_path / f"{name}-sandboxes", tmp_path / f"{name}-scratch"
         home = _profile(tmp_path, name,
                         config_yaml=f"terminal:\n  timeout: {timeout}\n  sandbox_dir: {sandbox}\n",
-                        dotenv=f"TERMINAL_SCRATCH_DIR={scratch}\n{dotenv_extra}")
+                        dotenv=f"TERMINAL_SCRATCH_DIR={scratch}\nTERMINAL_LOCAL_MEMORY_MAX_MB={cap_mb}\n")
         profiles[name] = (home, sandbox, scratch)
     # Launch profile A's settings, as the startup bridge left them in the process env.
     monkeypatch.setenv("TERMINAL_TIMEOUT", "5")
     monkeypatch.setenv("TERMINAL_SANDBOX_DIR", str(profiles["a"][1]))
     monkeypatch.setenv("TERMINAL_SCRATCH_DIR", str(profiles["a"][2]))
-    monkeypatch.setenv("TERMINAL_LOCAL_MEMORY_MAX_MB", "64")
+    # The operator's host-wide cap, env-only (systemd ``Environment=``): no profile file carries it.
+    monkeypatch.setenv("TERMINAL_LOCAL_MEMORY_MAX_MB", "128")
+    activate_multi_profile_hosting()
+    # A routed context rewriting the process env after activation cannot lift the frozen host cap.
+    monkeypatch.setenv("TERMINAL_LOCAL_MEMORY_MAX_MB", "999999")
     registry = ProcessRegistry()
     done = ProcessSession(id="proc_done", command="true", exited=True, exit_code=0)
     registry._finished[done.id] = done
@@ -340,5 +347,5 @@ def test_sandbox_roots_wait_limit_and_memory_cap_follow_the_routed_profile(tmp_p
             seen.setdefault(name, _worker_memory_max_bytes())
         finally:
             reset_terminal_scope(token)
-    assert seen["a"] == 64 * 1024 * 1024
-    assert seen["b"] > seen["a"], "profile B inherited profile A's worker memory cap"
+    assert seen["a"] == 64 * 1024 * 1024, "profile A could not tighten the host cap"
+    assert seen["b"] == 128 * 1024 * 1024, "profile B widened the host cap (or inherited A's)"

@@ -696,8 +696,12 @@ profile and never shares with the default or any sibling:
 | `/loop` ticks, `background_process_notifications` gate, `notice_delivery`, background-process checkpoint recovery | The owning profile's `state.db` / `config.yaml` / `processes.json` | — |
 
 What is **shared** by design: the process, its PID/lock and `gateway_state.json`
-(default home), the one HTTP listener, and the `profile_routes` table (declared
-on the default profile).
+(default home), the one HTTP listener, the `profile_routes` table (declared
+on the default profile), and the per-worker memory cap
+`TERMINAL_LOCAL_MEMORY_MAX_MB` in the process env (for example systemd
+`Environment=`; read from the env frozen at activation). It is a host safety
+limit that bounds every profile's background workers; a profile's own value can
+only lower it.
 
 ### Which profiles are served
 

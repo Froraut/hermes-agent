@@ -118,18 +118,27 @@ def _worker_memory_max_bytes() -> int:
 
     The proposed local-memory-guard environment override is honored when it tightens the safe bound, so this
     isolation composes with PR #57121 instead of inventing a second knob.
+
+    Two overrides compose, tightest wins. The process env's value is the operator's host cap
+    (systemd ``Environment=``) and binds every served profile; once multiplexing it is read from the
+    env frozen at activation, so a later ``os.environ`` write cannot lift it. The routed profile's
+    terminal scope may only tighten it: that scope is files-only for a secondary profile, and
+    reading it alone dropped an env-only host cap for every secondary profile's workers.
     """
     from tools.terminal_scope import terminal_env
+    from tui_gateway.launch_profile_policy import _launch_env
 
-    override_bound: Optional[int] = None
-    override = terminal_env("TERMINAL_LOCAL_MEMORY_MAX_MB").strip()
-    if override:
+    override_bounds: List[int] = []
+    for override in dict.fromkeys((_launch_env().get("TERMINAL_LOCAL_MEMORY_MAX_MB", "").strip(),
+                                   terminal_env("TERMINAL_LOCAL_MEMORY_MAX_MB").strip())):
+        if not override:
+            continue
         try:
             parsed = int(override) * 1024 * 1024
         except ValueError:
             parsed = -1
         if parsed >= _MIN_WORKER_MEMORY_MAX_BYTES:
-            override_bound = parsed
+            override_bounds.append(parsed)
         else:
             logger.warning(
                 "Ignoring invalid TERMINAL_LOCAL_MEMORY_MAX_MB=%r; "
@@ -163,7 +172,7 @@ def _worker_memory_max_bytes() -> int:
     except (OSError, ValueError, TypeError):
         pass
     safe_bound = min(candidates) if candidates else _DEFAULT_WORKER_MEMORY_MAX_BYTES
-    return min(override_bound, safe_bound) if override_bound else safe_bound
+    return min([safe_bound, *override_bounds])
 
 
 def _systemd_scope_argv(binary: str, unit_name: str, *argv: str) -> List[str]:
