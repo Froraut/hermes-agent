@@ -258,3 +258,12 @@ class TestCaseFoldKeepsIndices:
     def test_visible_text_is_independent_of_delta_boundaries(self, surface: str) -> None:
         run = getattr(self, surface)
         assert run([self.TEXT]) == run(list(self.TEXT))
+
+    @pytest.mark.parametrize("surface", ["_think", "_gateway", "_cli"])
+    def test_streamed_text_agrees_with_the_final_strip_on_one_code_point_case_maps(self, surface: str) -> None:
+        """The Kelvin sign (U+212A) lowercases to ASCII 'k': the final-response strip hides a tag
+        spelled with it, so the progressive stream must hide it too."""
+        from agent.agent_runtime_helpers import strip_think_blocks
+
+        text = "<THINK>HIDDEN</THINK>answer"
+        assert getattr(self, surface)([text]) == strip_think_blocks(None, text)

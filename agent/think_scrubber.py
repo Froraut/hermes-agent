@@ -11,7 +11,6 @@ boundary (stream start / after a newline / whitespace-only line so far), so pros
 from __future__ import annotations
 
 import re
-import string
 from typing import Tuple
 
 __all__ = [
@@ -30,16 +29,18 @@ THINK_TAG_NAMES: Tuple[str, ...] = (
 THINK_OPEN_TAGS: Tuple[str, ...] = tuple(f"<{name.lower()}>" for name in THINK_TAG_NAMES)
 THINK_CLOSE_TAGS: Tuple[str, ...] = tuple(f"</{name.lower()}>" for name in THINK_TAG_NAMES)
 
-_ASCII_FOLD = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
-
-
 def fold_tag_case(text: str) -> str:
-    """Case-fold *text* for tag search with indices that stay valid on *text*.
+    """``text.lower()`` with indices that stay valid on *text*, for tag search.
 
     ``str.lower()`` is not length-preserving ('İ' U+0130 becomes two code points), so an index
     found in ``text.lower()`` drifts past every such character when used to slice the original.
-    Tag names are ASCII or caseless CJK, so an ASCII-only fold loses no match."""
-    return text.translate(_ASCII_FOLD)
+    Every character with a one-code-point lowercase is still lowered (the Kelvin sign U+212A
+    becomes 'k', exactly as the ``re.IGNORECASE`` final-response strip matches it); only an
+    expanding character is kept as is, and no tag name contains one."""
+    lowered = text.lower()
+    if len(lowered) == len(text):  # lower() never shrinks a character: every mapping was 1:1
+        return lowered
+    return "".join(low if len(low := ch.lower()) == 1 else ch for ch in text)
 
 
 class StreamingThinkScrubber:
