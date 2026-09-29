@@ -55,6 +55,28 @@ class TestToolsDisableMcp:
                     Namespace(tools_action=action, names=["github:create_issue"], platform="cli"))
             assert registered() is expected, (action, config["mcp_servers"]["github"]["tools"])
 
+    @pytest.mark.parametrize("tools_cfg,action", [
+        ({"include": ["create_*", "list_issues"]}, "disable"),
+        ({"exclude": ["create_*"]}, "enable"),
+    ], ids=["include-glob", "exclude-glob"])
+    def test_toggle_a_glob_holds_is_refused_not_reported(self, tools_cfg, action, capsys):
+        """An fnmatch glob in the active list keeps the tool where it is whatever the exact-name edit
+        does, so the command must name the pattern and leave the filter alone — never report it done."""
+        import copy
+
+        from tools.mcp_tool_registration import _make_tool_filter
+
+        config = {"mcp_servers": {"github": {"command": "x", "tools": copy.deepcopy(tools_cfg)}}}
+        with patch("hermes_cli.tools_config.load_config", return_value=config), \
+             patch("hermes_cli.tools_config.save_config"):
+            tools_disable_enable_command(
+                Namespace(tools_action=action, names=["github:create_issue"], platform="cli"))
+        out = capsys.readouterr().out
+        assert "'create_*'" in out
+        assert "Disabled:" not in out and "Enabled:" not in out
+        assert config["mcp_servers"]["github"]["tools"] == tools_cfg
+        assert _make_tool_filter("github", config["mcp_servers"]["github"])("create_issue") is (action == "disable")
+
 
     def test_disable_unknown_server_prints_error(self, capsys):
         config = {"mcp_servers": {}}
