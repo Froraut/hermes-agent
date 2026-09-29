@@ -20,8 +20,8 @@ from typing import Optional, Sequence
 _KIMI_K3_SLUG_RE = re.compile(r"(?:^|[^a-z0-9])k3(?:[^a-z0-9]|$)")
 
 # Canonical low→high ordering for nearest-level clamping. Includes "none" so an explicit
-# disable can be clamped when a provider publishes it as a level. ``ultra`` is Hermes-internal
-# (the Codex product tier): no wire accepts it, every declared set stops at ``max``.
+# disable can be clamped when a provider publishes it as a level. Codex app-server accepts
+# ``ultra`` as a harness mode; direct inference APIs still use their declared model vocabulary.
 EFFORT_LADDER: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 #: Widest OpenAI-compatible wire vocabulary (OpenRouter, Nous Portal).
@@ -150,21 +150,30 @@ def clamp_effort(
     return max(below, key=EFFORT_LADDER.index) if below else min(candidates, key=EFFORT_LADDER.index)
 
 
-def route_supported_efforts(provider: Optional[str], model: Optional[str]) -> tuple[str, ...]:
-    """Levels the (provider, model) route's ENTRY clamp accepts: the Codex/OpenAI Responses set per
-    model generation, else the widest OpenAI-compatible vocabulary (narrower providers clamp again
-    downstream, never upward)."""
+def route_supported_efforts(
+    provider: Optional[str], model: Optional[str], api_mode: Optional[str] = None,
+) -> tuple[str, ...]:
+    """Vocabulary at Hermes' request boundary, which may be a harness rather than inference.
+
+    Codex app-server owns model-level normalization and Ultra orchestration. Direct Responses
+    uses the per-model vocabulary; other inference routes start with the OpenAI-compatible set.
+    """
+    if api_mode == "codex_app_server":
+        return EFFORT_LADDER
     if (provider or "").strip().lower() == "openai-codex":
         return codex_supported_efforts(model)
     return OPENAI_COMPAT_WIRE_EFFORTS
 
 
-def effort_display_label(effort: Optional[str], provider: Optional[str] = None, model: Optional[str] = None) -> str:
+def effort_display_label(
+    effort: Optional[str], provider: Optional[str] = None, model: Optional[str] = None,
+    api_mode: Optional[str] = None,
+) -> str:
     """Picker / ``/reasoning`` status label for a ladder level: the level itself when the route sends
-    it verbatim, else ``"<level> (sends <clamped> on this route)"`` so a Hermes-internal step such as
-    ``ultra`` (#61634) is never presented as a distinct wire level the route does not have."""
+    it verbatim, else ``"<level> (sends <clamped> on this route)"`` so a native harness mode such as
+    ``ultra`` is not presented as an inference level on a direct API route."""
     requested = str(effort or "").strip().lower()
-    clamped = clamp_effort(requested, route_supported_efforts(provider, model))
+    clamped = clamp_effort(requested, route_supported_efforts(provider, model, api_mode))
     return requested if not requested or clamped == requested else f"{requested} (sends {clamped} on this route)"
 
 

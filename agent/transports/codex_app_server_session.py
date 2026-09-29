@@ -446,6 +446,7 @@ class CodexAppServerSession:
     def run_turn(
         self, user_input: Any, *, turn_timeout: float = 600.0,
         notification_poll_timeout: float = 0.25, post_tool_quiet_timeout: float = 90.0,
+        effort: str | None = None, model: str | None = None,
     ) -> TurnResult:
         """Send a user message and block until turn/completed, bridging approvals and projecting items.
 
@@ -463,9 +464,16 @@ class CodexAppServerSession:
                 result.interrupted = True
             else:
                 input_items, result.submitted_user_text = _build_turn_input(user_input)
+                turn_params = {"threadId": self._thread_id, "input": input_items}
+                if effort is not None:
+                    turn_params["effort"] = effort
+                    # The requested effort belongs to Hermes' selected model,
+                    # which may differ from Codex's configured default.
+                    if model:
+                        turn_params["model"] = model
                 ts = self._request_for(
                     result, "turn/start",
-                    {"threadId": self._thread_id, "input": input_items},
+                    turn_params,
                     "turn/start",
                 )
                 if ts is not None:

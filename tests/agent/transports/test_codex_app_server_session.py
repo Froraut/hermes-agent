@@ -267,6 +267,22 @@ class TestLifecycle:
 # ---- turn loop ----
 
 class TestRunTurn:
+    def test_native_effort_preserves_ultra_and_later_explicit_changes(self):
+        client = FakeClient()
+        session = make_session(client)
+        for effort in (None, "ultra", "high", "none"):
+            client.queue_notification(
+                "turn/completed", threadId="t",
+                turn={"id": "tu1", "status": "completed", "error": None},
+            )
+            result = session.run_turn("review", turn_timeout=2, effort=effort, model="gpt-6-sol")
+            assert result.error is None
+        turns = [params for method, params in client.requests if method == "turn/start"]
+        assert "effort" not in turns[0]
+        assert "model" not in turns[0]
+        assert [turn["effort"] for turn in turns[1:]] == ["ultra", "high", "none"]
+        assert all(turn["model"] == "gpt-6-sol" for turn in turns[1:])
+
     def test_simple_text_turn_returns_final_message(self):
         client = FakeClient()
         client.queue_notification("turn/started", threadId="t", turn={"id": "tu1"})

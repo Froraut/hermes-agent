@@ -670,7 +670,16 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
     _ensure_codex_session(agent, messages)
     try:
         _start_codex_thread(agent)
-        turn = agent._codex_session.run_turn(user_input=user_message)
+        from agent.model_metadata import strip_codex_context_variant_suffix
+        from agent.reasoning_effort import requested_effort
+        reasoning = getattr(agent, "reasoning_config", None)
+        effort = "none" if isinstance(reasoning, dict) and reasoning.get("enabled") is False else requested_effort(reasoning)
+        # Ultra is a native Codex harness mode. Clamping it to the Responses
+        # API vocabulary here would discard its orchestration behavior.
+        turn = agent._codex_session.run_turn(
+            user_input=user_message, effort=effort,
+            model=strip_codex_context_variant_suffix(getattr(agent, "model", None)),
+        )
     except Exception as exc:
         logger.exception("codex app-server turn failed")
         _close_codex_session(agent)
