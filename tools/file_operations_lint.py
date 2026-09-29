@@ -121,9 +121,25 @@ def _lint_python_inproc(content: str) -> tuple[bool, str]:
 
 # In-process linters, preferred over shell linters (no subprocess). Each returns
 # (ok, error); error ``"__SKIP__"`` = unavailable dependency, counts as "no linter".
+def _lint_notebook_inproc(content: str) -> tuple[bool, str]:
+    """A notebook is nbformat JSON: an object with a ``cells`` list (v4) or ``worksheets`` (v3) —
+    the shapes read_extract renders. read_file shows that rendering, not the JSON, so a write of
+    the rendering (or of JSON that is no notebook) must fail here, not replace the notebook."""
+    ok, err = _lint_json_inproc(content)
+    if not ok:
+        return ok, err
+    nb = json.loads(content)
+    if isinstance(nb, dict) and (isinstance(nb.get("cells"), list) or isinstance(nb.get("worksheets"), list)):
+        return True, ""
+    return False, ("not an nbformat notebook (expected a JSON object with a 'cells' list); read_file "
+                   "showed a text rendering, not the file — write nbformat JSON, or edit the notebook "
+                   "with jq / nbformat via the terminal")
+
+
 LINTERS_INPROC: Dict[str, Callable[[str], tuple[bool, str]]] = {
     '.py': _lint_python_inproc,
     '.json': _lint_json_inproc,
+    '.ipynb': _lint_notebook_inproc,
     '.yaml': _lint_yaml_inproc,
     '.yml': _lint_yaml_inproc,
     '.toml': _lint_toml_inproc,
@@ -131,8 +147,9 @@ LINTERS_INPROC: Dict[str, Callable[[str], tuple[bool, str]]] = {
 
 # Extensions where write_file REFUSES on a parse failure. ``.py`` is excluded on
 # purpose: test fixtures use ``*.py`` paths as a stand-in for arbitrary text, so
-# Python keeps the non-blocking lint-delta report.
-_FAIL_CLOSED_INPROC_EXTS = frozenset({'.json', '.yaml', '.yml', '.toml'})
+# Python keeps the non-blocking lint-delta report. ``.ipynb`` is nbformat JSON that read_file only
+# shows as an extracted rendering — the one extracted format with no other write guard.
+_FAIL_CLOSED_INPROC_EXTS = frozenset({'.json', '.yaml', '.yml', '.toml', '.ipynb'})
 
 
 class LintMixin:
