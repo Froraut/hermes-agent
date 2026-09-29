@@ -157,12 +157,14 @@ def _replace_hunk(content: str, hunk: Hunk, search_pattern: str,
     """``(content, count, error)`` for one hunk: file-wide, else inside a window around its context
     hint (the hint's job is to pick one of several matches). Validation and apply share it so a
     hunk the apply phase would place is never rejected by the validation phase ahead of it. The
-    file-wide error is kept: its match line numbers are file-relative, the window's are not."""
+    file-wide error is kept: its match line numbers are file-relative, the window's are not.
+    A hint that occurs more than once names no single window, so the file-wide result stands
+    (as for addition-only hunks): the first hint's window would edit its block unasked."""
     from tools.fuzzy_match import fuzzy_find_and_replace
     new_content, count, _strategy, error = fuzzy_find_and_replace(
         content, search_pattern, replacement, replace_all=False)
     hint_pos = content.find(hunk.context_hint) if hunk.context_hint and not count else -1
-    if hint_pos != -1:
+    if hint_pos != -1 and content.find(hunk.context_hint, hint_pos + 1) == -1:
         start, end = max(0, hint_pos - 500), min(len(content), hint_pos + 2000)
         window_new, count, _strategy, _window_error = fuzzy_find_and_replace(
             content[start:end], search_pattern, replacement, replace_all=False)

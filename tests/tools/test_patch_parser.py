@@ -487,6 +487,36 @@ class TestValidationPhase:
         assert "ambiguous" in result.error and "not found" not in result.error, result.error
         assert "replace_all" not in result.error, result.error
 
+    def test_repeated_context_hint_does_not_pick_a_block(self):
+        """A hint that occurs twice identifies neither of two identical blocks; windowing on its
+        first occurrence silently edited the first block. The hunk is ambiguous and nothing is
+        written, as for an addition-only hunk whose hint repeats."""
+        filler = "".join(f"# filler line {i:03d}\n" for i in range(150))  # > the 2000-char window
+        content = f"# MARK\nold = 0\n{filler}# MARK\nold = 0\n"
+        patch = """\
+*** Begin Patch
+*** Update File: m.py
+@@ MARK @@
+-old = 0
++old = 1
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+        written = {}
+
+        class FakeFileOps:
+            def read_file_raw(self, path):
+                return SimpleNamespace(content=content, error=None)
+
+            def write_file(self, path, new, pre_content=None):
+                written[path] = new
+                return SimpleNamespace(error=None)
+
+        result = apply_v4a_operations(ops, FakeFileOps())
+        assert result.success is False, written
+        assert "ambiguous" in result.error, result.error
+        assert written == {}
+
     def test_add_onto_existing_file_fails_and_preserves_contents(self):
         """An Add targeting a path that already exists must fail validation and
         leave the original bytes untouched (no silent overwrite)."""
