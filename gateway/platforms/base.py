@@ -3731,10 +3731,14 @@ class BasePlatformAdapter(ABC):
 
     async def _resume_partial_send(
         self, chat_id: str, result: "SendResult", *, reply_to: Optional[str], metadata: Any) -> "Optional[SendResult]":
-        """Deliver only the remainder of a partially delivered split payload. ``None`` (the default) means
-        this adapter cannot resume; ``_send_with_retry`` then returns the partial failure instead of
-        re-sending the whole payload. Override only where non-delivery of the remainder is CERTAIN."""
-        return None
+        """Deliver only the remainder of a partially delivered split payload: the ``resume`` a
+        ``base_split_send.send_split`` failure carries. ``None`` when there is none — this adapter
+        cannot resume, so ``_send_with_retry`` returns the partial failure instead of re-sending the
+        whole payload. An adapter with its own split loop overrides this only where non-delivery of
+        the remainder is CERTAIN."""
+        raw = result.raw_response if isinstance(result.raw_response, dict) else {}
+        resume = raw.get("resume")
+        return await resume() if resume else None
 
     async def _send_plain_fallback(
             self, chat_id: str, content: str, *, reply_to: Optional[str], metadata: Any) -> "SendResult":
