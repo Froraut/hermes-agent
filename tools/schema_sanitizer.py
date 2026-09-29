@@ -58,23 +58,77 @@ def _rename_property_keys(props: dict, path: str) -> dict[str, str]:
     return renames
 
 
+def _same_instance_schemas(schema: Any) -> list[dict]:
+    """*schema* plus the conditional subschemas that also describe its instance (``if``/``then``/
+    ``else``, ``dependentSchemas``, schema-valued ``dependencies``), nested ones included. Which
+    condition holds is not evaluated: the sanitizer renamed keys in all of them."""
+    if not isinstance(schema, dict):
+        return []
+    nested = [schema.get(key) for key in ("if", "then", "else")]
+    for key in ("dependentSchemas", "dependencies"):
+        if isinstance(schema.get(key), dict):
+            nested.extend(schema[key].values())
+    return [schema, *(found for sub in nested for found in _same_instance_schemas(sub))]
+
+
+def _value_schemas(schemas: list[dict], listed: dict[str, list], key: str) -> list:
+    """Schemas an object's *key* value must satisfy: its ``properties`` entries and every matching
+    ``patternProperties`` entry; for a key neither covers, ``additionalProperties``, else
+    ``unevaluatedProperties`` (which never sees a key ``additionalProperties`` evaluated)."""
+    found = list(listed.get(key, ()))
+    for schema in schemas:
+        patterns = schema.get("patternProperties")
+        for pattern, sub in patterns.items() if isinstance(patterns, dict) else ():
+            try:
+                if re.search(pattern, key):
+                    found.append(sub)
+            except re.error:  # ECMA-only syntax Python cannot compile: no match claimed
+                continue
+    return found or ([schema["additionalProperties"] for schema in schemas
+                      if "additionalProperties" in schema]
+                     or [schema.get("unevaluatedProperties") for schema in schemas])
+
+
+def _item_schemas(schemas: list[dict]) -> list[dict]:
+    """Schemas array elements must satisfy: ``items`` (else ``unevaluatedItems``) and ``contains``."""
+    items = [schema["items"] for schema in schemas if isinstance(schema.get("items"), dict)]
+    rest = [] if items else [schema.get("unevaluatedItems") for schema in schemas]
+    return [sub for sub in items + rest + [schema.get("contains") for schema in schemas]
+            if isinstance(sub, dict)]
+
+
 def unrename_tool_args(params_schema: Any, args: Any) -> Any:
     """Map sanitized keys in model-emitted args back to wire names. ``params_schema`` is the
-    ORIGINAL registry schema; recurses into objects/array items; unknown keys pass through."""
-    props = params_schema.get("properties") if isinstance(params_schema, dict) else None
-    if not isinstance(props, dict) or not isinstance(args, dict):
+    ORIGINAL registry schema; follows every object/array position ``_sanitize_node`` renames in
+    that describes the args (conditional subschemas, pattern / additional / unevaluated
+    properties, items / unevaluated items / contains); unknown keys pass through."""
+    return _unrename([params_schema], args)
+
+
+def _unrename(candidates: list, args: Any) -> Any:
+    schemas = [schema for candidate in candidates for schema in _same_instance_schemas(candidate)]
+    if isinstance(args, list):
+        items = _item_schemas(schemas)
+        return [_unrename(items, item) for item in args] if items else args
+    if not isinstance(args, dict) or not schemas:
         return args
-    reverse = {v: k for k, v in _rename_property_keys(props, "<unrename>").items()}
+    wire_names: dict[str, set[str]] = {}  # key the model was shown -> wire keys it stands for
+    listed: dict[str, list] = {}
+    for schema in schemas:
+        props = schema.get("properties")
+        if isinstance(props, dict):
+            renames = _rename_property_keys(props, "<unrename>")
+            for key, sub in props.items():
+                wire_names.setdefault(renames.get(key, key), set()).add(key)
+                listed.setdefault(key, []).append(sub)
     out = {}
     for key, value in args.items():
-        orig = reverse.get(key, key)
-        sub = props.get(orig) if isinstance(props.get(orig), dict) else {}
-        if isinstance(value, dict) and sub:
-            value = unrename_tool_args(sub, value)
-        elif isinstance(value, list) and isinstance(sub.get("items"), dict):
-            value = [unrename_tool_args(sub["items"], item) if isinstance(item, dict) else item
-                     for item in value]
-        out[orig] = value
+        # One properties dict never maps two wire keys to one shown key, but two conditional
+        # subschemas can ("$id" in ``then``, "@id" in ``else``); which one applies is not known
+        # here, so such a key stays as sent.
+        names = wire_names.get(key, ())
+        orig = next(iter(names)) if len(names) == 1 else key
+        out[orig] = _unrename(_value_schemas(schemas, listed, orig), value)
     return out
 
 

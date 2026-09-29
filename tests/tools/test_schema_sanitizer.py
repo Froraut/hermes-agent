@@ -591,3 +591,40 @@ def test_builtin_tool_without_required_gets_empty_required_list():
         "properties": {"opts": {"type": "object", "properties": {"k": {"type": "string"}}}},
     })])[0]["function"]["parameters"]
     assert nested["properties"]["opts"]["required"] == []
+
+
+def _as_model_writes(value):
+    """Args as a model writes them from the sanitized schema: every key in its shown spelling."""
+    if isinstance(value, dict):
+        return {sanitize_property_key(k): _as_model_writes(v) for k, v in value.items()}
+    return [_as_model_writes(v) for v in value] if isinstance(value, list) else value
+
+
+def test_unrename_restores_keys_renamed_in_conditional_and_pattern_positions():
+    """The sanitizer also renames illegal keys under if/then/else, dependentSchemas,
+    patternProperties, unevaluatedProperties, contains and unevaluatedItems; args the model
+    writes with the keys shown there must reach the server with the wire keys."""
+    from tools.schema_sanitizer import unrename_tool_args
+
+    def obj(*keys):
+        return {"type": "object", "properties": {k: {"type": "string"} for k in keys}}
+
+    params = {
+        "type": "object",
+        "properties": {"mode": {"type": "string"}, "options": {"type": "object"},
+                       "rows": {"type": "array", "contains": obj("$id")},
+                       "rest": {"type": "array", "unevaluatedItems": obj("#tag")}},
+        "if": {"properties": {"mode": {"const": "odata"}}},
+        "then": {"properties": {"$filter": {"type": "string"}, "options": obj("$top")}},
+        "else": {"properties": {"q:text": {"type": "string"}}},
+        "dependentSchemas": {"mode": obj("@context")},
+        "patternProperties": {"^x-": obj("$eq")},
+        "unevaluatedProperties": obj("@type"),
+    }
+    wire = {"mode": "odata", "$filter": "a", "options": {"$top": "5"}, "q:text": "hi", "@context": "c",
+            "x-meta": {"$eq": "v"}, "extra": {"@type": "T"}, "rows": [{"$id": "1"}], "rest": [{"#tag": "t"}]}
+
+    shown = sanitize_tool_schemas([_tool("t", params)])[0]["function"]["parameters"]
+    assert set(shown["then"]["properties"]) <= set(_as_model_writes(wire))
+    assert set(shown["patternProperties"]["^x-"]["properties"]) == set(_as_model_writes(wire["x-meta"]))
+    assert unrename_tool_args(params, _as_model_writes(wire)) == wire
