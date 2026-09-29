@@ -23,14 +23,22 @@ from tools.environments.base import BaseEnvironment
 pytestmark = pytest.mark.platforms("posix")
 
 _FAKE_DOCKER = """#!{python} -S
-import os, sys
+import os, sys, time
 args = sys.argv[2:]  # drop "exec"
 while args and args[0] in ("-i", "-e"):
     args = args[2:] if args[0] == "-e" else args[1:]
 argv = args[1:]  # drop the container id
+slow = os.path.join(os.path.dirname(sys.argv[0]), "slow-start")
 pid = os.fork()
 if pid == 0:
     os.setsid()
+    # A test marks one command whose in-container shell starts late: the exec exists (its PID
+    # is published) but the shell has not run yet when the kill lands.
+    if os.path.exists(slow) and open(slow).read() in " ".join(argv):
+        with open(slow + ".tmp", "w") as f:
+            f.write(str(os.getpid()))
+        os.rename(slow + ".tmp", slow + ".pid")
+        time.sleep(2)
     os.execvp(argv[0], argv)
 sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
 """
@@ -63,6 +71,13 @@ def _sleeping(marker):
         except psutil.Error:
             pass
     return found
+
+
+def _alive(pid):
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
 
 
 def _gone_within(marker, seconds):
@@ -98,3 +113,22 @@ def test_hard_exit_kill_reaches_the_command_in_the_container(env, marker):
     env._force_kill_process(proc)
 
     assert _gone_within(marker, 5), "the command is still running in the container after a hard-exit kill"
+
+
+@pytest.mark.parametrize("kill", ["_kill_process", "_force_kill_process"])
+def test_kill_that_lands_before_the_shell_records_its_pid_still_stops_the_command(env, marker, tmp_path, kill):
+    (tmp_path / "slow-start").write_text(marker)
+    proc = env._run_bash(f"sleep {marker}")
+    started = tmp_path / "slow-start.pid"
+    deadline = time.monotonic() + 10
+    while not started.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    shell = int(started.read_text())
+
+    getattr(env, kill)(proc)  # the exec exists, but its shell has not recorded a PID yet
+
+    deadline = time.monotonic() + 10
+    while _alive(shell):
+        assert time.monotonic() < deadline, "the late-starting shell ran the command after the kill"
+        time.sleep(0.1)
+    assert not _sleeping(marker)

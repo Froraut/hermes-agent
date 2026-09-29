@@ -578,19 +578,24 @@ def _abs_host_cwd(host_cwd: str) -> str:
 # (the local backend's shape); a runtime that did not make it a group leader gets the PID alone.
 # The script runs in a subshell so the record is removed even when it sets its own EXIT trap or
 # ``exec``s; a killed group leaves the removal to the kill.
+# A kill can land before the shell has recorded its PID (the exec is still starting). The kill
+# first leaves a ``.stop`` marker, then reads the PID; the shell first records its PID, then
+# checks the marker. Whichever runs second sees the other's write, so either the kill finds the
+# PID or the shell exits before running the command.
 def _record_exec_group(cmd_string: str, pidfile: str) -> str:
     q = shlex.quote(pidfile)
-    return (f"{{ echo $$ > {q}; }} 2>/dev/null\n(\n{cmd_string}\n)\n"
+    return (f"{{ echo $$ > {q}; }} 2>/dev/null\n"
+            f"if [ -e {q}.stop ]; then rm -f {q} {q}.stop; exit 130; fi\n(\n{cmd_string}\n)\n"
             f"__hermes_exec_rc=$?\nrm -f {q}\nexit $__hermes_exec_rc")
 
 
 _EXEC_GROUP_KILL = (
-    'p=$(cat {pf} 2>/dev/null); rm -f {pf}; [ -n "$p" ] || exit 0; '
+    ': 2>/dev/null > {pf}.stop; p=$(cat {pf} 2>/dev/null); [ -n "$p" ] || exit 0; rm -f {pf} {pf}.stop; '
     't=-$p; kill -TERM -- "$t" 2>/dev/null || {{ t=$p; kill -TERM "$t" 2>/dev/null; }} || exit 0; '
     'for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 -- "$t" 2>/dev/null || exit 0; sleep 0.1; done; '
     'kill -KILL -- "$t" 2>/dev/null; exit 0')
 _EXEC_GROUP_FORCE_KILL = (
-    'p=$(cat {pf} 2>/dev/null); rm -f {pf}; [ -n "$p" ] || exit 0; '
+    ': 2>/dev/null > {pf}.stop; p=$(cat {pf} 2>/dev/null); [ -n "$p" ] || exit 0; rm -f {pf} {pf}.stop; '
     'kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null; exit 0')
 
 
