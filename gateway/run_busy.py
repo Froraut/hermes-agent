@@ -555,6 +555,11 @@ class GatewayBusySessionMixin:
                 _match = self._plaintext_approval_words().get(_raw_text)
                 if _match is not None:
                     _verb, _normalized_args = _match
+                    # The bare word IS /approve or /deny: same admin gate as the slash forms, else a
+                    # participant refused /approve approves (or permanently allowlists, "always")
+                    # the admin's dangerous command in a shared thread. Denied → ordinary chat.
+                    if self._check_slash_access(event.source, _verb) is not None:
+                        return False
                     _approval_handler = (
                         self._handle_approve_command if _verb == "approve" else self._handle_deny_command
                     )

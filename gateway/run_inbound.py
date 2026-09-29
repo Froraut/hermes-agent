@@ -519,7 +519,10 @@ class GatewayInboundMixin:
             self._SLASH_CONFIRM_CMD_CHOICES.get(event.get_command())
             or self._slash_confirm_text_choices().get(_norm_reply)
         )
-        if _confirm_choice is not None:
+        # Answering runs the confirmed command ("always" also persists the opt-out): only someone
+        # allowed to run that command may answer; anyone else's reply is ordinary chat.
+        _confirmed_cmd = str(_pending_confirm.get("command") or "").lstrip("/")
+        if _confirm_choice is not None and self._check_slash_access(event.source, _confirmed_cmd) is None:
             _resolved = await _slash_confirm_mod.resolve(
                 _quick_key, _pending_confirm.get("confirm_id"), _confirm_choice,
             )
