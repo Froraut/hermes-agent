@@ -569,14 +569,15 @@ function turnHasReply(messages: ChatMessage[]): boolean {
   return false
 }
 
-function withNoReplyNotice(messages: ChatMessage[]): ChatMessage[] {
+function withNoReplyNotice(messages: ChatMessage[], runtimeId: string): ChatMessage[] {
   const last = messages.findLast(message => !message.hidden)
+  // The runtime id is the one fact that lets a copied error-details blob be
+  // traced to this turn in agent.log.
+  const errorSurface: ErrorSurface = { ...NO_REPLY_SURFACE, session: runtimeId }
 
   // A turn that ran tools but never wrote text carries the notice on its own bubble.
   if (last?.role === 'assistant') {
-    return messages.map(message =>
-      message === last ? { ...message, error: NO_REPLY_ERROR, errorSurface: NO_REPLY_SURFACE } : message
-    )
+    return messages.map(message => (message === last ? { ...message, error: NO_REPLY_ERROR, errorSurface } : message))
   }
 
   const occurredAt = Date.now() / 1000
@@ -586,7 +587,7 @@ function withNoReplyNotice(messages: ChatMessage[]): ChatMessage[] {
     {
       completedAt: occurredAt,
       error: NO_REPLY_ERROR,
-      errorSurface: NO_REPLY_SURFACE,
+      errorSurface,
       id: `assistant-no-reply-${Date.now()}`,
       parts: [],
       pending: false,
@@ -602,7 +603,7 @@ function markTurnWithoutReply(runtimeId: string) {
   writeSessionState(runtimeId, state =>
     isLiveTurnAwaitingEvents(state) || turnHasReply(state.messages)
       ? state
-      : { ...state, messages: withNoReplyNotice(state.messages) }
+      : { ...state, messages: withNoReplyNotice(state.messages, runtimeId) }
   )
 }
 
@@ -644,7 +645,7 @@ async function onEventSilence(runtimeId: string) {
 
   silentTurnChecks.delete(runtimeId)
 
-  if (verdict !== 'ended') {
+  if (verdict !== 'ended' || awaitingAcceptance($sessionStates.get()[runtimeId])) {
     noteSessionEvent(runtimeId)
 
     return
@@ -652,6 +653,15 @@ async function onEventSilence(runtimeId: string) {
 
   settleEndedLiveTurn(runtimeId)
   await recoverEndedLiveTurn(runtimeId)
+}
+
+/** Submitted, but the backend has not accepted the turn yet: no message.start,
+ *  no running=true edge, no payload. The backend honestly lists such a session
+ *  idle — rehydrateLiveSessionStatuses keeps it busy for the same reason — so
+ *  "idle" or "absent" is not a turn end here, and ending it would offer a Retry
+ *  while the first submit may still start. It is asked again next window. */
+function awaitingAcceptance(state: ClientSessionState | undefined): boolean {
+  return Boolean(state?.awaitingResponse && !state.turnLive && !state.sawAssistantPayload)
 }
 
 /** Record that this session just produced an event. A live turn that then goes

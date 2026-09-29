@@ -41,6 +41,9 @@ _replay_buffer_bytes: dict[str, int] = {}
 _replay_evicted_through: dict[str, int] = {}
 _replay_total_bytes = 0
 _replay_next_seq: dict[str, int] = {}
+# Ephemeral liveness (``tui_gateway/turn_alive.py``): neither sequenced nor kept, so a long quiet tool call
+# cannot push real events out of the ring, and a reconnecting client never replays stale liveness.
+_UNSEQUENCED_EVENTS = frozenset({"turn.alive"})
 
 
 def replay_epoch() -> str:
@@ -56,7 +59,7 @@ def _stamp_event(obj: dict) -> None:
     if not isinstance(params, dict):
         return
     sid = params.get("session_id") or ""
-    if not sid:
+    if not sid or params.get("type") in _UNSEQUENCED_EVENTS:
         # Session-less global events (skin.changed etc.) are re-fetchable via their own RPCs.
         return
     # Sizing stays OUTSIDE the lock (same rule as transport.write) so one large payload cannot
