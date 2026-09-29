@@ -1497,18 +1497,20 @@ class SessionMessagesMixin:
 
     def get_messages_around(self, session_id: str, around_message_id: int, window: int = 5) -> Dict[str, Any]:
         """Up to *window* messages either side of an anchor id (ascending). ``messages_before``/``_after`` count
-        strictly around the anchor (fewer than *window* = session boundary). Empty for a foreign anchor."""
+        strictly around the anchor (fewer than *window* = session boundary). Empty for a foreign anchor.
+        Only rows search can hit (live or compaction-archived) are counted or returned: turns removed by
+        /undo and superseded compaction duplicates (``active=0, compacted=0``) are not part of the session."""
         window = max(window, 0)
         with self._read_ctx() as conn:
-            if not conn.execute("SELECT 1 FROM messages WHERE id = ? AND session_id = ? LIMIT 1",
-                                (around_message_id, session_id)).fetchone():
+            if not conn.execute("SELECT 1 FROM messages WHERE id = ? AND session_id = ?" + _DISPLAY_ACTIVE_CLAUSE
+                                + " LIMIT 1", (around_message_id, session_id)).fetchone():
                 return {"window": [], "messages_before": 0, "messages_after": 0}
             before_rows = conn.execute(
-                "SELECT * FROM messages WHERE session_id = ? AND id <= ? ORDER BY id DESC LIMIT ?",
-                (session_id, around_message_id, window + 1)).fetchall()
+                "SELECT * FROM messages WHERE session_id = ? AND id <= ?" + _DISPLAY_ACTIVE_CLAUSE
+                + " ORDER BY id DESC LIMIT ?", (session_id, around_message_id, window + 1)).fetchall()
             after_rows = conn.execute(
-                "SELECT * FROM messages WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
-                (session_id, around_message_id, window)).fetchall()
+                "SELECT * FROM messages WHERE session_id = ? AND id > ?" + _DISPLAY_ACTIVE_CLAUSE
+                + " ORDER BY id ASC LIMIT ?", (session_id, around_message_id, window)).fetchall()
         window_msgs = [self._row_to_message_dict(r, warn_context="get_messages_around", summary_flag=False)
                        for r in (*reversed(before_rows), *after_rows)]
         # before_rows includes the anchor itself.
