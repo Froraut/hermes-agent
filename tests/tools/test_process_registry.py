@@ -946,8 +946,8 @@ class TestSpawnEnvSanitization:
                 self.commands = []
                 self._responses = iter([
                     {"output": "6 0\nhello\n"},
-                    {"output": "1\n"},
-                    {"output": "0\n"},
+                    {"output": "exit 0\n"},
+                    {"output": "6 6\n"},
                 ])
 
             def execute(self, command, **kwargs):
@@ -969,7 +969,8 @@ class TestSpawnEnvSanitization:
         assert "'/path with spaces/hermes_bg.log'" in env.commands[0][0]
         assert "cat '/path with spaces/hermes_bg.log'" not in env.commands[0][0]
         assert "'/path with spaces/hermes_bg.pid'" in env.commands[1][0]
-        assert "'/path with spaces/hermes_bg.exit'" in env.commands[2][0]
+        assert "'/path with spaces/hermes_bg.exit'" in env.commands[1][0]
+        assert "'/path with spaces/hermes_bg.log'" in env.commands[2][0]
 
 
 class TestEnvPollerIncrementalRead:
@@ -1039,8 +1040,8 @@ class TestEnvPollerIncrementalRead:
             session,
             [
                 {"output": "8 0\nand new"},
-                {"output": "1\n"},
-                {"output": "0\n"},
+                {"output": "exit 0\n"},
+                {"output": "8 8\n"},
             ],
         )
         assert session.output_buffer == "already here and new"
@@ -1053,10 +1054,10 @@ class TestEnvPollerIncrementalRead:
             session,
             [
                 {"output": "11 0\nfirst chunk"},
-                {"output": "0\n"},          # still running, poll again
+                {"output": "running\n"},    # still running, poll again
                 {"output": "17 11\n and more"},
-                {"output": "1\n"},          # gone now
-                {"output": "0\n"},
+                {"output": "exit 0\n"},     # gone now
+                {"output": "17 17\n"},
             ],
         )
         assert "O=0" in commands[0]
@@ -1076,10 +1077,10 @@ class TestEnvPollerIncrementalRead:
             session,
             [
                 {"output": "11 0\nfirst chunk"},
-                {"output": "0\n"},          # still running, poll again
+                {"output": "running\n"},    # still running, poll again
                 {"output": "5 0\nfresh"},
-                {"output": "1\n"},
-                {"output": "0\n"},
+                {"output": "exit 0\n"},
+                {"output": "5 5\n"},
             ],
         )
         assert session.output_buffer == "fresh"
@@ -1094,8 +1095,8 @@ class TestEnvPollerIncrementalRead:
             session,
             [
                 {"output": ""},
-                {"output": "1\n"},
-                {"output": "0\n"},
+                {"output": "exit 0\n"},
+                {"output": ""},
             ],
         )
         assert session.output_buffer == "keep me"
@@ -1109,8 +1110,8 @@ class TestEnvPollerIncrementalRead:
             session,
             [
                 {"output": "20 0\n" + "x" * 20},
-                {"output": "1\n"},
-                {"output": "0\n"},
+                {"output": "exit 0\n"},
+                {"output": "20 20\n"},
             ],
         )
         assert session.output_buffer == "x" * 10
@@ -1161,6 +1162,95 @@ class TestSpawnViaEnvCwd:
             notify_on_complete=False, watch_patterns=None, approval_note=None, pty_disabled_reason=None))
         assert result["exit_code"] != 0 and result["error"]
         assert result.get("session_id") is None or registry.get(result["session_id"]) is not None
+
+
+class _ShellEnv:
+    """Runs the poller's commands in a real bash; ``after_first`` fires once,
+    right after the first command (the log read) returned."""
+
+    def __init__(self, after_first=None):
+        self.calls = 0
+        self._after_first = after_first
+
+    def execute(self, command, timeout=None, **kwargs):
+        out = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=30)
+        self.calls += 1
+        if self.calls == 1 and self._after_first:
+            self._after_first()
+        return {"output": out.stdout, "returncode": out.returncode}
+
+
+class TestEnvPollerCompletion:
+    """A sandbox session ends on the exit the wrapper recorded, with all of its output.
+
+    ``kill -0`` succeeds on a zombie, and a PID 1 that does not reap (docker
+    without ``--init``) keeps the wrapper one forever, so the PID answering is
+    not proof the command still runs. And the last lines a job prints land
+    after the poll's log read, so they must be read once the exit is seen.
+    """
+
+    @staticmethod
+    def _poll(registry, session, tmp_path, env, max_polls=5):
+        class _Stuck(Exception):
+            pass
+
+        polls = []
+        real_sleep = time.sleep
+
+        def fake_sleep(seconds):
+            if seconds != 2:  # subprocess's own short waits
+                return real_sleep(seconds)
+            polls.append(seconds)
+            if len(polls) > max_polls:
+                raise _Stuck
+
+        with patch("tools.process_registry.time.sleep", fake_sleep):
+            try:
+                registry._env_poller_loop(
+                    session, env, *(str(tmp_path / f"bg.{ext}") for ext in ("log", "pid", "exit")))
+            except _Stuck:
+                pass
+
+    @pytest.mark.platforms("posix")
+    def test_recorded_exit_ends_the_session_with_the_final_output(self, registry, tmp_path):
+        log = tmp_path / "bg.log"
+        log.write_text("START\n")
+        # A PID that still answers kill -0, as an unreaped zombie does.
+        (tmp_path / "bg.pid").write_text(f"{os.getpid()}\n")
+
+        def job_prints_its_summary_and_exits():
+            with log.open("a") as f:
+                f.write("FINAL: 3 tests failed\n")
+            (tmp_path / "bg.exit").write_text("3\n")
+
+        session = _make_session(sid="proc_final_tail")
+        self._poll(registry, session, tmp_path, _ShellEnv(after_first=job_prints_its_summary_and_exits))
+
+        assert session.exited
+        assert session.exit_code == 3
+        assert session.output_buffer == "START\nFINAL: 3 tests failed\n"
+
+    @pytest.mark.platforms("linux")
+    def test_zombie_without_exit_record_is_not_reported_running(self, registry, tmp_path):
+        zombie = subprocess.Popen(["true"])  # never waited on until the end: stays a zombie
+        try:
+            deadline = time.monotonic() + 10
+            status = f"/proc/{zombie.pid}/status"
+            while time.monotonic() < deadline:
+                with open(status) as f:
+                    if any(ln.startswith("State:") and "Z" in ln for ln in f):
+                        break
+                time.sleep(0.05)
+            (tmp_path / "bg.log").write_text("")
+            (tmp_path / "bg.pid").write_text(f"{zombie.pid}\n")
+
+            session = _make_session(sid="proc_zombie")
+            self._poll(registry, session, tmp_path, _ShellEnv())
+
+            assert session.exited
+            assert session.exit_code == -1
+        finally:
+            zombie.wait()
 
 
 # =========================================================================
