@@ -273,3 +273,16 @@ class TestCodeIsVerbatim:
         assert [self._u16_slice(text, s) for s in _find_style(styles, "MONOSPACE")] == ["__init__", "a*b*c"]
         assert [self._u16_slice(text, s) for s in _find_style(styles, "BOLD")] == [
             "Call __init__ then a*b*c, not bold", "bold"]
+
+    def test_many_spans_convert_in_linear_time_with_exact_ranges(self):
+        """send() converts synchronously on the gateway loop, so a long reply with thousands of spans must
+        not cost per-span whole-string work; every range still lands on its own text (UTF-16 offsets
+        included)."""
+        import time
+
+        count = 6000
+        started = time.perf_counter()
+        text, styles = _m2s("".join(f"🚀 use `c{i}` and **b{i}** " for i in range(count)))
+        assert time.perf_counter() - started < 2.0
+        assert [self._u16_slice(text, s) for s in _find_style(styles, "MONOSPACE")] == [f"c{i}" for i in range(count)]
+        assert [self._u16_slice(text, s) for s in _find_style(styles, "BOLD")] == [f"b{i}" for i in range(count)]
