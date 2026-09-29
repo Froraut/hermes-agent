@@ -145,6 +145,10 @@ def _coerce_value(value: str, expected_type, schema: dict | None = None):
         return None
 
     if isinstance(expected_type, list):
+        # A string already satisfies a union that allows "string": no repair is unambiguous, so
+        # keep it — else the next member always won ("00123" -> 123, "1.10" -> 1.1, "false" -> False).
+        if "string" in expected_type:
+            return value
         return next((r for t in expected_type if (r := _coerce_value(value, t, schema=schema)) is not value), value)
 
     coercer = _SCALAR_COERCERS.get(expected_type)

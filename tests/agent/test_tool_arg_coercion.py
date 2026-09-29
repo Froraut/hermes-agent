@@ -8,6 +8,8 @@ against the tool's JSON Schema before dispatch.
 
 from unittest.mock import patch
 
+import pytest
+
 import model_tools  # noqa: F401 — populates the tool registry the "real schema" tests read
 from tools.arg_coercion import (
     coerce_tool_args,
@@ -120,6 +122,17 @@ class TestCoerceToolArgs:
 
 
 
+
+    @pytest.mark.parametrize("value", ["00123", "1.10", "false", "42"])
+    @pytest.mark.parametrize("types", [["string", "integer"], ["integer", "string"],
+                                       ["string", "number", "boolean"]])
+    def test_string_valid_for_a_union_that_allows_string_is_kept(self, value, types):
+        """A string already satisfies a type union that includes "string" (a zip code, a version,
+        an id with leading zeros): coercion has nothing unambiguous to repair, so the model's value
+        must reach the tool unchanged — not become 123 / 1.1 / False."""
+        schema = self._mock_schema({"code": {"type": types}})
+        with patch("tools.arg_coercion.registry.get_schema", return_value=schema):
+            assert coerce_tool_args("test_tool", {"code": value}) == {"code": value}
 
     def test_leaves_already_correct_types(self):
         schema = self._mock_schema({"limit": {"type": "integer"}})
