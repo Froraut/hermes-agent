@@ -2264,6 +2264,16 @@ def _session_info(agent, session: dict | None = None) -> dict:
     if (agent is None or sess.get("_compute_host_active")) and "reasoning_effort" in mirror:
         reasoning_effort = str(mirror.get("reasoning_effort") or "")
         reasoning_effort_wire = str(mirror.get("reasoning_effort_wire") or "")
+        pending_reasoning = sess.get("create_reasoning_override")
+        if isinstance(pending_reasoning, dict):
+            pending_effort = (
+                "none" if pending_reasoning.get("enabled") is False
+                else str(pending_reasoning.get("effort") or "")
+            )
+            if pending_effort != reasoning_effort:
+                # A fresh menu pick is newer than the last executed host turn.
+                # Its wire value is unknown until that host acknowledges it.
+                reasoning_effort, reasoning_effort_wire = pending_effort, ""
     elif reasoning_effort and reasoning_effort != "none":
         reasoning_effort_wire = str(clamp_effort(reasoning_effort, route_supported_efforts(
             pending_provider or provider, model, getattr(agent, "api_mode", None),
