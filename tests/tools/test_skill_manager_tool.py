@@ -1017,6 +1017,39 @@ class TestPinnedGuard:
         # Skill still exists
         assert (tmp_path / "my-skill" / "SKILL.md").exists()
 
+    @pytest.mark.parametrize("spelling", ["SKILL.md", "{name}/SKILL.md"])
+    def test_skill_md_file_path_keeps_skill_md_guards(self, tmp_path, spelling):
+        """file_path naming SKILL.md gets SKILL.md's guards, not the supporting-file branches:
+        frontmatter validation on patch/write_file, and remove_file cannot delete an essential skill."""
+        from tools.registry import registry
+        name = "hermes-agent"  # ESSENTIAL: action='delete' refuses it
+        fp = spelling.format(name=name)
+        with _skill_dir(tmp_path):
+            _create_skill(name, VALID_SKILL_CONTENT)
+            before = (tmp_path / name / "SKILL.md").read_text()
+            for op in ({"action": "patch", "file_path": fp,
+                        "old_string": "---\nname: test-skill", "new_string": "name: test-skill"},
+                       {"action": "write_file", "file_path": fp, "file_content": "no frontmatter\n"},
+                       {"action": "remove_file", "file_path": fp}):
+                result = json.loads(registry.dispatch(
+                    "skill_manage", {"operations": [{"name": name, **op}]}))
+                assert result["success"] is False, (op["action"], result)
+            assert _find_skill(name) is not None
+            assert (tmp_path / name / "SKILL.md").read_text() == before
+        assert not (tmp_path / name / name).exists()
+
+    def test_skill_prefixed_skill_md_edits_the_root_skill_md(self, tmp_path):
+        """'<skill>/SKILL.md' names the skill's own SKILL.md, not a nested file."""
+        from tools.registry import registry
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            result = json.loads(registry.dispatch("skill_manage", {"operations": [
+                {"name": "my-skill", "action": "patch", "file_path": "my-skill/SKILL.md",
+                 "old_string": "Step 1: Do the thing.", "new_string": "Step 1: Do it well."}]}))
+        assert result["success"] is True, result
+        assert "Do it well." in (tmp_path / "my-skill" / "SKILL.md").read_text()
+        assert not (tmp_path / "my-skill" / "my-skill").exists()
+
     def test_broken_sidecar_fails_open(self, tmp_path):
         """If skill_usage.get_record raises, we allow delete through.
 

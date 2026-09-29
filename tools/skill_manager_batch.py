@@ -86,7 +86,7 @@ def _op_shape_error(action: str, args: dict):
 def _validate_batch_ops(operations, default_name, tool_error):
     """Shape checks with no side effects. Returns (names, None) or (None, error_json)."""
     from tools.skill_manager_guards import _background_review_preflight
-    from tools.skill_manager_tool import _validate_category
+    from tools.skill_manager_tool import _names_skill_md, _validate_category
     def fail(i, msg):
         return None, tool_error(f"operations[{i}]{msg}", success=False)
     names = []
@@ -122,7 +122,7 @@ def _validate_batch_ops(operations, default_name, tool_error):
         # create and full-rewrite patch (content) always hit SKILL.md.
         full_rewrite = act == "patch" and bool(op.get("content"))
         fp = (op.get("file_path") or "").strip()
-        target = ("SKILL.md" if (act == "create" or full_rewrite or not fp)
+        target = ("SKILL.md" if (act == "create" or full_rewrite or not fp or _names_skill_md(nm, fp))
                   else posixpath.normpath(fp.lstrip("/")))
         key = (Path(nm).name, target)  # ``research/x`` and ``x`` are one skill (lock keys agree)
         if (act in ("create", "write_file", "remove_file") or full_rewrite) and key in touched_files:
