@@ -5,6 +5,7 @@ behavior — key names, order and omission rules are pinned by tests and read by
 the model.
 """
 
+import difflib
 import re
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Optional
@@ -246,6 +247,32 @@ def _normalize_line_endings(text: str, target: str) -> str:
     if target == "\r\n":
         return lf_normalized.replace("\n", "\r\n")
     return text
+
+
+_LF_LINE_RE = re.compile(r"[^\n]*\n|[^\n]+\Z")
+
+
+def _normalize_changed_line_endings(old: str, new: str, ending: str) -> str:
+    """``new`` with ``ending`` applied only to the lines an edit produced. Lines equal to ``old``'s
+    keep their exact bytes — a CRLF past the 4 KB detection window of an LF file, an LF-only line
+    in a CRLF file, a lone-CR progress line — so an edit never rewrites bytes it did not touch.
+    Lines split after each ``\n`` (a lone CR stays inside its line); the common prefix/suffix is
+    trimmed first so the line diff only runs over the edited span."""
+    old_lines, new_lines = _LF_LINE_RE.findall(old), _LF_LINE_RE.findall(new)
+    head = 0
+    while head < min(len(old_lines), len(new_lines)) and old_lines[head] == new_lines[head]:
+        head += 1
+    tail = 0
+    while (tail < min(len(old_lines), len(new_lines)) - head
+           and old_lines[-1 - tail] == new_lines[-1 - tail]):
+        tail += 1
+    old_mid, new_mid = old_lines[head:len(old_lines) - tail], new_lines[head:len(new_lines) - tail]
+    out = new_lines[:head]
+    for tag, _i1, _i2, j1, j2 in difflib.SequenceMatcher(None, old_mid, new_mid, autojunk=False).get_opcodes():
+        chunk = new_mid[j1:j2]
+        out.extend(chunk if tag == "equal" else (_normalize_line_endings(line, ending) for line in chunk))
+    out.extend(new_lines[len(new_lines) - tail:])
+    return "".join(out)
 
 
 # UTF-8 BOM (EF BB BF == U+FEFF), prepended by some Windows editors. Stripped on

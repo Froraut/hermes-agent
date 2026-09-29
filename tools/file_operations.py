@@ -26,7 +26,8 @@ from tools.binary_extensions import has_binary_extension
 from agent.file_safety import get_write_denied_error
 from tools.file_operations_common import (
     ExecuteResult, PatchResult, ReadResult, SearchResult, WriteResult,
-    _UTF8_BOM, _detect_line_ending, _has_bom, _normalize_line_endings, _strip_bom,
+    _UTF8_BOM, _detect_line_ending, _has_bom, _normalize_changed_line_endings, _normalize_line_endings,
+    _strip_bom,
     _strip_terminal_fence_leaks, normalize_read_pagination, normalize_search_pagination)
 from tools.file_operations_lint import LINTERS_INPROC, LintMixin, _FAIL_CLOSED_INPROC_EXTS
 from tools.file_operations_search import SearchMixin
@@ -105,7 +106,8 @@ class FileOperations(ABC):
         """Whole file as a plain string: no pagination, line numbers or clamping."""
 
     @abstractmethod
-    def write_file(self, path: str, content: str, pre_content: Optional[str] = None) -> WriteResult:
+    def write_file(self, path: str, content: str, pre_content: Optional[str] = None,
+                   keep_line_endings: bool = False) -> WriteResult:
         """Write content to a file, creating directories as needed."""
 
     @abstractmethod
@@ -1457,7 +1459,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             pass
         return None, None
 
-    def write_file(self, path: str, content: str, pre_content: Optional[str] = None) -> WriteResult:
+    def write_file(self, path: str, content: str, pre_content: Optional[str] = None,
+                   keep_line_endings: bool = False) -> WriteResult:
         """Write content atomically, creating parent directories as needed.
 
         Order: deny list → lone-surrogate refusal → fail-closed syntax gate on the
@@ -1486,7 +1489,9 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         has_bom, pre_content, original_ending = self._probe_write_target(path, pre_content, want_pre)
         # read_file strips the BOM and models send bare-LF text, so a round-trip would
         # otherwise normalize CRLF files and drop the BOM (prepend only when absent).
-        if original_ending == "\r\n":
+        # ``keep_line_endings``: an edit that already applied the file's ending to the lines it
+        # changed (patch) — converting the whole buffer would rewrite untouched bytes.
+        if original_ending == "\r\n" and not keep_line_endings:
             content = _normalize_line_endings(content, "\r\n")
         if has_bom and not _has_bom(content):
             content = _UTF8_BOM + content
@@ -1584,12 +1589,12 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             content, old_string, new_string, replace_all)
         if error or match_count == 0:
             return self._no_match_result(path, content, old_string, new_string, match_count, error)
-        # Models send bare-LF old/new strings; normalize the substituted region to
-        # the file's ending so CRLF files stay consistent.
+        # Models send bare-LF old/new strings; give the lines the replacement produced the file's
+        # ending so CRLF files stay consistent — only those lines: untouched lines keep their bytes.
         file_ending = _detect_line_ending(content)
         if file_ending:
-            new_content = _normalize_line_endings(new_content, file_ending)
-        write_result = self.write_file(path, new_content, pre_content=raw_content)
+            new_content = _normalize_changed_line_endings(content, new_content, file_ending)
+        write_result = self.write_file(path, new_content, pre_content=raw_content, keep_line_endings=True)
         if write_result.error:
             return PatchResult(error=f"Failed to write changes: {write_result.error}")
         verify_error = self._verify_patch_persisted(path, new_content)
