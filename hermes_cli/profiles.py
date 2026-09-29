@@ -1144,6 +1144,21 @@ def _seed_file_if_missing(path: Path, text: str, mode: Optional[int] = None) -> 
             os.chmod(str(path), mode)
 
 
+def _seed_placeholder_env(profile_dir: Path) -> None:
+    """Give a new profile its own owner-only placeholder ``.env`` unless it has one. A profile
+    without one is taken for a pre-#44792 profile by ``backfill_profile_envs``, which copies the
+    DEFAULT's secrets in — so a failed seed RAISES (the caller must not publish the profile), and an
+    existing entry is never written through: exclusive create refuses any symlink, dangling or not."""
+    env_path = profile_dir / ".env"
+    try:
+        fh = open(env_path, "x", encoding="utf-8", opener=lambda p, flags: os.open(p, flags, 0o600))
+    except FileExistsError:
+        return
+    with fh:
+        fh.write(_PLACEHOLDER_ENV)
+    os.chmod(env_path, 0o600)
+
+
 def _clone_file(source_dir: Path, profile_dir: Path, relpath: str) -> None:
     """Copy one profile-relative file if it exists. ``.env`` is tightened to owner-only:
     ``copy2`` preserves source mode bits, so a loose source (umask 0o644) would leak."""
@@ -1383,7 +1398,7 @@ def _finish_profile_layout(profile_dir: Path, *, no_skills: bool, clone_all: boo
     # profile-scoped env writes (dashboard Channels/Keys pages, `hermes -p <name> auth add`)
     # had no file until first write and the profile silently inherited shell API keys —
     # read by users as "the new profile reads the root .env". Skipped when a clone copied one.
-    _seed_file_if_missing(profile_dir / ".env", _PLACEHOLDER_ENV, 0o600)
+    _seed_placeholder_env(profile_dir)
 
     # Default SOUL.md to customize immediately (skipped when a clone already provided one).
     with contextlib.suppress(Exception):  # best-effort — don't fail profile creation over this
@@ -1481,7 +1496,7 @@ def backfill_profile_envs(quiet: bool = False) -> List[str]:
     default_env = _get_default_hermes_home() / ".env"
     for entry in _iter_named_profile_dirs():
         env_path = entry / ".env"
-        if env_path.exists():
+        if env_path.exists() or env_path.is_symlink():  # never copy the default's secrets through a dangling link
             continue
         try:
             if default_env.is_file():
@@ -2252,7 +2267,7 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
         drop_profile_role(final_source)
         # Exports strip .env; own one from day one (as create_profile does), or the next `hermes
         # update` backfill takes this for a pre-#44792 profile and copies the DEFAULT's .env in.
-        _seed_file_if_missing(final_source / ".env", _PLACEHOLDER_ENV, 0o600)
+        _seed_placeholder_env(final_source)
         shutil.move(str(final_source), str(profile_dir))
     return profile_dir
 
