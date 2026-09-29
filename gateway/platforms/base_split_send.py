@@ -20,25 +20,31 @@ SendChunk = Callable[[Any, int], Awaitable[SendResult]]
 Finish = Callable[[List[SendResult]], Awaitable[SendResult]]
 
 
-async def send_split(chunks: Sequence[Any], send_chunk: SendChunk, *, finish: Optional[Finish] = None) -> SendResult:
-    """Send ``chunks`` in order through ``send_chunk(chunk, index)``, where ``index`` counts the chunks
-    already delivered (a resume keeps first-chunk-only reply/quote logic right). Returns
-    ``await finish(results)`` once every chunk landed (default: the last chunk's result), else the
-    failed chunk's result, marked as a partial delivery when earlier chunks landed."""
-    return await _send_from(list(chunks), send_chunk, finish, [])
+async def send_split(
+        chunks: Sequence[Any], send_chunk: SendChunk, *, finish: Optional[Finish] = None,
+        delivered: Sequence[SendResult] = ()) -> SendResult:
+    """Send ``chunks`` in order through ``send_chunk(chunk, index)``, where ``index`` is the chunk's
+    position in ``chunks`` (a resume keeps first-chunk-only reply/quote logic right). ``delivered``
+    holds parts this send already put on screen ahead of the chunks (media sent before the text), so a
+    failure after them is a partial delivery too. Returns ``await finish(results)`` once every chunk
+    landed (default: the last result), else the failed chunk's result, marked as a partial delivery
+    when anything landed before it."""
+    return await _send_from(list(chunks), 0, send_chunk, finish, list(delivered))
 
 
 async def _send_from(
-        chunks: List[Any], send_chunk: SendChunk, finish: Optional[Finish], landed: List[SendResult]) -> SendResult:
+        chunks: List[Any], first_index: int, send_chunk: SendChunk, finish: Optional[Finish],
+        landed: List[SendResult]) -> SendResult:
     for pos, chunk in enumerate(chunks):
-        result = await send_chunk(chunk, len(landed))
+        result = await send_chunk(chunk, first_index + pos)
         if not result.success:
             if landed:
                 raw = dict(result.raw_response) if isinstance(result.raw_response, dict) else {}
                 raw.update(
                     partial_overflow=True, delivered_chunks=len(landed), total_chunks=len(landed) + len(chunks) - pos,
                     last_message_id=landed[-1].message_id,
-                    resume=functools.partial(_send_from, chunks[pos:], send_chunk, finish, list(landed)))
+                    resume=functools.partial(
+                        _send_from, chunks[pos:], first_index + pos, send_chunk, finish, list(landed)))
                 result.raw_response = raw
             return result
         landed.append(result)

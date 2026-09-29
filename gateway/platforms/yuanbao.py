@@ -2730,6 +2730,13 @@ class YuanbaoAdapter(BasePlatformAdapter):
                    metadata: Optional[Dict[str, Any]] = None, group_code: str = "") -> SendResult:
         return await self._outbound.sender.send_text(chat_id, content, reply_to, group_code=group_code)
 
+    async def _resume_partial_send(
+        self, chat_id: str, result: SendResult, *, reply_to: Optional[str], metadata: Any) -> Optional[SendResult]:
+        """Send the undelivered tail under the same per-chat lock ``send_text`` holds, so no other
+        send to this chat lands between its chunks."""
+        async with self._outbound.sender.get_chat_lock(chat_id):
+            return await super()._resume_partial_send(chat_id, result, reply_to=reply_to, metadata=metadata)
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "group" if chat_id.startswith("group:") else "dm"}
 
