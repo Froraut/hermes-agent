@@ -691,6 +691,8 @@ def test_delete_archived_task_removes_related_rows(kanban_home):
         kb.add_comment(conn, tid, "user", "cleanup me")
         kb.claim_task(conn, tid)
         kb.complete_task(conn, tid, result="done")
+        assert kb.delete_archived_task(conn, tid) is False
+        assert kb.get_task(conn, tid) is not None
         assert kb.archive_task(conn, tid)
         conn.execute(
             "INSERT INTO kanban_notify_subs(task_id, platform, chat_id, thread_id, user_id, created_at, last_event_id) "
@@ -708,16 +710,57 @@ def test_delete_archived_task_removes_related_rows(kanban_home):
         assert conn.execute("SELECT COUNT(*) FROM kanban_notify_subs WHERE task_id = ?", (tid,)).fetchone()[0] == 0
 
 
-def test_delete_task_removes_task_and_cascades(kanban_home):
+def test_delete_task_terminates_verified_worker_and_refuses_unverified_survivor(
+    kanban_home, monkeypatch,
+):
     with kbc.connect() as conn:
         t = kb.create_task(conn, title="to-delete", assignee="alice")
         kb.add_comment(conn, t, "user", "comment")
         kb.add_comment(conn, t, "user", "another")
-        assert kb.delete_task(conn, t)
+        host = kb._claimer_id().split(":", 1)[0]
+        kb.claim_task(conn, t, claimer=f"{host}:worker")
+        monkeypatch.setattr(kbd, "_process_fingerprint", lambda pid: f"test-boot|{pid}")
+        kbd._set_worker_pid(conn, t, 54321)
+
+        live = {54321}
+        monkeypatch.setattr(kb, "_pid_alive", lambda pid: pid in live)
+        signalled = []
+
+        def signal_worker(pid, sig):
+            signalled.append((pid, sig))
+            # The winning delete transaction still owns the task and every
+            # relation while it terminates the process.
+            assert kb.get_task(conn, t) is not None
+            assert len(kb.list_comments(conn, t)) == 2
+            live.discard(pid)
+
+        assert kb.delete_task(conn, t, signal_fn=signal_worker)
+        assert signalled and signalled[0][0] == 54321
         assert kb.get_task(conn, t) is None
         assert len(kb.list_comments(conn, t)) == 0
         assert len(kb.list_events(conn, t)) == 0
         assert len(kb.list_runs(conn, t)) == 0
+
+        guarded = kb.create_task(conn, title="identity unknown", assignee="alice")
+        kb.add_comment(conn, guarded, "user", "must survive refusal")
+        kb.claim_task(conn, guarded, claimer=f"{host}:worker")
+        kbd._set_worker_pid(conn, guarded, 65432)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET worker_started_at = ? WHERE id = ?",
+                (kbd.UNVERIFIED_WORKER_FINGERPRINT, guarded),
+            )
+            conn.execute(
+                "UPDATE task_runs SET worker_started_at = ? WHERE task_id = ?",
+                (kbd.UNVERIFIED_WORKER_FINGERPRINT, guarded),
+            )
+        live.add(65432)
+        before = list(signalled)
+
+        assert kb.delete_task(conn, guarded, signal_fn=signal_worker) is False
+        assert signalled == before
+        assert kb.get_task(conn, guarded) is not None
+        assert [c.body for c in kb.list_comments(conn, guarded)] == ["must survive refusal"]
 
 
 
@@ -2046,11 +2089,15 @@ def test_archive_running_task_terminates_worker(kanban_home, monkeypatch):
         monkeypatch.setattr(kbd, "_process_fingerprint", lambda _pid: "boot:1|777")
         kbd._set_worker_pid(conn, t, 54321)
 
-        monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+        live = {54321}
+        monkeypatch.setattr(kb, "_pid_alive", lambda pid: pid in live)
         signalled = []
-        assert kb.archive_task(
-            conn, t, signal_fn=lambda pid, sig: signalled.append((pid, sig)),
-        ) is True
+
+        def signal_worker(pid, sig):
+            signalled.append((pid, sig))
+            live.discard(pid)
+
+        assert kb.archive_task(conn, t, signal_fn=signal_worker) is True
 
         assert signalled and signalled[0][0] == 54321
 
