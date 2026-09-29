@@ -151,6 +151,15 @@ def _webhook_route_summary(name: str, route: Dict[str, Any], base_url: str) -> D
     }
 
 
+def _load_webhook_subs(wh) -> dict:
+    """The subscriptions store, or 409 when it exists but cannot be parsed: an empty read here
+    would let create write back only its own route (every other route and secret lost)."""
+    try:
+        return wh._load_subscriptions()
+    except wh.WebhookSubscriptionsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/api/webhooks")
 async def list_webhooks(profile: Optional[str] = None):
     def _run():
@@ -162,7 +171,7 @@ async def list_webhooks(profile: Optional[str] = None):
             "base_url": base_url,
             "subscriptions": [
                 _webhook_route_summary(name, route, base_url)
-                for name, route in wh._load_subscriptions().items()
+                for name, route in _load_webhook_subs(wh).items()
             ],
         }
 
@@ -226,7 +235,7 @@ async def create_webhook(body: WebhookCreate, profile: Optional[str] = None):
         route["deliver_extra"] = {"chat_id": body.deliver_chat_id}
 
     def _save():
-        subs = wh._load_subscriptions()
+        subs = _load_webhook_subs(wh)
         subs[name] = route
         wh._save_subscriptions(subs)
         return _webhook_route_summary(name, route, wh._get_webhook_base_url())
@@ -242,7 +251,7 @@ def _webhook_subs_with(name: str):
     import hermes_cli.webhook as wh
 
     key = (name or "").strip().lower()
-    subs = wh._load_subscriptions()
+    subs = _load_webhook_subs(wh)
     if key not in subs:
         raise HTTPException(status_code=404, detail=f"No subscription named '{key}'")
     return wh, subs, key
