@@ -1,6 +1,7 @@
 """Tests for acp_adapter.server — HermesACPAgent ACP server."""
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, AsyncMock, patch
@@ -11,8 +12,10 @@ import acp
 from acp.agent.router import build_agent_router
 from acp.schema import (
     AuthenticateResponse,
+    ImageContentBlock,
     InitializeResponse,
     PromptResponse,
+    ResourceContentBlock,
     ResumeSessionResponse,
     SessionModelState,
     SessionModeState,
@@ -481,6 +484,62 @@ class TestPrompt:
         start = next(e for e in seen_before_response if isinstance(e, ToolCallStart))
         closes = [e for e in seen_before_response if isinstance(e, ToolCallProgress) and e.tool_call_id == start.tool_call_id]
         assert [e.status for e in closes] == ["failed"]
+
+    @pytest.mark.asyncio
+    async def test_prompt_queued_mid_turn_is_drained_with_its_attachments(self, agent, mock_manager, tmp_path):
+        """A prompt that arrives while a turn runs is queued and later run with its @file
+        resource and image, not as its bare text."""
+        schema = tmp_path / "schema.sql"
+        schema.write_text("CREATE TABLE users (id INTEGER PRIMARY KEY);\n", encoding="utf-8")
+        resp = await agent.new_session(cwd=str(tmp_path))
+        state = mock_manager.get_session(resp.session_id)
+        state.agent.model, state.agent.provider = "test-model", "openrouter"
+        started, release, seen = threading.Event(), threading.Event(), []
+
+        def _run(user_message, **_kwargs):
+            seen.append(user_message)
+            if len(seen) == 1:
+                started.set()
+                release.wait(10)
+            return {"final_response": "ok", "messages": []}
+
+        state.agent.run_conversation = _run
+        first = asyncio.create_task(
+            agent.prompt(prompt=[TextContentBlock(type="text", text="refactor the db layer")], session_id=resp.session_id))
+        assert await asyncio.to_thread(started.wait, 10)
+        queued = await agent.prompt(prompt=[
+            TextContentBlock(type="text", text="use this schema"),
+            ResourceContentBlock(type="resource_link", uri=schema.as_uri(), name=schema.name),
+            ImageContentBlock(type="image", data="iVBORw0KGgo=", mime_type="image/png"),
+        ], session_id=resp.session_id)
+        release.set()
+        await first
+
+        assert queued.stop_reason == "end_turn" and len(seen) == 2
+        drained = seen[1]
+        assert isinstance(drained, list), f"attachments dropped from the queued prompt: {drained!r}"
+        assert any("CREATE TABLE users" in part.get("text", "") for part in drained)
+        assert any(part["type"] == "image_url" for part in drained)
+
+    @pytest.mark.asyncio
+    async def test_attachment_only_prompt_runs_a_turn(self, agent, mock_manager, tmp_path):
+        """An @file mention with no typed text is still a prompt: it runs a turn with the file
+        inlined, and the persisted user message names the attachment."""
+        notes = tmp_path / "bug_report.md"
+        notes.write_text("Steps: run make test, see test_login fail\n", encoding="utf-8")
+        resp = await agent.new_session(cwd=str(tmp_path))
+        state = mock_manager.get_session(resp.session_id)
+        state.agent.model, state.agent.provider = "test-model", "openrouter"
+        state.agent.run_conversation = MagicMock(return_value={"final_response": "ok", "messages": []})
+
+        await agent.prompt(
+            prompt=[ResourceContentBlock(type="resource_link", uri=notes.as_uri(), name=notes.name)],
+            session_id=resp.session_id)
+
+        assert state.agent.run_conversation.call_count == 1, "the attachment-only prompt never ran a turn"
+        kwargs = state.agent.run_conversation.call_args.kwargs
+        assert "Steps: run make test" in kwargs["user_message"]
+        assert notes.name in kwargs["persist_user_message"]
 
 
 
