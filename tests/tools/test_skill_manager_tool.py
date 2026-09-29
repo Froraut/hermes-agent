@@ -1100,6 +1100,54 @@ class TestPinUnderEitherName:
         assert "Do the thing." in (skill_dir / "SKILL.md").read_text()
 
 
+class TestCategorizedSpelling:
+    """``research/my-skill`` names the same skill as ``my-skill`` (upstream #120528): the guards and
+    records keyed on the name see through the spelling. Real skills dir, real pin store."""
+
+    @staticmethod
+    def _make(rel: str) -> Path:
+        from hermes_constants import get_hermes_home
+        skill_dir = get_hermes_home() / "skills" / rel
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(VALID_SKILL_CONTENT.replace("test-skill", skill_dir.name))
+        return skill_dir
+
+    @pytest.mark.parametrize("shape", ["flat", "operations"])
+    @pytest.mark.parametrize("categorized", [False, True], ids=["bare", "categorized"])
+    @pytest.mark.parametrize("rel, refusal", [
+        ("research/my-skill", "pinned"), ("autonomous-ai-agents/hermes-agent", "essential")])
+    def test_delete_guard_holds_for_every_spelling(self, rel, refusal, categorized, shape):
+        from tools import skill_usage
+        skill_dir = self._make(rel)
+        assert skill_usage.set_pinned("my-skill", True)
+        name = rel if categorized else skill_dir.name
+        op = {"action": "delete", "name": name}
+
+        raw = skill_manage(**op) if shape == "flat" else skill_manage(action="", name="", operations=[op])
+
+        result = json.loads(raw)
+        assert result["success"] is False and refusal in result["error"], result
+        assert (skill_dir / "SKILL.md").exists()
+
+    def test_other_mutations_treat_both_spellings_as_one_skill(self):
+        from tools import skill_usage
+        skill_dir = self._make("research/free-skill")
+
+        patched = json.loads(skill_manage(action="patch", name="research/free-skill",
+                                          old_string="Do the thing.", new_string="Do it."))
+        clobber = json.loads(skill_manage(action="", name="", operations=[
+            {"action": "write_file", "name": "free-skill", "file_path": "references/a.md", "file_content": "one"},
+            {"action": "write_file", "name": "research/free-skill", "file_path": "references/a.md",
+             "file_content": "two"}]))
+
+        assert patched["success"] is True, patched
+        usage = skill_usage.load_usage()
+        assert "research/free-skill" not in usage and usage["free-skill"]["patch_count"] == 1
+        # The batch clobber guard sees one file of one skill, so the second write cannot discard the first.
+        assert clobber["success"] is False and "already touched" in clobber["error"], clobber
+        assert not (skill_dir / "references" / "a.md").exists()
+
+
 # ---------------------------------------------------------------------------
 # _delete_skill — recursive-delete safety (port of Kilo Code #11240)
 # ---------------------------------------------------------------------------

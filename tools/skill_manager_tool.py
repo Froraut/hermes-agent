@@ -246,6 +246,18 @@ def _find_skill(name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _canonical_skill_name(name: str) -> str:
+    """The bare name for a categorized spelling (``research/my-skill`` -> ``my-skill``), so pin and
+    essential guards, usage and ledger records, and batch bookkeeping all key on one identity
+    whichever accepted spelling named the skill. Kept as given when it resolves to no skill, or when
+    the bare name reaches a different one (the collision the categorized path disambiguates)."""
+    if not name or "/" not in name:
+        return name
+    found = _find_skill(name)
+    bare = found and _find_skill(found["path"].name)
+    return found["path"].name if bare and bare["path"] == found["path"] else name
+
+
 def _find_skill_in_other_profiles(name: str) -> List[Tuple[str, Path]]:
     """``(profile, skill_dir)`` pairs for OTHER profiles holding ``name`` (so the not-found
     error can explain a wrong-profile mistake). Fail-quiet."""
@@ -531,7 +543,9 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
     skill_dir, guard = _locate_for_write(name, "delete")
     if guard := guard or _curator_consolidation_delete_guard(name, absorbed_into):
         return guard
-    if pinned_err := _pinned_guard(name, skill_dir):
+    # Pins and ESSENTIAL_SKILLS key on the bare name, whatever spelling reached the directory;
+    # the guard also checks the frontmatter name read from skill_dir.
+    if pinned_err := _pinned_guard(skill_dir.name, skill_dir):
         return _err(pinned_err)
     absorbed_target = absorbed_into.strip() if isinstance(absorbed_into, str) else ""
     if absorbed_target:
@@ -780,6 +794,8 @@ def skill_manage(
     if operations is not None:
         return _skill_manage_batch(
             operations, default_name=name or None, task_id=task_id, session_id=session_id)
+    if action != "create":
+        name = _canonical_skill_name(name)
     if (preflight := _background_review_preflight(action, name)) is not None:
         return json.dumps(preflight, ensure_ascii=False)
     # Approval gate: skills are too large to review inline, so they always stage regardless
