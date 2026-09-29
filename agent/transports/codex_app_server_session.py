@@ -455,6 +455,7 @@ class CodexAppServerSession:
         self, user_input: Any, *, turn_timeout: float = 600.0,
         notification_poll_timeout: float = 0.25, post_tool_quiet_timeout: float = 90.0,
         cyber_access_program: str | None = None,
+        effort: str | None = None,
         model: str | None = None,
     ) -> TurnResult:
         """Send a user message and block until turn/completed, bridging approvals and projecting items.
@@ -478,6 +479,10 @@ class CodexAppServerSession:
                 turn_params = {"threadId": self._thread_id, "input": input_items}
                 if cyber_access_program:
                     turn_params["cyberAccessProgram"] = cyber_access_program
+                if effort is not None:
+                    turn_params["effort"] = effort
+                    # The requested effort belongs to Hermes' selected model,
+                    # which may differ from Codex's configured default.
                     if model:
                         turn_params["model"] = model
                 ts = self._request_for(

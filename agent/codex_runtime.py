@@ -672,9 +672,13 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
         _start_codex_thread(agent)
         from agent.daybreak import requested_app_server_program
         from agent.model_metadata import strip_codex_context_variant_suffix
+        from agent.reasoning_effort import requested_effort
+        reasoning = getattr(agent, "reasoning_config", None)
+        effort = "none" if isinstance(reasoning, dict) and reasoning.get("enabled") is False else requested_effort(reasoning)
         wire_model = strip_codex_context_variant_suffix(getattr(agent, "model", None))
         turn = agent._codex_session.run_turn(
             user_input=user_message,
+            effort=effort,
             cyber_access_program=requested_app_server_program(wire_model),
             model=wire_model,
         )
