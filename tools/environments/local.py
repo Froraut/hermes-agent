@@ -460,16 +460,17 @@ def strip_launch_profile_env(env: dict, target_home: "str | Path | None" = None)
     if not target or not _is_routed_home(target):
         return env
     launch_home = get_routing_process_hermes_home()
-    from hermes_cli.config import TERMINAL_CONFIG_ENV_MAP
     # Folded strip: on Windows the env block is case-insensitive, so residue
     # stored under a variant casing is the same variable and must go too. The
     # selection folds the same way so a lowercase ``path`` in .env is still
     # recognized as a global name and left alone.
-    residue_names = {
-        key.upper() for key in
-        set(load_env_file(launch_home / ".env")) | set(TERMINAL_CONFIG_ENV_MAP.values())
-        if not _is_global_env(key.upper()) or key.upper().startswith("TERMINAL_")}
-    for key in [k for k in env if k.upper() in residue_names]:
+    residue_names = {key.upper() for key in load_env_file(launch_home / ".env")
+                     if not _is_global_env(key.upper())}
+    # Every ``TERMINAL_*`` name is launch terminal policy, whatever its source: a name list misses
+    # env-only keys (systemd ``Environment=TERMINAL_LOCAL_MEMORY_MAX_MB``) and bridge outputs outside
+    # ``TERMINAL_CONFIG_ENV_MAP`` (``TERMINAL_DOCKER_IMAGE_PINNED``, the gateway's ``TERMINAL_HOME_MODE``).
+    # A routed terminal scope never reads ambient ``TERMINAL_*`` either (``tools/terminal_scope.py``).
+    for key in [k for k in env if k.upper() in residue_names or k.upper().startswith("TERMINAL_")]:
         del env[key]
     # Authorization gates are the one residue a name list cannot see: a unit-file ``Environment=``
     # or an operator export never appears in the launch ``.env``, the secret scrub ignores

@@ -74,6 +74,16 @@ def test_worker_for_another_profile_never_inherits_the_dispatchers_credentials(
         "B's worker inherited the dispatcher's provider credential")
 
 
+def test_worker_for_another_profile_never_inherits_env_only_terminal_policy(
+        profile_b, tmp_path, monkeypatch):
+    """A dispatcher setting from systemd ``Environment=`` is in no ``.env`` and outside
+    ``TERMINAL_CONFIG_ENV_MAP``; B's worker must still start without it."""
+    monkeypatch.setenv("TERMINAL_LOCAL_MEMORY_MAX_MB", "64")
+    env = _spawn_env_for_profile_b(monkeypatch, tmp_path)
+    assert "TERMINAL_LOCAL_MEMORY_MAX_MB" not in env, (
+        "B's worker inherited the dispatcher's memory cap")
+
+
 def test_launch_profiles_own_worker_keeps_its_credentials(tmp_path, monkeypatch):
     """Control: a worker for the LAUNCH profile is not acting for another tenant."""
     launch = tmp_path / "fakehome" / ".hermes"
