@@ -4,6 +4,7 @@
 ``hermes logs list`` shows the available files.
 """
 
+import os
 import re
 import sys
 import time
@@ -230,18 +231,41 @@ def _read_last_n_lines(path: Path, n: int) -> list:
 
 
 def _follow_log(path: Path, **filters) -> None:
-    """Poll a log file for new content and print matching lines."""
+    """Poll a log file for new content and print matching lines.
+
+    Follows the path, not the first open file (``tail -F``): every Hermes log rotates by rename,
+    so a handle kept across a rollover would read the renamed backup forever. A replaced file is
+    drained, then read from its start; a file truncated in place is re-read from its start.
+    """
     keep = _LineFilter(**filters)
-    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
-        # Seek to end
-        f.seek(0, 2)
-        while True:
-            line = f.readline()
-            if not line:
-                time.sleep(0.3)
-            elif keep(line):
+
+    def _drain(f) -> None:
+        for line in iter(f.readline, ""):
+            if keep(line):
                 print(line, end="")
                 sys.stdout.flush()
+
+    f = open(path, "r", encoding="utf-8-sig", errors="replace")
+    try:
+        f.seek(0, 2)
+        while True:
+            _drain(f)
+            try:
+                st = path.stat()
+            except FileNotFoundError:  # between the rotation's rename and the new file's creation
+                time.sleep(0.3)
+                continue
+            fst = os.fstat(f.fileno())
+            if (st.st_dev, st.st_ino) != (fst.st_dev, fst.st_ino):
+                replaced, f = f, open(path, "r", encoding="utf-8-sig", errors="replace")
+                _drain(replaced)  # lines written before the rename
+                replaced.close()
+            elif st.st_size < f.tell():
+                f.seek(0)
+            else:
+                time.sleep(0.3)
+    finally:
+        f.close()
 
 
 def _size_label(size: int) -> str:
