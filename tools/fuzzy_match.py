@@ -21,6 +21,9 @@ IDENTICAL_STRINGS_ERROR = (
     "Provide the existing text to replace in old_string and the changed "
     "replacement text in new_string.")
 
+# Replace-mode remedy for an ambiguous old_string; V4A patch callers swap it (no replace_all there).
+AMBIGUOUS_MATCH_ADVICE = "Provide more context to make it unique, or use replace_all=True."
+
 UNICODE_MAP = {
     "\u201c": '"', "\u201d": '"',  # smart double quotes
     "\u2018": "'", "\u2019": "'",  # smart single quotes
@@ -371,7 +374,7 @@ def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
             locations = _format_match_locations(content, matches)
             return content, 0, None, (
                 f"Found {len(matches)} matches for old_string. "
-                f"Provide more context to make it unique, or use replace_all=True. "
+                f"{AMBIGUOUS_MATCH_ADVICE} "
                 f"Matches:\n{locations}")
         if replace_all and len(matches) > 1 and strategy_name in SIMILARITY_STRATEGIES:
             _note_edit_match(None, "ambiguous")
