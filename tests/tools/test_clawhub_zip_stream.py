@@ -58,6 +58,37 @@ def test_declared_oversize_does_not_read_body(monkeypatch):
     assert responses[0].is_closed
 
 
+def _zip_of(members):
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, text in members:
+            archive.writestr(name, text)
+    return data.getvalue()
+
+
+def _extract(monkeypatch, members):
+    data = _zip_of(members)
+    assert len(data) < clawhub.ClawHubSource.ZIP_DOWNLOAD_MAX_BYTES  # passes the wire cap
+    _mock_download(monkeypatch, data, {})
+    return clawhub.ClawHubSource()._download_zip("example", "1")
+
+
+def test_decompressed_text_never_exceeds_the_download_cap(monkeypatch):
+    # ~120 KB on the wire inflating to more than the 25 MB the download itself may carry.
+    cap, per_member = clawhub.ClawHubSource.ZIP_DOWNLOAD_MAX_BYTES, 400_000  # under the per-file skip
+    files = _extract(monkeypatch, [("SKILL.md", "# s")] + [
+        (f"references/r{i}.md", "a" * per_member) for i in range(cap // per_member + 1)])
+    assert sum(len(text) for text in files.values()) <= cap
+
+
+def test_member_count_is_bounded_and_normal_bundles_extract_intact(monkeypatch):
+    cap = clawhub.ClawHubSource.ZIP_EXTRACT_MAX_MEMBERS
+    files = _extract(monkeypatch, [("SKILL.md", "# s")] + [(f"references/r{i}.md", "x") for i in range(cap)])
+    assert len(files) <= cap
+    normal = {"SKILL.md": "# s", "references/a.md": "a"}
+    assert _extract(monkeypatch, list(normal.items())) == normal
+
+
 def test_rate_limit_exhaustion_closes_responses_and_sleeps_only_between_attempts(monkeypatch):
     responses = []
     delays = []
