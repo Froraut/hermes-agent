@@ -2195,7 +2195,16 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
         staged = Path(tmpdir) / canon
         shutil.copytree(profile_dir, staged, symlinks=True, ignore=ignore)
         for rel, content in (extra_files or {}).items():
-            target = staged.joinpath(*normalize_archive_parts(rel))
+            parts = normalize_archive_parts(rel)
+            # The staged copy keeps the profile's symlinks: writing through a staged link (the file
+            # itself or a parent dir) would mutate its target — the source profile, or wherever the
+            # link points. Replace the link so the extra file lands in staging only.
+            for depth in range(1, len(parts) + 1):
+                node = staged.joinpath(*parts[:depth])
+                if node.is_symlink():
+                    node.unlink()
+                    break
+            target = staged.joinpath(*parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         _scrub_export_secrets(staged)
