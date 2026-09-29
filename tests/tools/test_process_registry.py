@@ -1150,6 +1150,18 @@ class TestSpawnViaEnvCwd:
         assert session.completion_reason == "failed_start"
         assert session.pid is None
 
+    def test_terminal_reports_the_failed_launch_not_an_unpollable_session(self, registry, env, tmp_path, monkeypatch):
+        import tools.process_registry as process_registry_mod
+        from tools.terminal_tool_background import spawn_background_process
+
+        monkeypatch.setattr(process_registry_mod, "process_registry", registry)
+        result = json.loads(spawn_background_process(
+            command="pwd", env=env, env_type="modal", effective_task_id="t", task_id="t", session_key="t",
+            workdir=str(tmp_path / "does_not_exist"), cwd=env.cwd, effective_pty=False,
+            notify_on_complete=False, watch_patterns=None, approval_note=None, pty_disabled_reason=None))
+        assert result["exit_code"] != 0 and result["error"]
+        assert result.get("session_id") is None or registry.get(result["session_id"]) is not None
+
 
 # =========================================================================
 # Popen leak prevention
