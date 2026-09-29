@@ -829,6 +829,17 @@ export function useGatewayBoot({
           return
         }
 
+        // Main tore the primary down before notifying (backend recycle, mode
+        // apply), so every runtime id it minted is dead and the switch wipe
+        // already dropped their $sessionStates slices. Open tiles keep the
+        // shell mounted but their resume effect only re-arms once the binding
+        // is gone — drop it (and the gone-latch) exactly as attemptReconnect
+        // does after a respawn, or each tab spins forever on a 4001 runtime.
+        resetTileRuntimeBindings(
+          primaryRuntimeConnectionId(conn) ?? { liveConnectionIds: liveSecondaryConnectionIds() }
+        )
+        resetBackgroundPollingGuard()
+
         // Same shape as boot(): profile first (session scope depends on it),
         // then the independent fetches concurrently. refreshActiveProfile is
         // explicit here: the rail's $profiles still shows the PREVIOUS
