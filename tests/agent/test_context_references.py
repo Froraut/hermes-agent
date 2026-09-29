@@ -283,6 +283,23 @@ def test_utf8_source_file_inlines_whatever_its_mime_class(tmp_path: Path, name: 
     assert not result.warnings
 
 
+@pytest.mark.parametrize("tail, is_text", [
+    ("é and more text\n".encode(), True),  # a valid character split by the 4 KiB sniff boundary
+    (b"\xc3", False),  # truncated character at EOF, exactly at the boundary
+    (b"\xc3A and more text\n", False),  # the byte after the boundary is not a continuation
+])
+def test_character_straddling_the_sniff_boundary_is_validated(tmp_path: Path, tail: bytes, is_text: bool):
+    from agent.context_references import preprocess_context_references
+
+    (tmp_path / "notes.txt").write_bytes(b"a" * 4095 + tail)
+
+    result = preprocess_context_references("Inspect @file:notes.txt", cwd=tmp_path, context_length=100_000)
+
+    assert ("binary file, not inlined as text" in result.message) is not is_text
+    assert ("and more text" in result.message) is is_text
+    assert not result.warnings
+
+
 def test_non_utf8_content_is_refused_as_binary_even_under_a_text_extension(tmp_path: Path):
     from agent.context_references import preprocess_context_references
 

@@ -577,12 +577,17 @@ def _is_binary_file(path: Path) -> bool:
         return True
     with path.open("rb") as fh:  # sniff only; read_bytes() materialized the whole file
         head = fh.read(_BINARY_SNIFF_BYTES)
-    if b"\x00" in head:
-        return True
-    try:  # a multibyte character cut at the sniff boundary is not an error
-        codecs.getincrementaldecoder("utf-8")().decode(head, final=len(head) < _BINARY_SNIFF_BYTES)
-    except UnicodeDecodeError:
-        return True
+        if b"\x00" in head:
+            return True
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        try:
+            decoder.decode(head)
+            if decoder.getstate()[0]:
+                # A character straddles the sniff boundary: its (at most 3) continuation bytes decide.
+                lookahead = fh.read(3)
+                decoder.decode(lookahead, final=len(lookahead) < 3)
+        except UnicodeDecodeError:
+            return True
     return False
 
 
