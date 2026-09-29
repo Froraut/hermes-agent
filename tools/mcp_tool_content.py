@@ -5,6 +5,7 @@ embedded resources."""
 import base64
 import logging
 import mimetypes
+import re
 from typing import Any, Dict, Optional, Tuple
 from tools.ansi_strip import strip_unicode_tags
 from tools.mcp_tool_common import mcp_field
@@ -69,20 +70,31 @@ def _mcp_image_extension_for_mime_type(mime_type: str) -> str:
     return mimetypes.guess_extension(normalized) or ".png"
 
 
+class _BlockFailureNotice(str):
+    """Inline marker for a media/resource block Hermes could not materialize (malformed base64,
+    over the size cap, cache rejected or unavailable). It tells the model the block existed but is
+    not the block's content, so like the unsupported-block notice it does not count as a rendered
+    block in the structuredContent arbitration (``_render_content_blocks``)."""
+
+
 def _decode_block_b64(data, what: str, label: str, *, cap_what: Optional[str] = None,
                       cap_suffix: str = "", decode_fail: str = "") -> Tuple[Optional[bytes], str]:
     """Base64-decode one block payload: ``(bytes, "")`` or ``(None, inline_marker)``. With
     ``cap_what`` the payload is rejected on b64 length BEFORE decoding and on decoded size
     after. Decode failures warn and return ``decode_fail`` ("" = drop the block)."""
     if cap_what and len(data) > _MCP_RESOURCE_MAX_B64_CHARS:
-        return None, f"[MCP {cap_what} too large to cache: ~{len(data) * 3 // 4} bytes{cap_suffix}]"
+        return None, _BlockFailureNotice(
+            f"[MCP {cap_what} too large to cache: ~{len(data) * 3 // 4} bytes{cap_suffix}]")
     try:
-        raw_bytes = base64.b64decode(data)
+        # Strict: the lenient decoder discards non-alphabet characters, so "!!!!" became b"" and
+        # was cached as media. Whitespace goes first because line-wrapped base64 is still valid.
+        raw_bytes = base64.b64decode(re.sub(r"\s+", "", data), validate=True)
     except (TypeError, ValueError) as exc:
         logger.warning("MCP %s decode failed (%s): %s", what, label, exc)
-        return None, decode_fail
+        return None, _BlockFailureNotice(decode_fail)
     if cap_what and len(raw_bytes) > _MCP_RESOURCE_MAX_BYTES:
-        return None, f"[MCP {cap_what} too large to cache: {len(raw_bytes)} bytes{cap_suffix}]"
+        return None, _BlockFailureNotice(
+            f"[MCP {cap_what} too large to cache: {len(raw_bytes)} bytes{cap_suffix}]")
     return raw_bytes, ""
 
 
@@ -96,10 +108,10 @@ def _write_block_cache(writer: str, what: str, skip_label: str, *args,
         return getattr(_base, writer)(*args, **kwargs), ""
     except ImportError:
         logger.debug("MCP %s caching skipped — gateway.platforms.base unavailable", skip_label)
-        return None, unavailable
+        return None, _BlockFailureNotice(unavailable)
     except Exception as exc:
         logger.warning("MCP %s cache failed: %s", what, exc)
-        return None, failed
+        return None, _BlockFailureNotice(failed)
 
 
 _WAV_MIME_EXT = {"audio/wav": ".wav", "audio/x-wav": ".wav", "audio/wave": ".wav"}
