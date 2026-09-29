@@ -724,7 +724,7 @@ async def fs_write_text(payload: FsWriteText):
         raise HTTPException(status_code=400, detail="Parent directory does not exist")
 
     try:
-        atomic_write_text(target, text, preserve_mode=True)
+        atomic_write_text(target, text, preserve_mode=True, create_parent=False)
     except PermissionError:
         raise HTTPException(status_code=403, detail="File is not writable")
     except OSError as exc:
