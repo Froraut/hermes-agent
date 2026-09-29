@@ -497,7 +497,7 @@ class TestValidationPhase:
 
         result = apply_v4a_operations(ops, FakeFileOps())
         assert result.success is True, result.error
-        assert state["rewrite.py"] == "fresh = True"
+        assert state["rewrite.py"] == "fresh = True\n"
 
 
 class TestApplyDelete:
@@ -859,6 +859,41 @@ class TestMoveThenUpdateSameFile:
         result = apply_v4a_operations(ops, fo)
         assert result.success is False
         assert "already exists" in (result.error or "")
+
+
+class TestAddFileTrailingNewline:
+    """Add File ends every '+' line with a newline, as Codex's apply_patch does.
+
+    Regression: _apply_add joined the '+' lines with '\\n', so every added file
+    lacked a final newline (``while read`` loops dropped the last line).
+    """
+
+    @staticmethod
+    def _add(body):
+        ops, err = parse_v4a_patch(f"*** Begin Patch\n*** Add File: new.txt\n{body}*** End Patch")
+        assert err is None
+        fo = _DictFileOps({})
+        result = apply_v4a_operations(ops, fo)
+        assert result.success is True, getattr(result, "error", None)
+        return fo.files["new.txt"]
+
+    def test_added_file_ends_with_newline(self):
+        assert self._add("+alpha\n+beta\n+gamma\n") == "alpha\nbeta\ngamma\n"
+
+    def test_empty_last_plus_line_is_a_blank_line(self):
+        assert self._add("+alpha\n+\n") == "alpha\n\n"
+
+    def test_crlf_patch_body_writes_lf_terminators(self):
+        assert self._add("+alpha\r\n+beta\r\n") == "alpha\nbeta\n"
+
+    def test_add_without_lines_creates_an_empty_file(self):
+        assert self._add("") == ""
+
+    def test_later_update_validates_against_the_final_newline(self):
+        # The validation overlay must hold the bytes _apply_add writes: a same-patch
+        # Update whose hunk ends with a blank context line matches only with the "\n".
+        body = "+a = 1\n+b = 2\n*** Update File: new.txt\n@@\n a = 1\n-b = 2\n+b = 3\n \n"
+        assert self._add(body) == "a = 1\nb = 3\n"
 
 
 class TestCrlfPatchBody:
