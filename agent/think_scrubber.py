@@ -11,9 +11,12 @@ boundary (stream start / after a newline / whitespace-only line so far), so pros
 from __future__ import annotations
 
 import re
+import string
 from typing import Tuple
 
-__all__ = ["StreamingThinkScrubber", "THINK_TAG_NAMES", "THINK_OPEN_TAGS", "THINK_CLOSE_TAGS"]
+__all__ = [
+    "StreamingThinkScrubber", "THINK_TAG_NAMES", "THINK_OPEN_TAGS", "THINK_CLOSE_TAGS", "fold_tag_case",
+]
 
 # The one list of model reasoning tag names. Every surface that hides reasoning (this scrubber,
 # the CLI stream filter, the gateway stream filter, the final-response regex stripper) binds to
@@ -26,6 +29,17 @@ THINK_TAG_NAMES: Tuple[str, ...] = (
 )
 THINK_OPEN_TAGS: Tuple[str, ...] = tuple(f"<{name.lower()}>" for name in THINK_TAG_NAMES)
 THINK_CLOSE_TAGS: Tuple[str, ...] = tuple(f"</{name.lower()}>" for name in THINK_TAG_NAMES)
+
+_ASCII_FOLD = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def fold_tag_case(text: str) -> str:
+    """Case-fold *text* for tag search with indices that stay valid on *text*.
+
+    ``str.lower()`` is not length-preserving ('İ' U+0130 becomes two code points), so an index
+    found in ``text.lower()`` drifts past every such character when used to slice the original.
+    Tag names are ASCII or caseless CJK, so an ASCII-only fold loses no match."""
+    return text.translate(_ASCII_FOLD)
 
 
 class StreamingThinkScrubber:
@@ -133,13 +147,13 @@ class StreamingThinkScrubber:
     @staticmethod
     def _find_first_tag(buf: str, tags: Tuple[str, ...]) -> Tuple[int, int]:
         """Return (earliest_index, tag_length) over *tags* (case-insensitive), or (-1, 0)."""
-        buf_lower = buf.lower()
+        buf_lower = fold_tag_case(buf)
         hits = [(idx, len(tag)) for tag in tags if (idx := buf_lower.find(tag)) != -1]
         return min(hits) if hits else (-1, 0)
 
     def _find_earliest_closed_pair(self, buf: str):
         """(start_idx, end_idx) of the earliest ``<tag>...</tag>`` pair (non-greedy, case-insensitive), else None."""
-        buf_lower = buf.lower()
+        buf_lower = fold_tag_case(buf)
         pairs = []
         for open_tag, close_tag in zip(self._OPEN_TAGS, self._CLOSE_TAGS):
             open_idx = buf_lower.find(open_tag)
@@ -150,7 +164,7 @@ class StreamingThinkScrubber:
 
     def _find_open_at_boundary(self, buf: str, already_emitted: list[str]) -> Tuple[int, int]:
         """Return the earliest block-boundary open-tag (idx, len), or (-1, 0)."""
-        buf_lower = buf.lower()
+        buf_lower = fold_tag_case(buf)
         hits = []
         for tag in self._OPEN_TAGS:
             idx = buf_lower.find(tag)
@@ -174,7 +188,7 @@ class StreamingThinkScrubber:
     @classmethod
     def _max_partial_suffix(cls, buf: str, tags: Tuple[str, ...]) -> int:
         """Longest buf-suffix that is a strict prefix of any tag (full matches are real tags, handled elsewhere)."""
-        buf_lower = buf.lower()
+        buf_lower = fold_tag_case(buf)
         for i in range(min(len(buf_lower), cls._MAX_TAG_LEN - 1), 0, -1):
             suffix = buf_lower[-i:]
             if any(len(tag) > i and tag.startswith(suffix) for tag in tags):
