@@ -229,6 +229,7 @@ export function useComposerQueue({
           const accepted = await Promise.resolve(
             onSubmit(entry.text, {
               attachments: entry.attachments,
+              ...(entry.daybreakEnabled !== undefined ? { daybreakEnabled: entry.daybreakEnabled } : {}),
               ...(entry.displayText ? { displayText: entry.displayText } : {}),
               ...(entry.displayKind ? { displayKind: entry.displayKind } : {}),
               fromQueue: true,

@@ -2080,7 +2080,12 @@ describe('usePromptActions submit / queue drain semantics', () => {
     vi.restoreAllMocks()
   })
 
-  it('sends the Daybreak choice with a ChatGPT subscription model', async () => {
+  it.each([
+    { fromQueue: false, captured: undefined, expected: true },
+    { fromQueue: true, captured: true, expected: true },
+    { fromQueue: true, captured: false, expected: false },
+    { fromQueue: true, captured: undefined, expected: undefined }
+  ])('sends the Daybreak choice for a subscription turn: %j', async ({ fromQueue, captured, expected }) => {
     const storedId = 'stored-daybreak'
     const runtimeId = 'runtime-daybreak'
     setSessions([sessionInfo({ id: storedId, profile: 'default' })])
@@ -2100,10 +2105,65 @@ describe('usePromptActions submit / queue drain semantics', () => {
       />
     )
 
-    expect(await handle!.submitText('review this patch')).toBe(true)
+    expect(await handle!.submitText('review this patch', { fromQueue, daybreakEnabled: captured })).toBe(true)
     expect(requestGateway).toHaveBeenCalledWith(
       'prompt.submit',
-      { session_id: runtimeId, text: 'review this patch', daybreak_enabled: true },
+      {
+        session_id: runtimeId,
+        text: 'review this patch',
+        ...(fromQueue ? { queued: true } : {}),
+        ...(expected !== undefined ? { daybreak_enabled: expected } : {})
+      },
+      1_800_000
+    )
+  })
+
+  it('keeps the Daybreak choice made at Send while a new chat is created', async () => {
+    const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: null }
+    const activeSessionIdRef: MutableRefObject<string | null> = { current: null }
+    let routeToken = '/'
+    let releaseCreate!: () => void
+
+    const createGate = new Promise<void>(resolve => {
+      releaseCreate = resolve
+    })
+
+    const createBackendSessionForSend = vi.fn(async () => {
+      await createGate
+      activeSessionIdRef.current = 'runtime-daybreak-new'
+      selectedStoredSessionIdRef.current = 'stored-daybreak-new'
+      routeToken = '/stored-daybreak-new'
+
+      return 'runtime-daybreak-new'
+    })
+
+    const requestGateway = vi.fn(async () => ({}) as never)
+    $currentProvider.set('openai-codex')
+    setDaybreakSelection(null, true)
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        activeSessionId={null}
+        activeSessionIdRef={activeSessionIdRef}
+        createBackendSessionForSend={createBackendSessionForSend}
+        getRouteToken={() => routeToken}
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        selectedStoredSessionIdRef={selectedStoredSessionIdRef}
+        storedSessionId={null}
+      />
+    )
+
+    const sending = handle!.submitText('review this patch')
+    await waitFor(() => expect(createBackendSessionForSend).toHaveBeenCalledTimes(1))
+    setDaybreakSelection(null, false)
+    releaseCreate()
+
+    expect(await sending).toBe(true)
+    expect(requestGateway).toHaveBeenCalledWith(
+      'prompt.submit',
+      { session_id: 'runtime-daybreak-new', text: 'review this patch', daybreak_enabled: true },
       1_800_000
     )
   })

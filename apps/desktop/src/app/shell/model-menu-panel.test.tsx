@@ -149,6 +149,21 @@ describe('ModelMenuPanel MoA presets', () => {
 })
 
 describe('ModelMenuPanel current selection', () => {
+  it('shows Daybreak as required when the selected model is a Daybreak alias', async () => {
+    dropSessionState('runtime-1')
+    $selectedStoredSessionId.set('stored-alias')
+    $currentProvider.set('openai-codex')
+    $currentModel.set('gpt-daybreak-blue-latest')
+    getGlobalModelOptions.mockResolvedValue({
+      providers: [{ name: 'ChatGPT or Codex Subscription', slug: 'openai-codex', models: ['gpt-daybreak-blue-latest'] }]
+    })
+
+    renderPanel()
+    const toggle = screen.getByRole('switch', { name: 'Daybreak' })
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    expect(toggle.hasAttribute('disabled')).toBe(true)
+  })
+
   it('shows a working Daybreak toggle for the subscription provider only', async () => {
     dropSessionState('runtime-1')
     $selectedStoredSessionId.set('stored-1')

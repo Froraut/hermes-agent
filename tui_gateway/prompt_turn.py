@@ -795,7 +795,9 @@ def _invoke_agent(
     try:
         from agent.daybreak import daybreak_turn
         from agent.notification_presentation import notification_turn, event_presentation_muted
-        with daybreak_turn(daybreak_enabled, provider=agent.provider, api_mode=agent.api_mode), notification_turn(
+        with daybreak_turn(
+            daybreak_enabled, provider=agent.provider, api_mode=agent.api_mode, model=getattr(agent, "model", "")
+        ), notification_turn(
             agent, muted=event_presentation_muted("message.delta", sid), session_id=sid
         ):
             st.result = agent.run_conversation(run_message, **st.run_kwargs)

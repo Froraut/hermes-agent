@@ -247,6 +247,7 @@ class CodexAppServerSession:
 
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
+        self._thread_model_provider: Optional[str] = None
         self._interrupt_event = threading.Event()
         self._active_turn_id: Optional[str] = None
         self._active_turn_lock = threading.Lock()
@@ -263,7 +264,12 @@ class CodexAppServerSession:
             return self._thread_id
         if self._client is None:
             self._client = self._client_factory(codex_bin=self._codex_bin, codex_home=self._codex_home)
-            self._client.initialize(client_name="hermes", client_title="Hermes Agent", client_version=_get_hermes_version())
+            # cyberAccessProgram is an experimental per-turn field. Negotiate
+            # it once at startup so the user can enable Daybreak on later turns.
+            self._client.initialize(
+                client_name="hermes", client_title="Hermes Agent", client_version=_get_hermes_version(),
+                capabilities={"experimentalApi": True},
+            )
         # Permissions are NOT sent on thread/start: codex gates ``thread/start.permissions``
         # behind experimentalApi + a matching ``[permissions]`` table in ~/.codex/config.toml.
         # Hermes supplies the agent identity through its own system prompt; ``personality: "none"`` strips
@@ -284,6 +290,7 @@ class CodexAppServerSession:
                 params["developerInstructions"] = "\n\n".join(
                     part for part in (params.get("developerInstructions"), self._history_seed) if part)
             result = self._client.request("thread/start", params, timeout=15)
+            self._thread_model_provider = result.get("modelProvider")
             thread_id = _extract_thread_id(result)
             if not thread_id:
                 raise CodexAppServerError(
@@ -304,6 +311,7 @@ class CodexAppServerSession:
         thread_id = _extract_thread_id(result)
         if thread_id != wanted:
             raise CodexThreadResumeError(wanted, f"app-server answered with thread {str(thread_id)[:8]!r}")
+        self._thread_model_provider = result.get("modelProvider")
         return wanted
 
     def close(self) -> None:
@@ -463,6 +471,8 @@ class CodexAppServerSession:
             # be honored before launching a Codex turn.
             if self._interrupt_event.is_set():
                 result.interrupted = True
+            elif cyber_access_program and not self._check_daybreak_subscription(result):
+                pass  # The check records an actionable error; never send an ordinary turn instead.
             else:
                 input_items, result.submitted_user_text = _build_turn_input(user_input)
                 turn_params = {"threadId": self._thread_id, "input": input_items}
@@ -479,6 +489,27 @@ class CodexAppServerSession:
                     self._run_started_turn(result, ts, turn_timeout, notification_poll_timeout, post_tool_quiet_timeout)
         self._interrupt_event.clear()
         return result
+
+    def _check_daybreak_subscription(self, result: TurnResult) -> bool:
+        # Codex owns its auth/config independently of Hermes. It otherwise
+        # silently omits the program for API-key auth or a custom provider.
+        if self._thread_model_provider != "openai":
+            result.error = (
+                "Daybreak requires the OpenAI provider in Codex app-server. "
+                "Check your Codex model_provider setting."
+            )
+            return False
+        response = self._request_for(result, "account/read", {"refreshToken": False}, "Daybreak account check")
+        if response is None:
+            return False
+        account = response.get("account")
+        if not isinstance(account, dict) or account.get("type") != "chatgpt":
+            result.error = (
+                "Daybreak requires a ChatGPT subscription login in Codex app-server. "
+                "Sign in to Codex with ChatGPT."
+            )
+            return False
+        return True
 
     def _run_started_turn(
         self, result: TurnResult, ts: dict, turn_timeout: float, notification_poll_timeout: float,

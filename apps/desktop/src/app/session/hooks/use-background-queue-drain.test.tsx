@@ -11,6 +11,7 @@ import {
   MAX_AUTO_DRAIN_ATTEMPTS,
   parkQueuedPrompts
 } from '@/store/composer-queue'
+import { $daybreakSelections, setDaybreakSelection } from '@/store/daybreak'
 import { $notifications, clearNotifications } from '@/store/notifications'
 import {
   $sessions,
@@ -87,6 +88,7 @@ describe('useBackgroundQueueDrain', () => {
     vi.useRealTimers()
     $queuedPromptsBySession.set({})
     $parkedQueueSessions.set({})
+    $daybreakSelections.set({})
     $sessions.set([])
     setSessionsLoading(true)
     clearNotifications()
@@ -157,6 +159,20 @@ describe('useBackgroundQueueDrain', () => {
     } finally {
       delete (window.navigator as { locks?: unknown }).locks
     }
+  })
+
+  it('preserves Daybreak when the queue drains in the background after selection resets', async () => {
+    const runtimeMap = { current: new Map([['stored-session-a', 'rt-session-a']]) }
+    const submitText = vi.fn(async () => true)
+    setDaybreakSelection('stored-session-a', true)
+    enqueueQueuedPrompt('stored-session-a', { text: 'queued review', attachments: [] })
+    $daybreakSelections.set({})
+
+    render(<Harness runtimeMap={runtimeMap} submitText={submitText} />)
+
+    await waitFor(() => expect(submitText).toHaveBeenCalledWith(
+      'queued review', expect.objectContaining({ daybreakEnabled: true, fromQueue: true })
+    ))
   })
 
   it('leaves the selected session queue to the mounted ChatBar drainer', async () => {

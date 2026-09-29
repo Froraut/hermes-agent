@@ -10,6 +10,7 @@ import {
   MAX_AUTO_DRAIN_ATTEMPTS,
   parkQueuedPrompts
 } from '@/store/composer-queue'
+import { $daybreakSelections, setDaybreakSelection } from '@/store/daybreak'
 import { setSessionsLoading } from '@/store/session'
 
 import type { QueueEditState } from '../composer-utils'
@@ -67,6 +68,7 @@ describe('useComposerQueue park integration', () => {
     vi.restoreAllMocks()
     $queuedPromptsBySession.set({})
     $parkedQueueSessions.set({})
+    $daybreakSelections.set({})
     setSessionsLoading(true)
   })
 
@@ -134,6 +136,22 @@ describe('useComposerQueue park integration', () => {
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1))
     expect(getQueuedPrompts(SESSION_KEY)).toHaveLength(0)
+  })
+
+  it('keeps the queued Daybreak choice through a later toggle change and refuses to steer it into another turn', async () => {
+    setDaybreakSelection(SESSION_KEY, true)
+    const entry = enqueueQueuedPrompt(SESSION_KEY, { attachments: [], text: 'review with Daybreak' })!
+    setDaybreakSelection(SESSION_KEY, false)
+    const onSteer = vi.fn(async () => true)
+    const { hook, onSubmit } = renderQueueHook({ busy: true, onSteer })
+
+    expect(await hook.result.current.steerQueuedNow(entry.id)).toBe(false)
+    expect(onSteer).not.toHaveBeenCalled()
+
+    hook.rerender({ busy: false })
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(
+      'review with Daybreak', expect.objectContaining({ daybreakEnabled: true, fromQueue: true })
+    ))
   })
 
   it('holds a parked queue at the idle settle (the Stop edge)', async () => {
