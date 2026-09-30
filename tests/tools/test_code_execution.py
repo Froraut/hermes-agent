@@ -868,6 +868,50 @@ class TestHeadTailTruncation(unittest.TestCase):
         self.assertIn("HEAD", body)
         self.assertIn("TAIL", body)
 
+    _SECRET = "sk-proj-abc123xyz4567890abcdefGHIJKL"
+
+    def _assert_masked_everywhere(self, result):
+        # Checked after ANSI stripping: a reader (or terminal) rejoins an escape-split credential.
+        from tools.ansi_strip import strip_ansi
+
+        self.assertTrue(result["stdout_truncated"])
+        self.assertNotIn(self._SECRET, strip_ansi(result["output"]))
+        with open(result["stdout_spill_path"], encoding="utf-8") as f:
+            self.assertFalse(self._SECRET in strip_ansi(f.read()), "the credential persisted unmasked in the spill file")
+
+    def test_remote_spill_masks_secrets_like_the_inline_output(self):
+        """The spilled full output is redacted as the inline output is: a credential the
+        script printed never lands unmasked on the host's disk."""
+        secret = self._SECRET
+
+        class FakeEnv:
+            def get_temp_dir(self):
+                return "/tmp"
+
+            def execute(self, command, cwd=None, timeout=None):
+                if "python3 script.py" in command:
+                    return {"output": f"OPENAI_API_KEY={secret}\n" + "x" * 80_000, "returncode": 0}
+                return {"output": "OK\n", "returncode": 0}
+
+        with patch("tools.code_execution_tool._load_config", return_value={"timeout": 30, "max_tool_calls": 5}), \
+             patch("tools.code_execution_tool._get_or_create_env", return_value=(FakeEnv(), "ssh")), \
+             patch("tools.code_execution_tool._ship_file_to_remote"), \
+             patch("tools.code_execution_tool.threading.Thread", return_value=MagicMock()):
+            result = json.loads(_execute_remote("print('env')", "task-1", ["terminal"]))
+
+        self._assert_masked_everywhere(result)
+
+    def test_remote_kernel_spill_masks_secrets_like_the_inline_output(self):
+        """Also when an ANSI escape splits the credential: the inline pass strips escapes first."""
+        from tools.code_execution_tool import _finish_remote_kernel_result
+
+        split = f"{self._SECRET[:1]}\x1b[31m{self._SECRET[1:]}"
+        result = json.loads(_finish_remote_kernel_result(
+            {"status": "error", "stdout": "x" * 80_000, "stderr": f"token={split}\n", "traceback": ""},
+            timeout=30, exec_start=time.monotonic()))
+
+        self._assert_masked_everywhere(result)
+
 
 class TestRpcTokenAuthorization(unittest.TestCase):
     """The per-session RPC token must gate socket dispatch (fail-closed).

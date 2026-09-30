@@ -774,6 +774,22 @@ def _await_cell(kernel: SessionKernel, timeout: int, is_interrupted) -> Tuple[st
         return "success", payload
 
 
+def _redacted_respill(kernel: SessionKernel, runner_spill: str) -> str:
+    """Move the runner's raw spill (the runner runs the user's interpreter and cannot redact)
+    through the host's redacting write site; return the copy's path, "" when there is none. Only
+    a file in this kernel's own staging dir is read and removed."""
+    from tools.code_execution_tool import _spill_full_stdout
+    path = Path(runner_spill)
+    if not kernel.tmpdir or path.parent != Path(kernel.tmpdir):
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        path.unlink()
+    except OSError:
+        return ""
+    return _spill_full_stdout(text) or ""
+
+
 def _with_stderr(stdout_text: str, stderr_text: str) -> str:
     return stdout_text + "\n--- stderr ---\n" + stderr_text
 
@@ -808,8 +824,10 @@ def _cell_result(kernel: SessionKernel, key: Tuple, status: str, payload: Dict[s
     if tool_errors:
         result["tool_errors"] = tool_errors
     # Cell-side spill (runner clipped before replying): same read_file recipe as the host-side spill.
-    cell_spill = str(payload.get("stdout_spill_path", "") or "")
-    if cell_spill and payload.get("stdout_clipped"):
+    cell_spill = str(payload.get("stdout_spill_path", "") or "") if payload.get("stdout_clipped") else ""
+    if cell_spill:
+        cell_spill = _redacted_respill(kernel, cell_spill)
+    if cell_spill:
         result["stdout_spill_path"] = cell_spill
         result["warning"] = (
             f"Cell stdout exceeded the inline cap; head shown. FULL output saved to {cell_spill} "
