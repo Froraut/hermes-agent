@@ -4230,7 +4230,8 @@ class BasePlatformAdapter(ABC):
             error = str(getattr(result, "error", "") or "")
             if self._is_partial_delivery(result):
                 # Before the row turns 'failed': a sweep that claims it must already see the remainder.
-                remember_partial_send(obligation_id, result, reply_to=reply_to, metadata=metadata)
+                remember_partial_send(
+                    obligation_id, result, reply_to=reply_to, metadata=metadata, adapter=delivery_adapter)
             await asyncio.to_thread(mark_failed, obligation_id, error)
             if is_reconnect_only(error):
                 redeliver = getattr(

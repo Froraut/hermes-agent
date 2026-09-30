@@ -332,3 +332,82 @@ async def test_yuanbao_resumed_tail_keeps_the_per_chat_order(monkeypatch):
 
     assert result.success
     assert "interjection" in transport.accepted[-1], "another send landed inside the resumed tail"
+
+
+def _ledger_runner(platform, adapter):
+    """A bare ``GatewayRunner`` whose registry serves ``adapter``, enough for the ledger's redelivery."""
+    from unittest.mock import MagicMock
+
+    from gateway.run import GatewayRunner
+    runner = object.__new__(GatewayRunner)
+    runner.adapters = {platform: adapter}
+    runner._profile_adapters = {}
+    runner.session_store = None
+    runner._async_session_store = MagicMock(_store=None, clear_resume_pending=AsyncMock())
+    adapter.gateway_runner = runner
+    return runner
+
+
+async def _send_final_ledgered(adapter, chat_id, content):
+    from gateway.platforms.event import MessageEvent
+    from gateway.session import SessionSource
+    source = SessionSource(platform=adapter.platform, chat_id=chat_id, chat_type="dm", user_id="u1")
+    return await adapter.send_final_ledgered(
+        MessageEvent(text="write it up", source=source, message_id="m1"),
+        f"agent:main:{adapter.platform.value}:dm:{chat_id}", content, {}, reply_to=None)
+
+
+@pytest.mark.asyncio
+async def test_ledger_redelivery_of_a_partial_split_final_sends_only_the_tail(monkeypatch):
+    """A split final whose retries all fail after chunk 1 landed goes to the delivery ledger. Its
+    redelivery resumes at the failed chunk through the same ``resume``, so every token reaches the
+    chat exactly once."""
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    transport = _Transport(fail_times=3)  # the send and both inline retries are refused at chunk 2
+    adapter, chat_id, chunk_limit = _discord(monkeypatch, transport)
+    runner = _ledger_runner(Platform.DISCORD, adapter)
+    tokens = [f"item{i:05d}" for i in range(chunk_limit // 4)]
+
+    result, _ = await _send_final_ledgered(adapter, chat_id, " ".join(tokens))
+    assert result.success is False
+    assert await runner._redeliver_failed_obligations_for_platform(Platform.DISCORD) == 1
+
+    assert [token for body in transport.accepted for token in _TOKEN.findall(body)] == tokens
+
+
+@pytest.mark.asyncio
+async def test_ledger_redelivery_after_a_reconnect_does_not_resume_through_the_replaced_adapter(monkeypatch):
+    """The ``resume`` a partial split send carries is bound to the adapter that sent the head. When a
+    reconnect has replaced that adapter before the ledger redelivers, the replacement sends the whole
+    reply; nothing goes out through the old adapter's dead connection."""
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    old_transport = _Transport(fail_times=10**6)  # the old connection accepts chunk 1, then nothing
+    old, chat_id, chunk_limit = _discord(monkeypatch, old_transport)
+    new_transport = _Transport(fail_times=0)
+    new, _, _ = _discord(monkeypatch, new_transport)
+    runner = _ledger_runner(Platform.DISCORD, old)
+    new.gateway_runner = runner
+    sent_after_reconnect = []
+    deliver = old_transport.deliver
+
+    def deliver_on_old(body):
+        if runner.adapters[Platform.DISCORD] is new:
+            sent_after_reconnect.append(body)
+        return deliver(body)
+
+    old_transport.deliver = deliver_on_old
+    finalize = type(old)._finalize_delivery_obligation
+
+    async def reconnect_then_finalize(self, *args, **kwargs):
+        runner.adapters[Platform.DISCORD] = new  # the reconnect installed the replacement meanwhile
+        return await finalize(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(old), "_finalize_delivery_obligation", reconnect_then_finalize)
+    tokens = [f"item{i:05d}" for i in range(chunk_limit // 4)]
+
+    # send_path_degraded with a replacement live: finalizing runs the replacement's redelivery sweep.
+    result, sent_by = await _send_final_ledgered(old, chat_id, " ".join(tokens))
+
+    assert sent_by is old and result.success is False
+    assert not sent_after_reconnect, "the redelivery resumed through the replaced adapter"
+    assert [token for body in new_transport.accepted for token in _TOKEN.findall(body)] == tokens

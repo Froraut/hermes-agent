@@ -475,14 +475,17 @@ class GatewayStartupMixin:
         result = None
         partial = take_partial_send(row["obligation_id"])
         if partial is not None:
-            previous, reply_to, metadata = partial
-            result = await adapter._resume_partial_send(
-                row["chat_id"], previous, reply_to=reply_to, metadata=metadata)
+            previous, reply_to, metadata, sender = partial
+            # Only the adapter that sent the head can resume it: a ``send_split`` resume is bound to that
+            # adapter's connection. After a reconnect replaced it, the replacement sends the whole reply.
+            if sender is adapter:
+                result = await adapter._resume_partial_send(
+                    row["chat_id"], previous, reply_to=reply_to, metadata=metadata)
         if result is None:
             reply_to, metadata = None, ({"thread_id": row["thread_id"]} if row.get("thread_id") else None)
             result = await adapter.send(chat_id=row["chat_id"], content=content, metadata=metadata)
         if not getattr(result, "success", False) and BasePlatformAdapter._is_partial_delivery(result):
-            remember_partial_send(row["obligation_id"], result, reply_to=reply_to, metadata=metadata)
+            remember_partial_send(row["obligation_id"], result, reply_to=reply_to, metadata=metadata, adapter=adapter)
         return result
 
     async def _obligation_adapter(self, row: dict):

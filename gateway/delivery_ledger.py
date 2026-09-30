@@ -321,24 +321,26 @@ def mark_failed(obligation_id: str, error: str = "") -> None:
 
 
 # A split reply refused after its first chunks landed comes back as a partial delivery whose result carries
-# what the adapter needs to send only the rest (``_resume_partial_send``: Telegram's undelivered chunks).
-# That cannot be persisted, so it is kept here for this process: a redelivery of the row resumes from it
-# instead of re-sending the whole reply and duplicating the head the user already has. After a restart the
-# row falls back to the marked full resend.
+# what the adapter needs to send only the rest (``_resume_partial_send``: Telegram's undelivered chunks, or the
+# ``resume`` of ``base_split_send.send_split``). That cannot be persisted, so it is kept here for this process:
+# a redelivery of the row resumes from it instead of re-sending the whole reply and duplicating the head the
+# user already has. The remainder belongs to the adapter that sent the head (a ``send_split`` resume is bound
+# to it), so that adapter is kept too. After a restart the row falls back to the marked full resend.
 _PARTIAL_SENDS: Dict[str, tuple] = {}
 
 
-def remember_partial_send(obligation_id: str, result: Any, *, reply_to: Optional[str], metadata: Any) -> None:
-    """Keep a partly delivered send (with the ``reply_to``/``metadata`` it went out with) for the row's
-    next redelivery; bounded like the ledger itself."""
+def remember_partial_send(
+        obligation_id: str, result: Any, *, reply_to: Optional[str], metadata: Any, adapter: Any) -> None:
+    """Keep a partly delivered send (with the ``reply_to``/``metadata`` it went out with and the ``adapter``
+    that sent it) for the row's next redelivery; bounded like the ledger itself."""
     _PARTIAL_SENDS.pop(obligation_id, None)
-    _PARTIAL_SENDS[obligation_id] = (result, reply_to, metadata)
+    _PARTIAL_SENDS[obligation_id] = (result, reply_to, metadata, adapter)
     while len(_PARTIAL_SENDS) > _MAX_ROWS:
         _PARTIAL_SENDS.pop(next(iter(_PARTIAL_SENDS)))
 
 
 def take_partial_send(obligation_id: str) -> Optional[tuple]:
-    """``(result, reply_to, metadata)`` of the row's remembered partial send, removed; else ``None``."""
+    """``(result, reply_to, metadata, adapter)`` of the row's remembered partial send, removed; else ``None``."""
     return _PARTIAL_SENDS.pop(obligation_id, None)
 
 
