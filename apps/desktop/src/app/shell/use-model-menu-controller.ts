@@ -153,26 +153,9 @@ export function useModelMenuController({
         (model === optionsModel && (daybreakSelectionFor(storedSessionId, activeSessionId) ?? false))
     }),
     setDaybreak: (enabled, row) => {
-      const key = `${hostScope}::${activeSessionId ?? 'draft'}::daybreak-intent`
-      const revision = nextEdit(key)
-      if (row.isActive) {
-        setDaybreakSelection(storedSessionId, enabled, activeSessionId)
-      } else {
-        void Promise.resolve(
-          onSelectModel({ model: row.model, provider: row.provider, sessionId: activeSessionId })
-        ).then(selected => {
-          if (
-            selected !== false &&
-            optionEdits.get(key) === revision &&
-            latestHostScope.current === hostScope &&
-            view.$runtimeId.get() === activeSessionId &&
-            view.$model.get() === row.model &&
-            view.$provider.get() === row.provider
-          ) {
-            setDaybreakSelection(storedSessionId, enabled, activeSessionId)
-          }
-        })
-      }
+      // Daybreak belongs to this conversation. An inactive row can advertise
+      // availability, but must be selected through the normal model/preset path.
+      if (row.isActive) setDaybreakSelection(storedSessionId, enabled, activeSessionId)
     },
     // Selecting a model row restores that model's remembered preset onto the
     // session (effort/fast). applyModelPreset owns the batched gateway write.

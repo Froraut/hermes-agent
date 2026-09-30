@@ -166,11 +166,11 @@ export function ModelOptionsContent({
       <DropdownMenuLabel className={dropdownMenuSectionLabel}>{copy.options}</DropdownMenuLabel>
       {daybreak ? (
         <DropdownMenuItem className={dropdownMenuRow} onSelect={event => event.preventDefault()}>
-          Daybreak
+          <span title={!isActive ? 'Select this model to change Daybreak for this chat.' : undefined}>Daybreak</span>
           <Switch
             aria-label="Daybreak"
             checked={daybreak.checked}
-            disabled={daybreak.required}
+            disabled={daybreak.required || !isActive}
             className="ml-auto"
             onCheckedChange={daybreak.onChange}
             size="xs"
