@@ -143,10 +143,11 @@ _fake_ip_resolved, _cached_fake_ip_ranges = False, ()
 
 def _global_allow_private_urls() -> bool:
     """True when the user has opted out of private-IP blocking. Priority: ``HERMES_ALLOW_PRIVATE_URLS``
-    env, an explicitly set ``security.allow_private_urls`` (``false`` included), then legacy
-    ``browser.allow_private_urls`` only while the security key is unset. Profile-scoped turns
-    (``get_hermes_home_override()`` set) bypass the process-global cache — a multiplex gateway serves
-    several profiles in one process; the first profile's opt-out must not disable blocking for later ones."""
+    env, then ``security.allow_private_urls``. ``browser.allow_private_urls`` is a browser-tool
+    setting and does not lift this guard (config v50 moved opt-outs that relied on it to the security
+    key). Profile-scoped turns (``get_hermes_home_override()`` set) bypass the process-global cache —
+    a multiplex gateway serves several profiles in one process; the first profile's opt-out must not
+    disable blocking for later ones."""
     global _allow_private_resolved, _cached_allow_private
     if get_hermes_home_override() is not None:
         return _resolve_allow_private_urls()
@@ -165,31 +166,14 @@ def _resolve_allow_private_urls() -> bool:
     try:
         from hermes_cli.config import read_raw_config
         cfg = read_raw_config()
-        # The security key is the global switch: once set, it decides, so enabling private URLs
-        # for the browser cannot override an operator's explicit ``security.allow_private_urls: false``.
+        # Only the security key is global. ``browser.allow_private_urls`` is read by the browser tool
+        # for its own navigation and must not lift the guard for web, vision and media fetches.
         security = cfg.get("security", {})
-        if isinstance(security, dict) and security.get("allow_private_urls") is not None:
+        if isinstance(security, dict):
             return is_truthy_value(security.get("allow_private_urls"), default=False)
-        browser = cfg.get("browser", {})  # legacy fallback, kept for configs that predate the security key
-        if isinstance(browser, dict) and is_truthy_value(browser.get("allow_private_urls"), default=False):
-            _warn_legacy_browser_opt_out()
-            return True
     except Exception:
         pass  # config unavailable (tests, early import) — keep default
     return False
-
-
-_legacy_browser_opt_out_warned = False
-
-
-def _warn_legacy_browser_opt_out() -> None:
-    global _legacy_browser_opt_out_warned
-    if not _legacy_browser_opt_out_warned:
-        _legacy_browser_opt_out_warned = True
-        logger.warning(
-            "browser.allow_private_urls is disabling private-address blocking for all URL tools because "
-            "security.allow_private_urls is unset; set security.allow_private_urls explicitly (false keeps "
-            "web, vision and media fetches blocked). This legacy fallback is deprecated.")
 
 
 def _reset_allow_private_cache() -> None:

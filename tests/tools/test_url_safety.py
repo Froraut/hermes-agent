@@ -308,16 +308,31 @@ class TestGlobalAllowPrivateUrls:
         with patch("hermes_cli.config.read_raw_config", return_value=cfg):
             assert _global_allow_private_urls() is True
 
-    def test_legacy_browser_key_applies_while_security_key_unset(self, monkeypatch, caplog):
-        """Configs that only set the legacy browser key keep working, with a warning."""
-        import tools.url_safety as url_safety
-
+    @pytest.mark.parametrize(
+        "cfg",
+        [
+            {"browser": {"allow_private_urls": True}},
+            {"security": {"redact_secrets": True}, "browser": {"allow_private_urls": True}},
+            {"security": {"allow_private_urls": None}, "browser": {"allow_private_urls": True}},
+        ],
+        ids=["no-security-section", "security-key-unset", "security-key-null"],
+    )
+    def test_browser_key_alone_does_not_lift_the_global_guard(self, monkeypatch, cfg):
+        """browser.allow_private_urls is a browser-tool setting; config v50 moved the opt-outs that relied on it."""
         monkeypatch.delenv("HERMES_ALLOW_PRIVATE_URLS", raising=False)
-        monkeypatch.setattr(url_safety, "_legacy_browser_opt_out_warned", False)
-        cfg = {"security": {"redact_secrets": True}, "browser": {"allow_private_urls": True}}
-        with patch("hermes_cli.config.read_raw_config", return_value=cfg), caplog.at_level("WARNING"):
-            assert _global_allow_private_urls() is True
-        assert "security.allow_private_urls is unset" in caplog.text
+        with patch("hermes_cli.config.read_raw_config", return_value=cfg):
+            assert _global_allow_private_urls() is False
+            assert is_safe_url("http://192.168.1.1/") is False
+
+    @pytest.mark.parametrize(
+        "env, security, expected",
+        [("true", False, True), ("1", None, True), ("false", True, False), ("0", True, False)],
+    )
+    def test_env_overrides_config(self, monkeypatch, env, security, expected):
+        monkeypatch.setenv("HERMES_ALLOW_PRIVATE_URLS", env)
+        cfg = {"security": {"allow_private_urls": security}, "browser": {"allow_private_urls": True}}
+        with patch("hermes_cli.config.read_raw_config", return_value=cfg):
+            assert _global_allow_private_urls() is expected
 
 
     @pytest.mark.parametrize(

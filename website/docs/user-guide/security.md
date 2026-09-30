@@ -778,7 +778,7 @@ When on, web tools, the browser, vision URL fetches, and gateway media downloads
 
 The host-substring guard (which blocks lookalike Unicode domain tricks even when the underlying IP is public) stays on regardless of this setting.
 
-An explicit `security.allow_private_urls` value always decides, `false` included. The older `browser.allow_private_urls` key only stands in for it while `security.allow_private_urls` is unset, and Hermes logs a warning when it does.
+Only `security.allow_private_urls` controls this guard (the `HERMES_ALLOW_PRIVATE_URLS` environment variable overrides it). `browser.allow_private_urls` applies to the browser tool alone. Earlier releases let the browser key lift this guard too while `security.allow_private_urls` was unset. When you update, a config that relied on that gets `security.allow_private_urls: true` written explicitly, so it keeps working and the setting shows up on the Safety settings page. Set it to `false` to block private addresses for web, vision and media fetches again.
 
 #### Local proxy fake-ip ranges
 
