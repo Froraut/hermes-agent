@@ -293,6 +293,32 @@ class TestGlobalAllowPrivateUrls:
         with patch("hermes_cli.config.read_raw_config", return_value=cfg):
             assert _global_allow_private_urls() is False
 
+    @pytest.mark.parametrize("url", ["http://192.168.1.1/", "http://127.0.0.1:8080/admin"])
+    def test_explicit_security_false_wins_over_browser_key(self, monkeypatch, url):
+        """Enabling private URLs for the browser must not lift the global guard the operator set off."""
+        monkeypatch.delenv("HERMES_ALLOW_PRIVATE_URLS", raising=False)
+        cfg = {"security": {"allow_private_urls": False}, "browser": {"allow_private_urls": True}}
+        with patch("hermes_cli.config.read_raw_config", return_value=cfg):
+            assert _global_allow_private_urls() is False
+            assert is_safe_url(url) is False
+
+    def test_explicit_security_true_wins_over_browser_false(self, monkeypatch):
+        monkeypatch.delenv("HERMES_ALLOW_PRIVATE_URLS", raising=False)
+        cfg = {"security": {"allow_private_urls": True}, "browser": {"allow_private_urls": False}}
+        with patch("hermes_cli.config.read_raw_config", return_value=cfg):
+            assert _global_allow_private_urls() is True
+
+    def test_legacy_browser_key_applies_while_security_key_unset(self, monkeypatch, caplog):
+        """Configs that only set the legacy browser key keep working, with a warning."""
+        import tools.url_safety as url_safety
+
+        monkeypatch.delenv("HERMES_ALLOW_PRIVATE_URLS", raising=False)
+        monkeypatch.setattr(url_safety, "_legacy_browser_opt_out_warned", False)
+        cfg = {"security": {"redact_secrets": True}, "browser": {"allow_private_urls": True}}
+        with patch("hermes_cli.config.read_raw_config", return_value=cfg), caplog.at_level("WARNING"):
+            assert _global_allow_private_urls() is True
+        assert "security.allow_private_urls is unset" in caplog.text
+
 
     @pytest.mark.parametrize(
         "profile_order",

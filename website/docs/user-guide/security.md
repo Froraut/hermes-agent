@@ -778,6 +778,8 @@ When on, web tools, the browser, vision URL fetches, and gateway media downloads
 
 The host-substring guard (which blocks lookalike Unicode domain tricks even when the underlying IP is public) stays on regardless of this setting.
 
+An explicit `security.allow_private_urls` value always decides, `false` included. The older `browser.allow_private_urls` key only stands in for it while `security.allow_private_urls` is unset, and Hermes logs a warning when it does.
+
 #### Local proxy fake-ip ranges
 
 A TUN proxy in fake-ip mode (Mihomo/Clash `fake-ip`, Surge enhanced mode) answers DNS with an
