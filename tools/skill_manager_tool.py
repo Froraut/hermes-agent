@@ -343,7 +343,7 @@ def _locate_for_write(name: str, action: str, not_found_suffix: str = "", *,
         return None, _err(_skill_not_found_error(name, not_found_suffix))
     skill_dir = existing["path"]
     guard = ((org_guard and _org_mirror_write_guard(name, skill_dir, action))
-             or _background_review_write_guard(name, skill_dir, action))
+             or _background_review_write_guard(skill_dir.name, skill_dir, action))
     return (None, guard) if guard else (skill_dir, None)
 
 
@@ -525,7 +525,8 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
     skill_dir, guard = _locate_for_write(name, "delete")
     if guard := guard or _curator_consolidation_delete_guard(name, absorbed_into):
         return guard
-    if pinned_err := _pinned_guard(name):
+    # Pins and ESSENTIAL_SKILLS key on the bare name, whatever spelling reached the directory.
+    if pinned_err := _pinned_guard(skill_dir.name):
         return _err(pinned_err)
     absorbed_target = absorbed_into.strip() if isinstance(absorbed_into, str) else ""
     if absorbed_target:
@@ -727,7 +728,9 @@ _ACTION_HANDLERS = {
 def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
                     session_id, ledger_before) -> None:
     """Best-effort post-mutation side effects (never break the tool): ledger, prompt-cache
-    clear, curator telemetry, debounced sync push."""
+    clear, curator telemetry, debounced sync push. ``name`` is the locator the caller used; the
+    records key on the skill's own name, so ``research/my-skill`` and ``my-skill`` share one."""
+    skill = Path(name).name
     with suppress(Exception):
         from tools import skill_ledger as _ledger
         _post = _find_skill(name)
@@ -736,7 +739,7 @@ def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
                      if action == "delete" else {})
         _evidence.update({k: v for k, v in (("session_id", session_id), ("file_path", file_path)) if v})
         _ledger.record_mutation(
-            action, name, before=ledger_before if ledger_before is not None else [],
+            action, skill, before=ledger_before if ledger_before is not None else [],
             after_root=_post["path"] if _post else None, evidence=_evidence)
     with suppress(Exception):
         from agent.prompt_builder import clear_skills_system_prompt_cache
@@ -756,12 +759,12 @@ def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
             record_created(name, agent_created=is_background_review(),
                            task_id=task_id, session_id=session_id)
         elif action in {"patch", "edit", "write_file", "remove_file"}:
-            bump_patch(name, action=action, task_id=task_id, session_id=session_id)
+            bump_patch(skill, action=action, task_id=task_id, session_id=session_id)
         elif action == "delete" and not result.get("_archived"):
-            forget(name)
+            forget(skill)
     # Only AFTER the write gate passed (staged writes returned early): never push un-reviewed content.
     with suppress(Exception):
-        _maybe_debounced_sync_push(name)
+        _maybe_debounced_sync_push(skill)
 
 
 def skill_manage(

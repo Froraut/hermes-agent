@@ -1031,6 +1031,78 @@ class TestPinnedGuard:
         assert result["success"] is True
 
 
+class TestCategorizedSpelling:
+    """``research/my-skill`` names the same skill as ``my-skill`` (upstream #120528): the guards and
+    records keyed on the name see through the spelling. Real skills dir, real pin store."""
+
+    @staticmethod
+    def _make(rel: str) -> Path:
+        from hermes_constants import get_hermes_home
+        skill_dir = get_hermes_home() / "skills" / rel
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(VALID_SKILL_CONTENT.replace("test-skill", skill_dir.name))
+        return skill_dir
+
+    @pytest.mark.parametrize("shape", ["flat", "operations"])
+    @pytest.mark.parametrize("categorized", [False, True], ids=["bare", "categorized"])
+    @pytest.mark.parametrize("rel, refusal", [
+        ("research/my-skill", "pinned"), ("autonomous-ai-agents/hermes-agent", "essential")])
+    def test_delete_guard_holds_for_every_spelling(self, rel, refusal, categorized, shape):
+        from tools import skill_usage
+        skill_dir = self._make(rel)
+        assert skill_usage.set_pinned("my-skill", True)
+        name = rel if categorized else skill_dir.name
+        op = {"action": "delete", "name": name}
+
+        raw = skill_manage(**op) if shape == "flat" else skill_manage(action="", name="", operations=[op])
+
+        result = json.loads(raw)
+        assert result["success"] is False and refusal in result["error"], result
+        assert (skill_dir / "SKILL.md").exists()
+
+    def test_other_mutations_treat_both_spellings_as_one_skill(self):
+        from tools import skill_usage
+        skill_dir = self._make("research/free-skill")
+
+        patched = json.loads(skill_manage(action="patch", name="research/free-skill",
+                                          old_string="Do the thing.", new_string="Do it."))
+        clobber = json.loads(skill_manage(action="", name="", operations=[
+            {"action": "write_file", "name": "free-skill", "file_path": "references/a.md", "file_content": "one"},
+            {"action": "write_file", "name": "research/free-skill", "file_path": "references/a.md",
+             "file_content": "two"}]))
+
+        assert patched["success"] is True, patched
+        usage = skill_usage.load_usage()
+        assert "research/free-skill" not in usage and usage["free-skill"]["patch_count"] == 1
+        # The batch clobber guard sees one file of one skill, so the second write cannot discard the first.
+        assert clobber["success"] is False and "already touched" in clobber["error"], clobber
+        assert not (skill_dir / "references" / "a.md").exists()
+
+    @pytest.mark.parametrize("named_index", [0, 1], ids=["bare-name-target", "other-sibling"])
+    def test_staged_write_replays_on_the_skill_its_locator_named(self, named_index):
+        """The categorized path is the locator (it disambiguates same-name skills); only guard
+        and record keys drop the category. A staged write keeps it, so if the named skill is gone
+        by approval time, a same-name sibling in another category never takes the write."""
+        import shutil
+        import hermes_cli.config as cfg
+        from hermes_cli.write_approval_commands import handle_pending_subcommand
+        from tools import write_approval as wa
+        dirs = [self._make("research/foo"), self._make("devops/foo")]
+        config = cfg.load_config()
+        config.setdefault("skills", {})["write_approval"] = True
+        cfg.save_config(config)
+        bare_target = _find_skill("foo")["path"]
+        named = sorted(dirs, key=lambda d: d != bare_target)[named_index]
+        sibling = next(d for d in dirs if d != named)
+
+        staged = json.loads(skill_manage(action="delete", name=f"{named.parent.name}/foo"))
+        assert staged.get("staged"), staged
+        shutil.rmtree(named)
+        handle_pending_subcommand(wa.SKILLS, ["approve", staged["pending_id"]])
+
+        assert (sibling / "SKILL.md").exists()
+
+
 # ---------------------------------------------------------------------------
 # _delete_skill — recursive-delete safety (port of Kilo Code #11240)
 # ---------------------------------------------------------------------------

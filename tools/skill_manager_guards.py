@@ -235,7 +235,7 @@ def _background_review_preflight(action: str, name: str) -> Optional[Dict[str, A
         return None
     from tools import skill_manager_tool as _smt
     existing = _smt._find_skill(name)
-    return _background_review_write_guard(name, existing["path"], action) if existing else None
+    return _background_review_write_guard(existing["path"].name, existing["path"], action) if existing else None
 
 
 def _curator_consolidation_delete_guard(

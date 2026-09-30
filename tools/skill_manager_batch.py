@@ -124,7 +124,7 @@ def _validate_batch_ops(operations, default_name, tool_error):
         fp = (op.get("file_path") or "").strip()
         target = ("SKILL.md" if (act == "create" or full_rewrite or not fp)
                   else posixpath.normpath(fp.lstrip("/")))
-        key = (nm, target)
+        key = (Path(nm).name, target)  # ``research/x`` and ``x`` are one skill (lock keys agree)
         if (act in ("create", "write_file", "remove_file") or full_rewrite) and key in touched_files:
             return fail(i, f": {act} on '{target}' of skill '{nm}' — an earlier op in this "
                            f"batch already touched that file, and this op would silently discard its work. "
