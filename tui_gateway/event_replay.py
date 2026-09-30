@@ -7,10 +7,9 @@ event frames; Ink ignores unknown keys); one lock guards counters + buffers, and
 serializes per-transport writes so stamping cannot reorder frames; memory bound =
 _REPLAY_BUFFER_MAX events AND _REPLAY_BUFFER_BYTES_MAX serialized bytes per session,
 _REPLAY_PROCESS_BYTES_MAX bytes across at most _REPLAY_SESSIONS_MAX sessions, the least recently
-active evicted first. Evicted or never-retained (oversized) frames leave a truncation watermark so a
-reconnecting client refetches instead of trusting a replay with holes. A session's seq counter and
-watermark (two ints) outlive its ring for the process lifetime: an evicted session that is still
-live continues its numbering, so a client's high watermark never meets a restarted seq=1.
+active evicted first (their seq/truncation counters are retained so a revisited session stays
+monotonic within the epoch, #100122). Evicted or never-retained (oversized) frames leave a
+truncation watermark so a reconnecting client refetches instead of trusting a replay with holes.
 """
 
 from __future__ import annotations
@@ -76,8 +75,19 @@ def _stamp_event(obj: dict) -> None:
             while len(_replay_buffers) > _REPLAY_SESSIONS_MAX:
                 idle_sid, _idle_buf = _replay_buffers.popitem(last=False)
                 _replay_total_bytes -= _replay_buffer_bytes.pop(idle_sid, 0)
-                # Everything it ever stamped is gone: a reconnect below this refetches.
-                _replay_evicted_through[idle_sid] = _replay_next_seq[idle_sid]
+                # Eviction drops the ring, not the session's seq numbering
+                # (#100122). Keep the counter so a revisited session continues
+                # from its high seq instead of restarting at 1 under clients'
+                # still-held watermarks (a reset seq is invisible to
+                # dispatchIfNewer — replay AND live frames silently vanish).
+                # Retain the truncation watermark too, raised to the latest
+                # stamped seq: the whole retained ring is gone, so a client
+                # holding any older watermark has a gap and must refetch
+                # history instead of trusting the new tail. Both counters are
+                # one int per session id seen this process (bounded by distinct
+                # sessions, not by traffic).
+                _replay_evicted_through[idle_sid] = max(
+                    _replay_evicted_through.get(idle_sid, 0), _replay_next_seq.get(idle_sid, 0))
         else:
             _replay_buffers.move_to_end(sid)
         if size > _REPLAY_BUFFER_BYTES_MAX or size > _REPLAY_PROCESS_BYTES_MAX:
