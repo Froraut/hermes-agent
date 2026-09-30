@@ -2,13 +2,14 @@
 
 Lazy OpenAI SDK import (``_OpenAIProxy`` keeps ``isinstance`` and
 ``patch("agent.process_bootstrap.OpenAI")`` working), crash-resistant stdio
-(``_SafeWriter``), env-only HTTP proxy resolution, and the httpcore backend that
-runs sync httpx connects through the process-wide Happy Eyeballs racer
-(``hermes_bootstrap``).
+(``_SafeWriter``), env-only HTTP proxy resolution, and the httpcore backends that
+run sync httpx connects through the process-wide Happy Eyeballs racer
+(``hermes_bootstrap``) and put TCP keepalive on provider sockets.
 """
 
 from __future__ import annotations
 
+import os
 import socket
 import sys
 import threading
@@ -33,6 +34,84 @@ _SHARED_TRANSPORTS_MAX = 32
 # the socket-abort walker in agent_runtime_helpers uses it to find only the
 # owning client's in-flight connections on a shared pool.
 HERMES_TRANSPORT_OWNER_EXT = "hermes_transport_owner"
+
+# TCP keepalive on provider sockets: first probe after this many idle seconds
+# (HERMES_TCP_KEEPALIVE_SECONDS, 0 disables), then every interval; the socket
+# fails after that many unanswered probes.
+_TCP_KEEPALIVE_IDLE_DEFAULT = 30
+_TCP_KEEPALIVE_INTERVAL_SECONDS = 10
+_TCP_KEEPALIVE_PROBES = 3
+
+
+def _tcp_keepalive_idle_seconds() -> int:
+    raw = os.environ.get("HERMES_TCP_KEEPALIVE_SECONDS", "").strip()
+    try:
+        return max(int(float(raw)), 0) if raw else _TCP_KEEPALIVE_IDLE_DEFAULT
+    except ValueError:
+        return _TCP_KEEPALIVE_IDLE_DEFAULT
+
+
+def enable_tcp_keepalive(sock) -> bool:
+    """Best-effort TCP keepalive so a silently dead provider connection fails its read.
+
+    A VPN/tunnel restart or a network switch can leave a streaming socket ESTABLISHED with
+    nothing ever arriving again: the new tunnel has no state for the flow, and a client that
+    is only reading never sends a packet that would draw a reset. The request then waited for
+    the provider-silence watchdogs (240 s for chat streams, up to 300 s for high-effort Codex)
+    before reconnecting. Keepalive probes are answered by any live peer or local proxy, so a
+    healthy connection that is silent while the model thinks is unaffected; a dead one errors
+    within idle + interval * probes seconds and the normal stream retry reconnects. Options
+    the platform lacks or rejects are skipped. Returns whether SO_KEEPALIVE was set."""
+    idle = _tcp_keepalive_idle_seconds()
+    if idle <= 0:
+        return False
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except (OSError, AttributeError):
+        return False
+    # Linux/Windows call the idle time TCP_KEEPIDLE; macOS calls it TCP_KEEPALIVE.
+    idle_option = getattr(socket, "TCP_KEEPIDLE", None)
+    if idle_option is None:
+        idle_option = getattr(socket, "TCP_KEEPALIVE", None)
+    for option, value in ((idle_option, idle),
+                          (getattr(socket, "TCP_KEEPINTVL", None), _TCP_KEEPALIVE_INTERVAL_SECONDS),
+                          (getattr(socket, "TCP_KEEPCNT", None), _TCP_KEEPALIVE_PROBES)):
+        if option is not None:
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, option, value)
+            except OSError:
+                pass
+    return True
+
+
+def _with_tcp_keepalive(stream):
+    """Enable keepalive on an httpcore network stream's socket; never fails the connect."""
+    try:
+        sock = stream.get_extra_info("socket")
+        if sock is not None:
+            enable_tcp_keepalive(sock)
+    except Exception:
+        pass
+    return stream
+
+
+_KEEPALIVE_SYNC_BACKEND_CLS = None
+
+
+def _keepalive_sync_backend():
+    """httpcore's default sync backend plus TCP keepalive on every connected socket.
+
+    Built on first use so importing this module does not import httpcore."""
+    global _KEEPALIVE_SYNC_BACKEND_CLS
+    if _KEEPALIVE_SYNC_BACKEND_CLS is None:
+        from httpcore import SyncBackend
+
+        class _KeepaliveSyncBackend(SyncBackend):
+            def connect_tcp(self, *args, **kwargs):
+                return _with_tcp_keepalive(super().connect_tcp(*args, **kwargs))
+
+        _KEEPALIVE_SYNC_BACKEND_CLS = _KeepaliveSyncBackend
+    return _KEEPALIVE_SYNC_BACKEND_CLS()
 
 
 class _HappyEyeballsSyncBackend:
@@ -59,7 +138,7 @@ class _HappyEyeballsSyncBackend:
             raise ConnectTimeout(str(exc)) from exc
         except OSError as exc:
             raise ConnectError(str(exc)) from exc
-        return SyncStream(sock)
+        return _with_tcp_keepalive(SyncStream(sock))
 
     def connect_unix_socket(self, *args, **kwargs):
         return self._default_backend().connect_unix_socket(*args, **kwargs)
@@ -82,6 +161,14 @@ def _enable_happy_eyeballs(transport, skip_pool_types: tuple = ()) -> None:
     pool = getattr(transport, "_pool", None)
     if pool is not None and hasattr(pool, "_network_backend") and not (skip_pool_types and isinstance(pool, skip_pool_types)):
         pool._network_backend = _HappyEyeballsSyncBackend()
+
+
+def _enable_keepalive_backend(transport) -> None:
+    """Install the keepalive-only sync backend on a direct transport (same private-attribute
+    guard as ``_enable_happy_eyeballs``; the racing backend already sets keepalive)."""
+    pool = getattr(transport, "_pool", None)
+    if pool is not None and hasattr(pool, "_network_backend"):
+        pool._network_backend = _keepalive_sync_backend()
 
 
 def enable_happy_eyeballs_on_client(client) -> None:
@@ -305,6 +392,8 @@ def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False,
                 # Async transports race natively (anyio happy_eyeballs_delay=0.25).
                 if happy_eyeballs:
                     _enable_happy_eyeballs(transport)
+                elif not async_mode:
+                    _enable_keepalive_backend(transport)
                 return transport
 
             if async_mode:
