@@ -168,4 +168,29 @@ describe('model presets', () => {
     expect($currentServiceTier.get()).toBe('normal')
     expect($currentFastMode.get()).toBe(false)
   })
+  it('reserves speed independently while a preset effort write is pending', async () => {
+    setCurrentServiceTier('normal')
+    let finishEffort!: () => void
+    const speedRejects: ((error: Error) => void)[] = []
+    const request = (_method: string, params?: Record<string, unknown>) =>
+      params?.key === 'reasoning'
+        ? new Promise<never>(resolve => {
+            finishEffort = () => resolve({} as never)
+          })
+        : new Promise<never>((_resolve, reject) => speedRejects.push(reject))
+    const preset = applyModelPreset(
+      { effort: 'ultra', serviceTier: 'priority' },
+      { failMessage: 'failed', sessionId: 'mixed', request }
+    )
+    const newer = applyModelPreset({ serviceTier: 'ultrafast' }, { failMessage: 'failed', sessionId: 'mixed', request })
+    await vi.waitFor(() => expect(speedRejects).toHaveLength(1))
+    speedRejects[0](new Error('Fast rejected'))
+    await vi.waitFor(() => expect(speedRejects).toHaveLength(2))
+    speedRejects[1](new Error('Ultrafast rejected'))
+    await newer
+    expect($currentServiceTier.get()).toBe('normal')
+    finishEffort()
+    await preset
+    expect($currentServiceTier.get()).toBe('normal')
+  })
 })

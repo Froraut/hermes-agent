@@ -153,13 +153,24 @@ export function useModelMenuController({
         (model === optionsModel && (daybreakSelectionFor(storedSessionId, activeSessionId) ?? false))
     }),
     setDaybreak: (enabled, row) => {
+      const key = `${hostScope}::${activeSessionId ?? 'draft'}::daybreak-intent`
+      const revision = nextEdit(key)
       if (row.isActive) {
         setDaybreakSelection(storedSessionId, enabled, activeSessionId)
       } else {
         void Promise.resolve(
           onSelectModel({ model: row.model, provider: row.provider, sessionId: activeSessionId })
         ).then(selected => {
-          if (selected !== false) setDaybreakSelection(storedSessionId, enabled, activeSessionId)
+          if (
+            selected !== false &&
+            optionEdits.get(key) === revision &&
+            latestHostScope.current === hostScope &&
+            view.$runtimeId.get() === activeSessionId &&
+            view.$model.get() === row.model &&
+            view.$provider.get() === row.provider
+          ) {
+            setDaybreakSelection(storedSessionId, enabled, activeSessionId)
+          }
         })
       }
     },
@@ -183,7 +194,10 @@ export function useModelMenuController({
     // scopes the switch to that session; with none it's UI state shipped on the
     // next session.create. Always stamp sessionId from this surface so a tile
     // switch never hits the primary (busy) session by accident.
-    select: (model, provider) => onSelectModel({ model, provider, sessionId: activeSessionId || null }),
+    select: (model, provider) => {
+      nextEdit(`${hostScope}::${activeSessionId ?? 'draft'}::daybreak-intent`)
+      return onSelectModel({ model, provider, sessionId: activeSessionId || null })
+    },
 
     setOptions: (patch, row) => {
       // Editing always records the model's global preset (keyed by
