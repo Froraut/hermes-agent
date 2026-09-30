@@ -2948,6 +2948,8 @@ export const ar = defineLocale({
       options: 'الخيارات',
       thinking: 'التفكير',
       fast: 'سريع',
+      ultrafast: 'Ultrafast',
+      useStandardSpeed: 'استخدام السرعة القياسية',
       effort: 'الجهد',
       minimal: 'أدنى',
       low: 'منخفض',

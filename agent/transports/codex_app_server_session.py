@@ -216,6 +216,7 @@ class CodexAppServerSession:
         request_routing: Optional[_ServerRequestRouting] = None,
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
         model: Optional[str] = None, model_provider: Optional[str] = None,
+        context_window: Optional[int] = None,
         developer_instructions: Optional[str] = None, resume_thread_id: Optional[str] = None,
         history_seed: Optional[str] = None,
     ) -> None:
@@ -229,6 +230,7 @@ class CodexAppServerSession:
         # ``[model_providers.<id>]`` table. Only the id travels; codex reads base_url/env_key itself.
         self._model = (model or "").strip() or None
         self._model_provider = (model_provider or "").strip() or None
+        self._context_window = context_window
         # Hermes' composed system prompt (SOUL.md, memory, channel overrides). Sent ONCE per thread as
         # ``thread/start.developerInstructions``: codex keeps its own base instructions (tool guidance) and
         # inserts this as the first developer message of every model request. ``baseInstructions`` would
@@ -275,6 +277,8 @@ class CodexAppServerSession:
         # Hermes supplies the agent identity through its own system prompt; ``personality: "none"`` strips
         # codex's built-in "# Personality" section from the base instructions so it cannot compete (#72104).
         params: dict[str, Any] = {"cwd": self._cwd, "personality": "none"}
+        if self._context_window is not None:
+            params["config"] = {"model_context_window": self._context_window}
         if self._developer_instructions and self._developer_instructions.strip():
             params["developerInstructions"] = self._developer_instructions
         if self._model_provider:
@@ -456,6 +460,7 @@ class CodexAppServerSession:
         notification_poll_timeout: float = 0.25, post_tool_quiet_timeout: float = 90.0,
         cyber_access_program: str | None = None,
         effort: str | None = None,
+        service_tier: str | None = None,
         model: str | None = None,
     ) -> TurnResult:
         """Send a user message and block until turn/completed, bridging approvals and projecting items.
@@ -483,8 +488,10 @@ class CodexAppServerSession:
                     turn_params["effort"] = effort
                     # The requested effort belongs to Hermes' selected model,
                     # which may differ from Codex's configured default.
-                    if model:
-                        turn_params["model"] = model
+                if service_tier is not None:
+                    turn_params["serviceTier"] = service_tier
+                if model:
+                    turn_params["model"] = model
                 ts = self._request_for(
                     result, "turn/start",
                     turn_params,

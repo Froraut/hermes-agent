@@ -1703,7 +1703,7 @@ _CODEX_OAUTH_CONTEXT_FALLBACK: Dict[str, int] = {
 # carry the 5.6 verdict forward: they replace Sol/Terra/Luna on the same Codex route, and the live
 # catalog's ``max_context_window`` still caps the bump (#105443) if it publishes a lower ceiling.
 _CODEX_OAUTH_VERIFIED_ABOVE_ADVERTISED_PREFIXES: Dict[str, int] = {
-    "gpt-5.6": 900_000, "gpt-6-sol": 900_000, "gpt-6-luna": 900_000,
+    "gpt-5.6": 900_000, "gpt-6.1-sol": 900_000, "gpt-6-sol": 900_000, "gpt-6-luna": 900_000,
 }
 _CODEX_OAUTH_VERIFIED_ABOVE_ADVERTISED_EXACT: Dict[str, int] = {
     "gpt-5.4": 900_000, "gpt-daybreak-blue-latest": 900_000,
@@ -1713,7 +1713,7 @@ _CODEX_OAUTH_STALE_ADVERTISED_CTX = 272_000  # the only advertised value the bum
 CODEX_CONTEXT_VARIANT_SUFFIX = "-900k"  # picker-only opt-in suffix; never sent on the wire
 # The ONLY bases eligible for ``-900k``: routable, live-verified. No family prefixing (it would synthesize
 # dead ``-pro`` variants); dated snapshots of the 5.6 / gpt-6 tier bases are allowed. gpt-daybreak-blue-latest is a verified Sol alias.
-_CODEX_900K_SNAPSHOT_BASES = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-sol", "gpt-6-luna")
+_CODEX_900K_SNAPSHOT_BASES = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna")
 _CODEX_900K_ELIGIBLE_BASES = frozenset({*_CODEX_900K_SNAPSHOT_BASES, "gpt-5.4", "gpt-daybreak-blue-latest", "gpt-6-astra"})
 _CODEX_900K_SNAPSHOT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -1777,6 +1777,7 @@ _codex_oauth_context_cache: Dict[str, Tuple[Dict[str, int], float]] = {}
 # ``{slug: max_context_window}`` from the same fetch, keyed by the same token fingerprint. Only the
 # opted-in ``-900k`` bump reads it (#105443); a catalog without the field leaves the entry empty.
 _codex_oauth_max_context_cache: Dict[str, Dict[str, int]] = {}
+_codex_oauth_access_programs_cache: Dict[str, Dict[str, list[str]]] = {}
 _CODEX_OAUTH_CONTEXT_CACHE_TTL = 3600  # 1 hour
 # The Codex models endpoint reads ``client_version`` as a Codex CLI compatibility version and
 # hides models whose ``minimal_client_version`` is newer. "0.0.0" used to be the ungated sentinel
@@ -1875,7 +1876,12 @@ def _fetch_codex_oauth_context_lengths_with_source(access_token: str, base_url: 
         return {}, False
     result: Dict[str, int] = {}
     max_result: Dict[str, int] = {}
+    access_programs: Dict[str, list[str]] = {}
     for item in entries:
+        if isinstance(item, dict) and isinstance(item.get('slug'), str):
+            programs = item.get('available_access_programs') or {}
+            if isinstance(programs, dict) and isinstance(programs.get('cyber'), list):
+                access_programs[item['slug'].strip()] = [p for p in programs['cyber'] if isinstance(p, str)]
         slug, ctx, max_ctx = (item.get("slug"), item.get("context_window"), item.get("max_context_window")) if isinstance(item, dict) else (None, None, None)
         if isinstance(slug, str) and isinstance(ctx, int) and ctx > 0:
             result[slug.strip()] = ctx
@@ -1884,7 +1890,18 @@ def _fetch_codex_oauth_context_lengths_with_source(access_token: str, base_url: 
     if result:
         _codex_oauth_context_cache[cache_key] = (result, now)
         _codex_oauth_max_context_cache[cache_key] = max_result
+        _codex_oauth_access_programs_cache[cache_key] = access_programs
     return result, True
+
+
+def codex_access_programs(access_token: str, base_url: str = '') -> Dict[str, list[str]]:
+    """Account/route-scoped catalog eligibility; no static entitlement guesses."""
+    _fetch_codex_oauth_context_lengths_with_source(access_token, base_url)
+    key = _codex_oauth_token_fingerprint(access_token, base_url)
+    cached = _codex_oauth_context_cache.get(key)
+    if cached is None or time.time() - cached[1] >= _CODEX_OAUTH_CONTEXT_CACHE_TTL:
+        return {}
+    return _codex_oauth_access_programs_cache.get(key, {})
 
 
 def _resolve_codex_oauth_context_length_with_source(model: str, access_token: str = "", base_url: str = "") -> Tuple[Optional[int], str]:

@@ -125,6 +125,7 @@ export interface ModelChoice {
   /** Level the route actually sends for `effort` (`session.info.reasoning_effort_wire`); '' = unknown. */
   effortWire?: string
   fast: boolean
+  serviceTier?: string
   model: string
   provider: string
 }
@@ -138,18 +139,25 @@ export interface ModelChoice {
  * Returning `{}` is fine — the row then shows Hermes' defaults.
  */
 export interface ModelMenuController {
+  /** Detached task pickers can edit effort but have no speed write path. */
+  allowSpeed?: boolean
+  daybreakFor?: (model: string) => { checked: boolean; required: boolean }
+  setDaybreak?: (enabled: boolean, row: { model: string; provider: string; isActive: boolean }) => void
   /** Restore a model's remembered settings after it is selected. Separate from
    *  `setOptions` because it is one atomic "apply this model's preset" write,
    *  not a user editing one control — surfaces that write through to a session
    *  need to batch it. Values are already capability-gated by the menu. */
-  applyPreset: (preset: { effort?: string; fast?: boolean }, row: { model: string; provider: string }) => void
+  applyPreset: (
+    preset: { effort?: string; fast?: boolean; serviceTier?: string },
+    row: { model: string; provider: string }
+  ) => void
   current: ModelChoice
-  presetFor: (provider: string, model: string) => { effort?: string; fast?: boolean }
+  presetFor: (provider: string, model: string) => { effort?: string; fast?: boolean; serviceTier?: string }
   /** Commit a model row. Return false to abort (a failed session switch). */
   select: (model: string, provider: string) => Promise<boolean | void> | void
   /** Edit ONE option on a row. `isActive` says whether it's the current model. */
   setOptions: (
-    patch: { effort?: string; fast?: boolean },
+    patch: { effort?: string; fast?: boolean; serviceTier?: string },
     row: { isActive: boolean; model: string; provider: string }
   ) => void
 }
@@ -382,10 +390,22 @@ export function ModelCatalogMenu({
       return false
     }
 
+    if (!caps?.daybreak) controller.setDaybreak?.(false, { model: family.id, provider: provider.slug, isActive: true })
+
+    const rememberedTier = preset.serviceTier ?? (preset.fast ? 'priority' : 'normal')
+    const tier =
+      rememberedTier === 'ultrafast'
+        ? caps?.ultrafast
+          ? 'ultrafast'
+          : 'normal'
+        : rememberedTier === 'priority' && caps?.fast
+          ? 'priority'
+          : 'normal'
+
     controller.applyPreset(
       {
         effort: (caps?.reasoning ?? true) ? (preset.effort ?? defaultEffort) : undefined,
-        fast: (caps?.fast ?? false) ? (preset.fast ?? false) : undefined
+        ...(controller.allowSpeed !== false ? { serviceTier: tier, fast: tier !== 'normal' } : {})
       },
       { model: family.id, provider: provider.slug }
     )
@@ -711,13 +731,17 @@ export function ModelCatalogMenu({
                     const preset = controller.presetFor(group.provider.slug, family.id)
                     const effEffort = isCurrent ? current.effort : (preset.effort ?? '')
                     const effFast = isCurrent ? current.fast : (preset.fast ?? false)
+                    const effTier = isCurrent ? current.serviceTier : preset.serviceTier
 
-                    const fastControl: FastControl = resolveFastControl(
-                      activeId ?? family.id,
-                      group.provider.models ?? [],
-                      caps?.fast ?? false,
-                      effFast
-                    )
+                    const fastControl: FastControl =
+                      controller.allowSpeed === false
+                        ? { kind: 'none' }
+                        : resolveFastControl(
+                            activeId ?? family.id,
+                            group.provider.models ?? [],
+                            caps?.fast ?? false,
+                            effFast
+                          )
 
                     // Row meta (variant tag, fast mode, reasoning effort) renders as
                     // discrete badge chips BESIDE the name — not appended to it — so
@@ -725,7 +749,13 @@ export function ModelCatalogMenu({
                     // differently-named model.
                     const metaTags = [
                       tag || null,
-                      fastControl.kind !== 'none' && fastControl.on ? copy.fast : null,
+                      fastControl.kind !== 'none' &&
+                      fastControl.on &&
+                      !(fastControl.kind === 'param' && fastControl.canEnable === false)
+                        ? effTier === 'ultrafast'
+                          ? t.shell.modelOptions.ultrafast
+                          : copy.fast
+                        : null,
                       (caps?.reasoning ?? true) && !(isCurrent && current.effortPending)
                         ? reasoningEffortLabel(effEffort || defaultEffort, isCurrent ? current.effortWire : undefined)
                         : null
@@ -795,11 +825,26 @@ export function ModelCatalogMenu({
                           ) : null}
                         </DropdownMenuSubTrigger>
                         <ModelEditSubmenu
+                          daybreak={
+                            caps?.daybreak && controller.daybreakFor && controller.setDaybreak
+                              ? {
+                                  ...controller.daybreakFor(family.id),
+                                  onChange: enabled =>
+                                    controller.setDaybreak!(enabled, {
+                                      model: family.id,
+                                      provider: group.provider.slug,
+                                      isActive: isCurrent
+                                    })
+                                }
+                              : undefined
+                          }
                           canDisableReasoning={caps?.can_disable_reasoning ?? undefined}
                           defaultEffort={defaultEffort}
                           effort={effEffort}
                           effortWire={isCurrent ? current.effortWire : undefined}
                           fastControl={fastControl}
+                          serviceTier={effTier}
+                          ultrafastSupported={controller.allowSpeed !== false && (caps?.ultrafast ?? false)}
                           isActive={isCurrent}
                           model={family.id}
                           onSelectModel={nextModel => controller.select(nextModel, group.provider.slug)}

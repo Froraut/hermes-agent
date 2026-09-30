@@ -3624,6 +3624,8 @@ export const ru = defineLocale({
       options: 'Опции',
       thinking: 'Размышление',
       fast: 'Быстрая',
+      ultrafast: 'Ultrafast',
+      useStandardSpeed: 'Использовать стандартную скорость',
       effort: 'Усилия',
       minimal: 'Минимально',
       low: 'Низкое',

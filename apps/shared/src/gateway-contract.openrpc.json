@@ -18840,6 +18840,16 @@
             "title": "Fast",
             "type": "boolean"
           },
+          "ultrafast": {
+            "default": false,
+            "title": "Ultrafast",
+            "type": "boolean"
+          },
+          "daybreak": {
+            "default": false,
+            "title": "Daybreak",
+            "type": "boolean"
+          },
           "reasoning": {
             "title": "Reasoning",
             "type": "boolean"
@@ -29672,6 +29682,18 @@
             ],
             "default": null,
             "title": "Fast"
+          },
+          "service_tier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Service Tier"
           },
           "close_on_disconnect": {
             "default": false,

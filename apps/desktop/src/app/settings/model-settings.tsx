@@ -84,10 +84,9 @@ export function ModelSettingsSkeleton({ subpage }: Pick<ModelSettingsProps, 'sub
   )
 }
 
-// agent.service_tier stores "fast"/"priority"/"on" for fast and "ultrafast" for OpenAI
-// Ultrafast; anything else is normal (mirrors agent.fast_mode.parse_service_tier).
+// Priority aliases and Ultrafast are distinct choices in the profile default.
 const isFastTier = (tier: unknown): boolean =>
-  ['fast', 'priority', 'on', 'ultrafast'].includes(
+  ['fast', 'priority', 'on'].includes(
     String(tier ?? '')
       .trim()
       .toLowerCase()
@@ -625,6 +624,7 @@ export function ModelSettings({ onMainModelChanged, scopeProfile, subpage }: Mod
 
   const reasoningSupported = mainCaps?.reasoning ?? true
   const fastSupported = mainCaps?.fast ?? false
+  const ultrafastSupported = mainCaps?.ultrafast ?? false
 
   // Hand-written `reasoning_effort: false`/`off` reaches us as boolean false
   // ("false" once stringified) — show it as Off, not an empty select.
@@ -635,6 +635,7 @@ export function ModelSettings({ onMainModelChanged, scopeProfile, subpage }: Mod
   const effortValue = rawEffort === 'false' || rawEffort === 'disabled' ? 'none' : rawEffort || DEFAULT_REASONING_EFFORT
 
   const fastOn = isFastTier(getNested(config ?? {}, 'agent.service_tier'))
+  const ultrafastOn = String(getNested(config ?? {}, 'agent.service_tier')).toLowerCase() === 'ultrafast'
 
   // Persist a single agent.* default as a sparse patch (PUT /api/config
   // deep-merges onto disk). Never send the whole cached record: it is a
@@ -1049,6 +1050,19 @@ export function ModelSettings({ onMainModelChanged, scopeProfile, subpage }: Mod
                     checked={fastOn}
                     onCheckedChange={checked =>
                       void writeAgentDefault('agent.service_tier', checked ? 'fast' : 'normal')
+                    }
+                    size="xs"
+                  />
+                </label>
+              )}
+              {ultrafastSupported && (
+                <label className="flex items-center gap-2 text-xs">
+                  {t.shell.modelOptions.ultrafast}
+                  <Switch
+                    aria-label={t.shell.modelOptions.ultrafast}
+                    checked={ultrafastOn}
+                    onCheckedChange={checked =>
+                      void writeAgentDefault('agent.service_tier', checked ? 'ultrafast' : 'normal')
                     }
                     size="xs"
                   />

@@ -3907,6 +3907,8 @@ export interface Translations {
       options: string
       thinking: string
       fast: string
+      ultrafast: string
+      useStandardSpeed: string
       effort: string
       minimal: string
       low: string

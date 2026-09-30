@@ -4354,6 +4354,8 @@ export const zh = defineLocale({
       options: '选项',
       thinking: '思考',
       fast: '快速',
+      ultrafast: 'Ultrafast',
+      useStandardSpeed: '使用标准速度',
       effort: '推理强度',
       minimal: '最小',
       low: '低',

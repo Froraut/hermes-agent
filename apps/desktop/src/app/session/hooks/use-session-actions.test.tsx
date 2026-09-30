@@ -51,6 +51,7 @@ import {
   $currentModel,
   $currentProvider,
   $currentReasoningEffort,
+  $currentServiceTier,
   $freshDraftKey,
   $messages,
   $messagingSessions,
@@ -1013,6 +1014,23 @@ async function createWith(
 
 describe('startFreshSessionDraft', () => {
   afterEach(() => cleanup())
+
+  it('keeps Ultrafast through New Chat and sends its exact tier', async () => {
+    const params = await createWith(
+      () => {
+        setCurrentModel('gpt-6-astra')
+        setCurrentProvider('openai-codex')
+        setCurrentModelSource('manual')
+        setCurrentFastMode(true)
+        $currentServiceTier.set('ultrafast')
+      },
+      handle => {
+        handle.startFreshSessionDraft({ preserveRoute: true, workspaceTarget: null })
+      }
+    )
+    expect(params).toMatchObject({ model: 'gpt-6-astra', fast: true, service_tier: 'ultrafast' })
+    $currentServiceTier.set('')
+  })
 
   it('can reset machine-bound session state without closing the current overlay route', async () => {
     const navigate = vi.fn()
@@ -6119,7 +6137,7 @@ describe('routed fresh chat keeps its exact owner across turns', () => {
 
   it('can preserve the current fresh draft key when explicitly requested', async () => {
     let handle: HarnessHandle | null = null
-    const requestGateway = vi.fn(async () => ({} as never))
+    const requestGateway = vi.fn(async () => ({}) as never)
 
     render(<Harness onReady={h => (handle = h)} requestGateway={requestGateway} />)
     await waitFor(() => expect(handle).not.toBeNull())

@@ -322,9 +322,39 @@ class TestRunTurn:
             assert result.error is None
         turns = [params for method, params in client.requests if method == "turn/start"]
         assert "effort" not in turns[0]
-        assert "model" not in turns[0]
+        assert turns[0]["model"] == "gpt-6-sol"
         assert [turn["effort"] for turn in turns[1:]] == ["ultra", "high", "none"]
         assert all(turn["model"] == "gpt-6-sol" for turn in turns[1:])
+
+    def test_native_speed_changes_preserve_ultrafast_and_explicit_standard(self):
+        client = FakeClient()
+        session = make_session(client)
+        for tier in ("ultrafast", "priority", "default"):
+            client.queue_notification(
+                "turn/completed", threadId="t",
+                turn={"id": "tu1", "status": "completed", "error": None},
+            )
+            result = session.run_turn("review", turn_timeout=2, service_tier=tier, model="gpt-6-astra")
+            assert result.error is None
+        turns = [params for method, params in client.requests if method == "turn/start"]
+        assert [turn["serviceTier"] for turn in turns] == ["ultrafast", "priority", "default"]
+        assert all(turn["model"] == "gpt-6-astra" for turn in turns)
+
+    def test_large_context_selection_reaches_new_and_resumed_native_threads(self):
+        for resumed in (None, "thread-fake-001"):
+            client = FakeClient()
+            if resumed:
+                client._request_handler = lambda method, params: {
+                    "thread": {"id": resumed}, "modelProvider": "openai"
+                }
+            session = CodexAppServerSession(
+                model="gpt-6.1-sol", context_window=872000,
+                resume_thread_id=resumed, client_factory=lambda **_: client,
+            )
+            assert session.ensure_started() == "thread-fake-001"
+            request = next(params for method, params in client.requests if method in {"thread/start", "thread/resume"})
+            assert request["model"] == "gpt-6.1-sol"
+            assert request["config"]["model_context_window"] == 872000
 
     def test_simple_text_turn_returns_final_message(self):
         client = FakeClient()

@@ -5066,6 +5066,8 @@ export const frOverrides = {
       options: 'Options',
       thinking: 'Réflexion',
       fast: 'Rapide',
+      ultrafast: 'Ultrafast',
+      useStandardSpeed: 'Utiliser la vitesse standard',
       effort: 'Effort',
       minimal: 'Minimal',
       low: 'Faible',

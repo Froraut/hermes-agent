@@ -4,15 +4,18 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 import { DropdownMenu, DropdownMenuContent } from '@/components/ui/dropdown-menu'
 import { $customModels } from '@/store/custom-models'
-import { $daybreakSelections, daybreakSelectionFor } from '@/store/daybreak'
+import { $daybreakSelections } from '@/store/daybreak'
 import { $collapsedProviders, toggleCollapsedProvider } from '@/store/provider-collapse'
 import {
   $activeSessionId,
+  $currentFastMode,
+  $currentServiceTier,
   $currentModel,
   $currentProvider,
   $selectedStoredSessionId,
   setCurrentModelSource
 } from '@/store/session'
+import { $modelPresets, setModelPreset } from '@/store/model-presets'
 import { dropSessionState } from '@/store/session-states'
 
 import { ModelMenuPanel } from './model-menu-panel'
@@ -149,38 +152,45 @@ describe('ModelMenuPanel MoA presets', () => {
 })
 
 describe('ModelMenuPanel current selection', () => {
-  it('shows Daybreak as required when the selected model is a Daybreak alias', async () => {
-    dropSessionState('runtime-1')
-    $selectedStoredSessionId.set('stored-alias')
+  it('clears a remembered Priority preset on a model without speed support', async () => {
+    $activeSessionId.set(null)
     $currentProvider.set('openai-codex')
-    $currentModel.set('gpt-daybreak-blue-latest')
+    $currentModel.set('gpt-6-astra')
+    setModelPreset('openai-codex', 'gpt-daybreak-blue-latest', { serviceTier: 'priority' })
     getGlobalModelOptions.mockResolvedValue({
-      providers: [{ name: 'ChatGPT or Codex Subscription', slug: 'openai-codex', models: ['gpt-daybreak-blue-latest'] }]
+      providers: [
+        {
+          name: 'ChatGPT or Codex Subscription',
+          slug: 'openai-codex',
+          models: ['gpt-daybreak-blue-latest'],
+          capabilities: { 'gpt-daybreak-blue-latest': { fast: false, ultrafast: false, reasoning: true } }
+        }
+      ]
     })
-
     renderPanel()
-    const toggle = screen.getByRole('switch', { name: 'Daybreak' })
-    expect(toggle.getAttribute('aria-checked')).toBe('true')
-    expect(toggle.hasAttribute('disabled')).toBe(true)
+    fireEvent.click(await screen.findByRole('menuitem', { name: /daybreak.*blue/i }))
+    await vi.waitFor(() => expect($currentServiceTier.get()).toBe('normal'))
+    expect($currentFastMode.get()).toBe(false)
+    $modelPresets.set({})
   })
 
-  it('shows a working Daybreak toggle for the subscription provider only', async () => {
-    dropSessionState('runtime-1')
-    $selectedStoredSessionId.set('stored-1')
+  it('keeps Daybreak out of the top-level catalog even for an eligible model', async () => {
+    $activeSessionId.set(null)
     $currentProvider.set('openai-codex')
     $currentModel.set('gpt-6-sol')
     getGlobalModelOptions.mockResolvedValue({
-      providers: [{ name: 'ChatGPT or Codex Subscription', slug: 'openai-codex', models: ['gpt-6-sol'] }]
+      providers: [
+        {
+          name: 'ChatGPT or Codex Subscription',
+          slug: 'openai-codex',
+          models: ['gpt-6-sol'],
+          capabilities: { 'gpt-6-sol': { daybreak: true, fast: true, reasoning: true } }
+        }
+      ]
     })
-
     renderPanel()
-    const toggle = screen.getByRole('switch', { name: 'Daybreak' })
-    expect(toggle.getAttribute('aria-checked')).toBe('false')
-    fireEvent.click(toggle)
-    expect(daybreakSelectionFor('stored-1', 'runtime-1')).toBe(true)
-
-    $currentProvider.set('deepseek')
-    await vi.waitFor(() => expect(screen.queryByRole('switch', { name: 'Daybreak' })).toBeNull())
+    await screen.findByRole('menuitem', { name: /GPT-6-sol/ })
+    expect(screen.queryByRole('switch', { name: 'Daybreak' })).toBeNull()
   })
 
   it('keeps the checkmark on the live SessionView model when a stale options response disagrees', async () => {

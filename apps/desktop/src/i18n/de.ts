@@ -5052,6 +5052,8 @@ export const deOverrides = {
       options: 'Optionen',
       thinking: 'Denken',
       fast: 'Schnell',
+      ultrafast: 'Ultrafast',
+      useStandardSpeed: 'Standardgeschwindigkeit verwenden',
       effort: 'Aufwand',
       minimal: 'Minimal',
       low: 'Niedrig',
