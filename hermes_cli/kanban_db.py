@@ -4011,6 +4011,21 @@ def _delete_task_relations(conn: sqlite3.Connection, task_id: str) -> None:
         conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (task_id,))
 
 
+class WorkerStillRunningError(ValueError):
+    """A hard delete was refused because the task's worker is still alive and could
+    not be stopped from here: its claim belongs to another host, its process
+    identity is unverified, or it survived termination. Deleting the rows anyway
+    would leave a privileged process running that no board tracks. A
+    ``ValueError`` so tool and API handlers treat it as a recoverable refusal."""
+
+    def __init__(self, task_id: str):
+        super().__init__(
+            f"cannot delete {task_id}: its worker is still running and could not be stopped "
+            "from this host (claimed on another host, unverified process identity, or it "
+            "survived termination); stop that worker, then retry"
+        )
+
+
 def _terminate_task_workers(
     conn: sqlite3.Connection,
     *,
@@ -4051,12 +4066,14 @@ def _terminate_task_workers(
 
 def delete_archived_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> bool:
     """Hard-delete an ARCHIVED task (+ related rows); anything else must be
-    archived first so data loss takes two deliberate actions."""
+    archived first so data loss takes two deliberate actions. Raises
+    :class:`WorkerStillRunningError` (nothing deleted) when a live worker
+    cannot be stopped."""
     with write_txn(conn):
         if _task_status(conn, task_id) != "archived":
             return False
         if not _terminate_task_workers(conn, task_id=task_id, signal_fn=signal_fn):
-            return False
+            raise WorkerStillRunningError(task_id)
         cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         if cur.rowcount != 1:
             return False
@@ -4065,12 +4082,14 @@ def delete_archived_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=No
 
 
 def delete_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> bool:
-    """Hard-delete a task and relations after draining its verified workers."""
+    """Hard-delete a task and relations after draining its verified workers.
+    False when the task does not exist; :class:`WorkerStillRunningError`
+    (nothing deleted) when a live worker cannot be stopped."""
     with write_txn(conn):
         if _task_status(conn, task_id) is None:
             return False
         if not _terminate_task_workers(conn, task_id=task_id, signal_fn=signal_fn):
-            return False
+            raise WorkerStillRunningError(task_id)
         cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         if cur.rowcount != 1:
             return False

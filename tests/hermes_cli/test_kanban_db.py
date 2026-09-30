@@ -757,7 +757,8 @@ def test_delete_task_terminates_verified_worker_and_refuses_unverified_survivor(
         live.add(65432)
         before = list(signalled)
 
-        assert kb.delete_task(conn, guarded, signal_fn=signal_worker) is False
+        with pytest.raises(kb.WorkerStillRunningError, match="could not be stopped"):
+            kb.delete_task(conn, guarded, signal_fn=signal_worker)
         assert signalled == before
         assert kb.get_task(conn, guarded) is not None
         assert [c.body for c in kb.list_comments(conn, guarded)] == ["must survive refusal"]
