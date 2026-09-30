@@ -76,9 +76,14 @@ export function posixQuote(value: string): string {
   return `'${String(value ?? '').replaceAll("'", `'\\''`)}'`
 }
 
-/** Quote a value for a cmd.exe script line. */
+/**
+ * Quote a value for a cmd.exe script line. Batch files expand `%VAR%` even
+ * inside double quotes, so a literal `%` is written as `%%`.
+ */
 export function windowsQuote(value: string): string {
-  return `"${String(value ?? '').replaceAll('"', '""')}"`
+  return `"${String(value ?? '')
+    .replaceAll('"', '""')
+    .replaceAll('%', '%%')}"`
 }
 
 /**
