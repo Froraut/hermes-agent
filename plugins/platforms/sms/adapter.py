@@ -18,7 +18,7 @@ import hmac
 import logging
 import re
 import urllib.parse
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import gateway_trust_env, BasePlatformAdapter, SendResult
@@ -76,6 +76,22 @@ def _new_session(**kwargs):
     return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), **kwargs)
 
 
+def _with_partial_send(
+    result: SendResult, undelivered: List[str], delivered: List[str], *, tail_certain: bool) -> SendResult:
+    """Mark a split-send failure after earlier chunks landed with the ``partial_overflow`` contract
+    ``BasePlatformAdapter._send_with_retry`` reads (same keys as Telegram's split send). The
+    remainder is attached for ``_resume_partial_send`` only when ``tail_certain``. No-op when
+    nothing landed: a plain retry of the whole payload is then safe."""
+    if not delivered:
+        return result
+    result.raw_response = {
+        "partial_overflow": True, "delivered_chunks": len(delivered), "total_chunks": len(delivered) + len(undelivered),
+        "last_message_id": delivered[-1], "continuation_message_ids": tuple(delivered[1:])}
+    if tail_certain and undelivered:
+        result.raw_response.update(undelivered_chunks=tuple(undelivered), delivered_message_ids=tuple(delivered))
+    return result
+
+
 def check_sms_requirements() -> bool:
     """Check if SMS adapter dependencies are available."""
     return AIOHTTP_AVAILABLE and bool(
@@ -88,6 +104,7 @@ class SmsAdapter(BasePlatformAdapter):
     serves_profile_prefix: bool = True
 
     MAX_MESSAGE_LENGTH = MAX_SMS_LENGTH
+    splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.SMS)
@@ -159,11 +176,30 @@ class SmsAdapter(BasePlatformAdapter):
     async def send(
         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        last_result = SendResult(success=True)
+        # Twilio rejects a Body over 1600 chars (21617): chunk at our own limit, not the
+        # 4096 default — a 1601-4096 char reply was one rejected POST, its fallback too.
+        return await self._post_chunks(
+            chat_id, self.truncate_message(self.format_message(content), self.MAX_MESSAGE_LENGTH), [])
+
+    async def _resume_partial_send(
+        self, chat_id: str, result: SendResult, *, reply_to: Optional[str], metadata: Any) -> Optional[SendResult]:
+        """POST only the chunks Twilio certainly did not create (``raw_response["undelivered_chunks"]``);
+        ``None`` when the tail is uncertain, so ``_send_with_retry`` keeps the partial failure."""
+        raw = result.raw_response if isinstance(result.raw_response, dict) else {}
+        if not raw.get("undelivered_chunks"):
+            return None
+        return await self._post_chunks(
+            chat_id, list(raw["undelivered_chunks"]), list(raw.get("delivered_message_ids") or ()))
+
+    async def _post_chunks(self, chat_id: str, chunks: List[str], delivered: List[str]) -> SendResult:
+        """POST ``chunks`` in order, appending each Twilio sid to ``delivered`` (pre-seeded when resuming).
+        A failure after a chunk landed carries the ``partial_overflow`` contract, so ``_send_with_retry``
+        never re-sends (or plain-text re-sends) the delivered head as duplicate, billed SMS."""
         url, headers = _messages_endpoint(self._account_sid, self._auth_token)
         session = self._http_session or _new_session(trust_env=gateway_trust_env())
+        prior = len(delivered)
         try:
-            for chunk in self.truncate_message(self.format_message(content)):
+            for chunk in chunks:
                 form_data = _twilio_form(self._from_number, chat_id, chunk)
                 try:
                     async with session.post(url, data=form_data, headers=headers) as resp:
@@ -173,15 +209,21 @@ class SmsAdapter(BasePlatformAdapter):
                             logger.error(
                                 "[sms] send failed to %s: %s %s", redact_phone(chat_id), resp.status, error_msg,
                             )
-                            return SendResult(success=False, error=f"Twilio {resp.status}: {error_msg}")
-                        last_result = SendResult(success=True, message_id=body.get("sid", ""))
+                            # Twilio answered with an error: this chunk certainly was not created.
+                            return _with_partial_send(
+                                SendResult(success=False, error=f"Twilio {resp.status}: {error_msg}"),
+                                chunks[len(delivered) - prior:], delivered, tail_certain=True)
+                        delivered.append(body.get("sid", ""))
                 except Exception as e:
                     logger.error("[sms] send error to %s: %s", redact_phone(chat_id), e)
-                    return SendResult(success=False, error=str(e))
+                    # The POST may have reached Twilio: report the partial, never resume from a guess.
+                    return _with_partial_send(
+                        SendResult(success=False, error=str(e)), chunks[len(delivered) - prior:], delivered,
+                        tail_certain=False)
         finally:
             if not self._http_session and session:  # close only a fallback session we created
                 await session.close()
-        return last_result
+        return SendResult(success=True, message_id=delivered[-1] if delivered else None)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "dm"}

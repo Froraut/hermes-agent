@@ -311,3 +311,90 @@ class TestMultiplexProfileScope:
         finally:
             reset_secret_scope(token)
         assert "TWILIO_PHONE_NUMBER required" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_send_never_posts_a_body_over_the_twilio_limit(monkeypatch):
+    """Twilio rejects a Body over 1600 chars (error 21617). A long reply must reach it as chunks
+    within that limit — not as one 1601-4096 char POST that fails, fallback included."""
+    import types
+
+    import plugins.platforms.sms.adapter as sms
+
+    adapter = TestSmsFormatAndTruncate()._make_adapter()
+    bodies = []
+    monkeypatch.setattr(sms, "_twilio_form", lambda _from, _to, body: bodies.append(body) or body)
+
+    class _Resp:
+        status = 201
+
+        async def json(self):
+            return {"sid": "SM1"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    adapter._http_session = types.SimpleNamespace(post=lambda *a, **k: _Resp())
+
+    result = await adapter.send("+15559876543", " ".join(f"item{i}" for i in range(500)))
+
+    assert result.success and len(bodies) > 1
+    assert all(len(body) <= sms.MAX_SMS_LENGTH for body in bodies), [len(b) for b in bodies]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["twilio-429", "connection-reset"])
+async def test_retry_after_a_later_chunk_fails_never_resends_delivered_chunks(monkeypatch, failure):
+    """Chunk 2 of a split reply fails after chunk 1 landed. ``_send_with_retry`` must never POST
+    chunk 1 again (a duplicate, billed SMS). A Twilio error response means chunk 2 was certainly
+    not created, so the retry resumes from it and every chunk lands exactly once; after an
+    ambiguous transport error it stops rather than risk a duplicate."""
+    import types
+
+    import plugins.platforms.sms.adapter as sms
+
+    with patch.dict(os.environ, {"TWILIO_ACCOUNT_SID": "ACtest", "TWILIO_AUTH_TOKEN": "tok",
+                                 "TWILIO_PHONE_NUMBER": "+15550001111"}):
+        adapter = sms.SmsAdapter(PlatformConfig(enabled=True, api_key="tok"))
+    monkeypatch.setattr(sms, "_twilio_form", lambda _from, _to, body: body)
+    monkeypatch.setattr("gateway.platforms.base.asyncio.sleep", AsyncMock())
+    posted, accepted = [], []
+
+    class _Resp:
+        def __init__(self, body):
+            self.status = 429 if len(posted) == 2 else 201
+            self._body = body
+
+        async def json(self):
+            if self.status == 429:
+                return {"code": 20429, "message": "Too Many Requests"}
+            accepted.append(self._body)
+            return {"sid": f"SM{len(accepted)}"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def _post(_url, data, headers):
+        posted.append(data)
+        if failure == "connection-reset" and len(posted) == 2:
+            raise ConnectionResetError("Connection reset by peer")
+        return _Resp(data)
+
+    adapter._http_session = types.SimpleNamespace(post=_post)
+    content = " ".join(f"item{i}" for i in range(500))
+    chunks = adapter.truncate_message(adapter.format_message(content), adapter.MAX_MESSAGE_LENGTH)
+    assert len(chunks) >= 3
+
+    result = await adapter._send_with_retry(chat_id="+15559876543", content=content)
+
+    assert len(accepted) == len(set(accepted)), "a delivered chunk was sent again"
+    if failure == "twilio-429":
+        assert result.success and accepted == chunks
+    else:
+        assert not result.success and accepted == chunks[:1] and posted == chunks[:2]
