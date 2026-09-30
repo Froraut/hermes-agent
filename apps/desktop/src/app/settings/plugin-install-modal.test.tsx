@@ -203,6 +203,8 @@ describe('Install from Git entry flow', () => {
         expect.any(Number)
       )
     )
+    const call = requestGateway.mock.calls.find(([, params]) => params?.action === 'install')
+    expect(call?.[1]).not.toHaveProperty('expected_revision')
   })
   it('installs a manual Git plugin at the commit the probe inspected, not the tip at click time', async () => {
     $connection.set({ mode: 'remote' } as NonNullable<ReturnType<typeof $connection.get>>)
@@ -222,6 +224,26 @@ describe('Install from Git entry flow', () => {
         catalogName: undefined
       })
     )
+  })
+
+  it('asks the backend for the reviewed commit on an unpinned custom agent install, without pinning it', async () => {
+    requestGateway.mockImplementation(async method =>
+      method === 'plugins.manage' ? { ok: true, plugin_name: 'plugin', plugins: [] } : { plugins: [] }
+    )
+    renderFlow()
+    act(() => openPluginInstallRequest({ repo: 'https://github.com/example/plugin' }))
+
+    expect(await screen.findByText('This package includes')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Install' }))
+    await waitFor(() =>
+      expect(requestGateway).toHaveBeenCalledWith(
+        'plugins.manage',
+        expect.objectContaining({ action: 'install', expected_revision: TIP_SHA }),
+        expect.any(Number)
+      )
+    )
+    const install = requestGateway.mock.calls.find(([, params]) => params?.action === 'install')
+    expect(install?.[1]).not.toHaveProperty('ref')
   })
 
   it('refuses to install when the probe cannot name the commit it inspected', async () => {

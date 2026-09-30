@@ -247,6 +247,9 @@ export function PluginInstallModal() {
           enable: enableAgent,
           catalogName: request.catalogName,
           ref: pinRefTrimmed || undefined,
+          // An unpinned custom install must still be the reviewed tree: the backend refuses a clone
+          // that no longer resolves to the probed commit, without pinning the plugin to it.
+          expectedRevision: request.catalogName || pinRefTrimmed ? undefined : probe.sha,
           profile: targetProfile
         })
 
