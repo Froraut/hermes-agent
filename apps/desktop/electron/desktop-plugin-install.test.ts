@@ -440,6 +440,26 @@ describe('installDesktopPluginFromGit', () => {
     }
   )
 
+  it('never deletes or writes outside the plugins root when a force reinstall names an escaping manifest', async () => {
+    // `name: ../../victim` once joined onto the plugins root; with Force reinstall the installer
+    // removed the escaped folder and published the plugin there.
+    const repo = pluginRepo('../../victim')
+    const home = mkdtemp('hermes-plugin-containment-')
+    roots.push(home)
+    const appRoot = path.join(home, 'nested', 'desktop-plugins')
+    const sentinel = path.join(home, 'victim', 'sentinel.txt')
+    fs.mkdirSync(appRoot, { recursive: true })
+    fs.mkdirSync(path.dirname(sentinel), { recursive: true })
+    fs.writeFileSync(sentinel, 'outside')
+
+    const result = await installDesktopPluginFromGit('git', pathToFileURL(repo).href, appRoot, true)
+
+    expect(result.ok).toBe(false)
+    expect(fs.readFileSync(sentinel, 'utf8')).toBe('outside')
+    expect(fs.existsSync(path.join(home, 'victim', 'plugin.js'))).toBe(false)
+    expect(fs.readdirSync(appRoot)).toEqual([])
+  })
+
   // The manifest name rule must match the backend's `_sanitize_plugin_name`
   // exactly: the agent half installs under names like these without complaint
   // (a single segment is enough), so a stricter Desktop-side rule would reject
