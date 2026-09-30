@@ -205,3 +205,12 @@ def test_payload_matches_the_contract(sessions, monkeypatch):
 
     turn_alive.tick(0.0)
     assert turn_alive.tick(turn_alive.TURN_ALIVE_INTERVAL_S) == 1
+
+
+@pytest.mark.parametrize("requested, used", [("60", 15.0), ("20", 15.0), ("10", 10.0), ("0", 0.0), ("-5", 0.0), ("", 15.0)])
+def test_interval_stays_inside_the_clients_silence_window(monkeypatch, requested, used):
+    """Desktop builds hardcode a 45 s silence window and never read ``turn_alive_s``: a frame after a lost
+    one (2 x interval + one tick) must still land inside it, so the env value is capped."""
+    monkeypatch.setenv("HERMES_TURN_ALIVE_S", requested)
+    assert turn_alive._interval_from_env() == used
+    assert 2 * turn_alive.MAX_TURN_ALIVE_INTERVAL_S + turn_alive._TICK_S < 45.0
