@@ -143,6 +143,19 @@ export function PluginInstallModal() {
         return
       }
 
+      // The install fetches the commit the probe inspected. A probe that cannot name it (or names a
+      // different commit than the pin it was asked for) would leave the install to resolve the
+      // mutable branch tip again, so it fails closed instead.
+      if (
+        result.ok &&
+        (!result.sha || !COMMIT_SHA_RE.test(result.sha) || (payload.sha && result.sha !== payload.sha.toLowerCase()))
+      ) {
+        setProbe({ ...result, ok: false, error: m.probeUnavailable })
+        setPhase('error')
+
+        return
+      }
+
       setProbe(result)
 
       if (!result.ok) {
@@ -308,7 +321,9 @@ export function PluginInstallModal() {
             const result = await installFn({
               identifier: request.repo,
               force: forceReinstall,
-              ref: pinRef.trim().toLowerCase() || request.sha,
+              // A typed pin is an explicit immutable choice; otherwise install the commit the probe
+              // inspected (the catalog pin for catalog picks), never the branch tip at click time.
+              ref: pinRefTrimmed || probe.sha,
               catalogName: request.catalogName
             })
 

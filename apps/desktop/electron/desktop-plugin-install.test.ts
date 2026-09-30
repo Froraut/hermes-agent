@@ -156,7 +156,12 @@ describe('probePluginRepo', () => {
 
     const result = await probePluginRepo('git', `${pathToFileURL(repo).href}#integrations/hermes`)
 
-    expect(result).toMatchObject({ ok: true, agent: true, agentName: 'nested-agent' })
+    expect(result).toMatchObject({
+      ok: true,
+      agent: true,
+      agentName: 'nested-agent',
+      sha: git('rev-parse', 'HEAD').toString().trim()
+    })
   })
 
   it('probes a catalog pick at its pin when the default branch tip lost the plugin folder', async () => {
@@ -231,6 +236,33 @@ describe('installDesktopPluginFromGit', () => {
 
     return repo
   }
+
+  it('installs the commit a manual probe inspected after the branch tip moves', async () => {
+    // Install from Git with no pin: the probe resolves the tip once and the install fetches that
+    // commit, so a push between review and Install cannot change what gets published.
+    const repo = pluginRepo(null)
+    const identifier = pathToFileURL(repo).href
+    const entry = path.join(repo, 'desktop', 'plugin.js')
+    const probe = await probePluginRepo('git', identifier)
+
+    expect(probe).toMatchObject({ ok: true, desktop: true })
+    expect(probe.sha).toMatch(/^[0-9a-f]{40}$/)
+    fs.writeFileSync(entry, 'export const version = "unreviewed"\n')
+    execFileSync(
+      'git',
+      ['-c', 'user.email=fixture@example.com', '-c', 'user.name=Fixture', 'commit', '-qam', 'moved'],
+      { cwd: repo, stdio: 'pipe' }
+    )
+
+    const appRoot = mkdtemp('hermes-plugin-root-')
+    roots.push(appRoot)
+    const result = await installDesktopPluginFromGit('git', identifier, appRoot, false, { ref: probe.sha })
+
+    expect(result.ok).toBe(true)
+    expect(fs.readFileSync(path.join(appRoot, String(result.pluginName), 'plugin.js'), 'utf8')).toBe(
+      'export function register() {}\n'
+    )
+  })
 
   it.each(['', 'integrations/widget'])(
     'pins catalog bytes and provenance without destructive ref failures (%s)',

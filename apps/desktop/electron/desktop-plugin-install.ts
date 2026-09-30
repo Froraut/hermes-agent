@@ -36,6 +36,9 @@ export interface PluginProbeResult {
   desktop: boolean
   agentName?: string | null
   desktopName?: string | null
+  /** Commit whose tree was inspected. Installing exactly this commit (as `ref`) keeps a branch
+   *  that moves after the review from changing what gets installed. */
+  sha?: string
   warnings: string[]
   insecure: boolean
   error?: string
@@ -315,9 +318,8 @@ async function cloneToTemp(
   gitUrl: string,
   subdir: string | null,
   ref?: string
-): Promise<{ cloneRoot: string; sha?: string }> {
+): Promise<{ cloneRoot: string; sha: string }> {
   const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'hermes-plugin-'))
-  let sha: string | undefined
 
   try {
     await runGitOrThrow(gitBin, [
@@ -337,22 +339,34 @@ async function cloneToTemp(
     if (ref) {
       await runGitOrThrow(gitBin, ['fetch', '--depth', '1', 'origin', ref], tmpRoot)
       await runGitOrThrow(gitBin, ['checkout', '--detach', ref], tmpRoot)
-      const head = await execGit(gitBin, ['rev-parse', 'HEAD'], {
-        cwd: tmpRoot,
-        env: noninteractiveGitEnv(),
-        timeoutMs: GIT_TIMEOUT_MS
-      })
+    } else if (subdir) {
+      await runGitOrThrow(gitBin, ['checkout', 'HEAD'], tmpRoot)
+    }
+
+    // Always report the checked-out commit: a probe without a ref resolved the mutable branch tip,
+    // and the install must fetch that same commit rather than resolve the tip a second time.
+    const head = await execGit(gitBin, ['rev-parse', 'HEAD'], {
+      cwd: tmpRoot,
+      env: noninteractiveGitEnv(),
+      timeoutMs: GIT_TIMEOUT_MS
+    })
+
+    const sha = head.stdout.trim().toLowerCase()
+
+    if (head.code !== 0 || !/^[0-9a-f]{40}$/.test(sha)) {
+      throw new Error('Git checkout did not resolve to a commit.')
+    }
+
+    if (ref) {
       const commit = await execGit(gitBin, ['rev-parse', '--verify', `${ref}^{commit}`], {
         cwd: tmpRoot,
         env: noninteractiveGitEnv(),
         timeoutMs: GIT_TIMEOUT_MS
       })
-      if (head.code !== 0 || commit.code !== 0 || head.stdout.trim() !== commit.stdout.trim()) {
+
+      if (commit.code !== 0 || sha !== commit.stdout.trim().toLowerCase()) {
         throw new Error(`Git checkout did not resolve to requested commit ${ref}.`)
       }
-      sha = head.stdout.trim()
-    } else if (subdir) {
-      await runGitOrThrow(gitBin, ['checkout', 'HEAD'], tmpRoot)
     }
 
     return { cloneRoot: tmpRoot, sha }
@@ -414,7 +428,7 @@ export async function probePluginRepo(
 
     const { gitUrl, subdir } = resolvePluginGitUrl(identifier)
     const { warnings, insecure } = insecureSchemeWarnings(gitUrl)
-    const { cloneRoot } = await cloneToTemp(gitBin, gitUrl, subdir, ref?.toLowerCase())
+    const { cloneRoot, sha } = await cloneToTemp(gitBin, gitUrl, subdir, ref?.toLowerCase())
 
     try {
       const pluginRoot = await resolvePluginRoot(cloneRoot, subdir)
@@ -438,6 +452,7 @@ export async function probePluginRepo(
         desktop: detected.desktop,
         agentName: detected.agentName ?? (detected.agent ? repoFallback : null),
         desktopName: detected.desktop ? desktopPluginFolderName(gitUrl, subdir) : null,
+        sha,
         warnings,
         insecure
       }

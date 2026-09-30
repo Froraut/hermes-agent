@@ -544,6 +544,8 @@ declare global {
         desktop: boolean
         agentName?: string | null
         desktopName?: string | null
+        /** Commit the probe inspected; the install must use exactly this commit. */
+        sha?: string
         warnings?: string[]
         insecure?: boolean
         error?: string
