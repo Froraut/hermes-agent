@@ -61,6 +61,7 @@ export function getModelPreset(provider: string, model: string): ModelPreset {
 export function setModelPreset(provider: string, model: string, patch: ModelPreset): void {
   const key = modelPresetKey(provider, model)
   const tier = modelPresetServiceTier(patch)
+
   const next = {
     ...$modelPresets.get(),
     [key]: {
@@ -100,6 +101,7 @@ export async function applyModelPreset(
   const primary = ctx.primary ?? true
   const oldOwner = $activeSessionId.get()
   const slice = $sessionStates.get()[ctx.sessionId ?? '']
+
   const previous =
     primary && !slice
       ? { effort: $currentReasoningEffort.get(), fast: $currentFastMode.get(), serviceTier: $currentServiceTier.get() }
@@ -108,17 +110,22 @@ export async function applyModelPreset(
           fast: $sessionStates.get()[ctx.sessionId ?? '']?.fast,
           serviceTier: $sessionStates.get()[ctx.sessionId ?? '']?.serviceTier
         }
+
   const writeKey = (dimension: string) => `${ctx.scope ?? ''}::${ctx.sessionId}::${dimension}`
+
   for (const dimension of [...(effort !== undefined ? ['effort'] : []), ...(tier !== undefined ? ['speed'] : [])]) {
     const key = writeKey(dimension)
-    if (!pendingWrites.has(key))
+
+    if (!pendingWrites.has(key)) {
       confirmedValues.set(
         key,
         dimension === 'effort'
           ? (previous.effort ?? '')
           : previous.serviceTier || (previous.fast ? 'priority' : 'normal')
       )
+    }
   }
+
   if (primary) {
     if (effort !== undefined) {
       setCurrentReasoningEffort(effort)
@@ -129,6 +136,7 @@ export async function applyModelPreset(
       setCurrentServiceTier(tier!)
     }
   }
+
   if (ctx.sessionId) {
     sessionTileDelegate()?.updateSession(ctx.sessionId, state => ({
       ...state,
@@ -150,10 +158,14 @@ export async function applyModelPreset(
         ['speed', tier]
       ] as const
     ).map(async ([dimension, value]) => {
-      if (value === undefined || ctx.isCurrent?.(dimension) === false) return
+      if (value === undefined || ctx.isCurrent?.(dimension) === false) {
+        return
+      }
+
       try {
         const key = writeKey(dimension)
         const preceding = pendingWrites.get(key)
+
         const write = Promise.resolve(preceding)
           .catch(() => {})
           .then(async () => {
@@ -164,19 +176,26 @@ export async function applyModelPreset(
             })
             confirmedValues.set(key, value)
           })
+
         pendingWrites.set(key, write)
+
         try {
           await write
         } finally {
-          if (pendingWrites.get(key) === write) pendingWrites.delete(key)
+          if (pendingWrites.get(key) === write) {
+            pendingWrites.delete(key)
+          }
         }
       } catch (err) {
         const confirmedValue = confirmedValues.get(writeKey(dimension)) ?? ''
+
         const confirmed: ModelPreset =
           dimension === 'effort'
             ? { effort: confirmedValue }
             : { serviceTier: confirmedValue || 'normal', fast: !!confirmedValue && confirmedValue !== 'normal' }
+
         ctx.onFailure?.(dimension, confirmed)
+
         if (ctx.isCurrent?.(dimension) ?? true) {
           if (primary && $activeSessionId.get() === oldOwner) {
             if (dimension === 'effort' && $currentReasoningEffort.get() === effort) {
@@ -186,18 +205,22 @@ export async function applyModelPreset(
               setCurrentServiceTier(confirmed.serviceTier ?? '')
             }
           }
+
           if (ctx.sessionId && (!primary || $activeSessionId.get() === oldOwner)) {
             sessionTileDelegate()?.updateSession(ctx.sessionId, state => {
               if (dimension === 'effort' && state.reasoningEffort === effort) {
                 return { ...state, reasoningEffort: confirmed.effort ?? '', reasoningEffortWire: '' }
               }
+
               if (dimension === 'speed' && state.serviceTier === tier) {
                 return { ...state, fast: confirmed.fast ?? false, serviceTier: confirmed.serviceTier ?? '' }
               }
+
               return state
             })
           }
         }
+
         notifyError(err, ctx.failMessage)
       }
     })

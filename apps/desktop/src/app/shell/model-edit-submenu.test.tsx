@@ -45,14 +45,14 @@ function renderSubmenu(opts: {
             defaultEffort={opts.defaultEffort ?? 'medium'}
             effort={opts.effort ?? 'medium'}
             fastControl={opts.fastControl}
-            serviceTier={opts.serviceTier}
-            ultrafastSupported={opts.ultrafastSupported}
             isActive={opts.isActive ?? true}
             model="m1"
             onSelectModel={opts.onSelectModel ?? vi.fn()}
             onSetOptions={opts.onSetOptions}
             provider="p1"
             reasoning={opts.reasoning}
+            serviceTier={opts.serviceTier}
+            ultrafastSupported={opts.ultrafastSupported}
           />
         </DropdownMenuSub>
       </DropdownMenuContent>
@@ -165,12 +165,14 @@ describe('ModelEditSubmenu reports edits without performing them', () => {
 
 it('offers Daybreak only on eligible model options and locks required aliases', () => {
   const change = vi.fn()
+
   const result = renderSubmenu({
     fastControl: { kind: 'none' },
     reasoning: false,
     onSetOptions: vi.fn(),
     daybreak: { checked: false, required: false, onChange: change }
   })
+
   fireEvent.click(screen.getByRole('switch', { name: 'Daybreak' }))
   expect(change).toHaveBeenCalledWith(true)
   result.unmount()
@@ -181,4 +183,19 @@ it('offers Daybreak only on eligible model options and locks required aliases', 
     daybreak: { checked: true, required: true, onChange: change }
   })
   expect(screen.getByRole('switch', { name: 'Daybreak' }).hasAttribute('disabled')).toBe(true)
+})
+
+it('lets an inactive row edit Daybreak like its speed controls', () => {
+  const change = vi.fn()
+  renderSubmenu({
+    fastControl: { kind: 'param', on: false },
+    isActive: false,
+    reasoning: false,
+    onSetOptions: vi.fn(),
+    daybreak: { checked: false, required: false, onChange: change }
+  })
+  const daybreak = screen.getByRole('switch', { name: 'Daybreak' })
+  expect(daybreak.hasAttribute('disabled')).toBe(false)
+  fireEvent.click(daybreak)
+  expect(change).toHaveBeenCalledWith(true)
 })

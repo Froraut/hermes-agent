@@ -1,9 +1,9 @@
 import type { ModelOptionsResult } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
-import { useSessionView } from '@/app/chat/session-view'
 import { useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 
+import { useSessionView } from '@/app/chat/session-view'
 import { Codicon } from '@/components/ui/codicon'
 import { DropdownMenuItem, dropdownMenuRow } from '@/components/ui/dropdown-menu'
 import { useI18n } from '@/i18n'

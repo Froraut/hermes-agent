@@ -1,15 +1,23 @@
 import { DEFAULT_REASONING_EFFORT, type ModelOptionsResult } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
+import { useQuery } from '@tanstack/react-query'
 import { atom } from 'nanostores'
 import { useRef } from 'react'
-import { useQuery } from '@tanstack/react-query'
 
-import { $daybreakSelections, daybreakOnlyModel, daybreakSelectionFor, setDaybreakSelection } from '@/store/daybreak'
 import { useSessionView } from '@/app/chat/session-view'
 import type { HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { currentPickerSelection } from '@/lib/model-status-label'
+import {
+  $daybreakModelChoices,
+  $daybreakSelections,
+  daybreakModelChoiceFor,
+  daybreakOnlyModel,
+  daybreakSelectionFor,
+  setDaybreakModelChoice,
+  setDaybreakSelection
+} from '@/store/daybreak'
 import {
   $modelPresets,
   applyModelPreset,
@@ -25,9 +33,11 @@ import type { ModelMenuController } from './model-catalog-menu'
 
 const UNKNOWN_SERVICE_TIER = atom('')
 const optionEdits = new Map<string, number>()
+
 const nextEdit = (key: string) => {
   const revision = (optionEdits.get(key) ?? 0) + 1
   optionEdits.set(key, revision)
+
   return revision
 }
 
@@ -68,6 +78,7 @@ export function useModelMenuController({
   const activeSessionId = useStore(view.$runtimeId)
   const storedSessionId = useStore(view.$storedId)
   useStore($daybreakSelections)
+  useStore($daybreakModelChoices)
   const currentFastMode = useStore(view.$fast)
   const currentServiceTier = useStore(view.$serviceTier ?? UNKNOWN_SERVICE_TIER)
   const currentModel = useStore(view.$model)
@@ -104,15 +115,22 @@ export function useModelMenuController({
       ...(patch.effort !== undefined ? ['effort' as const] : []),
       ...(modelPresetServiceTier(patch) !== undefined ? ['speed' as const] : [])
     ]
+
     const stamps = new Map(
       dimensions.map(dimension => {
         const ownerKey = `${hostScope}::${activeSessionId ?? 'draft'}::${dimension}`
         const presetKey = `${modelPresetKey(row.provider, row.model)}::${dimension}`
+
         return [dimension, { ownerKey, presetKey, owner: nextEdit(ownerKey), preset: nextEdit(presetKey) }]
       })
     )
+
     setModelPreset(row.provider, row.model, patch)
-    if (touchesPrimary) markComposerSelectionManual()
+
+    if (touchesPrimary) {
+      markComposerSelectionManual()
+    }
+
     void applyModelPreset(patch, {
       failMessage,
       scope: hostScope,
@@ -121,6 +139,7 @@ export function useModelMenuController({
       sessionId: activeSessionId,
       isCurrent: dimension => {
         const stamp = stamps.get(dimension)!
+
         return (
           optionEdits.get(stamp.ownerKey) === stamp.owner &&
           latestHostScope.current === hostScope &&
@@ -131,8 +150,13 @@ export function useModelMenuController({
       },
       onFailure: (dimension, confirmed) => {
         const stamp = stamps.get(dimension)!
-        if (optionEdits.get(stamp.presetKey) !== stamp.preset) return
+
+        if (optionEdits.get(stamp.presetKey) !== stamp.preset) {
+          return
+        }
+
         const current = getModelPreset(row.provider, row.model)
+
         if (dimension === 'effort' && current.effort === patch.effort) {
           setModelPreset(row.provider, row.model, { effort: confirmed.effort })
         } else if (dimension === 'speed' && modelPresetServiceTier(current) === modelPresetServiceTier(patch)) {
@@ -146,16 +170,37 @@ export function useModelMenuController({
   }
 
   const controller: ModelMenuController = {
-    daybreakFor: model => ({
-      required: daybreakOnlyModel(model),
-      checked:
-        daybreakOnlyModel(model) ||
-        (model === optionsModel && (daybreakSelectionFor(storedSessionId, activeSessionId) ?? false))
-    }),
+    // Daybreak belongs to this conversation. An inactive row shows what selecting
+    // it would send: its own remembered choice, else the conversation's current one.
+    daybreakFor: row => {
+      const selected = daybreakSelectionFor(storedSessionId, activeSessionId)
+
+      const remembered = row.isActive
+        ? undefined
+        : daybreakModelChoiceFor(storedSessionId, modelPresetKey(row.provider, row.model), activeSessionId)
+
+      return {
+        required: daybreakOnlyModel(row.model),
+        checked: daybreakOnlyModel(row.model) || (remembered ?? selected ?? false)
+      }
+    },
     setDaybreak: (enabled, row) => {
-      // Daybreak belongs to this conversation. An inactive row can advertise
-      // availability, but must be selected through the normal model/preset path.
-      if (row.isActive) setDaybreakSelection(storedSessionId, enabled, activeSessionId)
+      // Like speed, an inactive row's edit is remembered for that model (in this
+      // conversation only) and applied when it is selected; no model switch.
+      setDaybreakModelChoice(storedSessionId, modelPresetKey(row.provider, row.model), enabled, activeSessionId)
+
+      if (row.isActive) {
+        setDaybreakSelection(storedSessionId, enabled, activeSessionId)
+      }
+    },
+    applyDaybreak: (row, supported) => {
+      const remembered = supported
+        ? daybreakModelChoiceFor(storedSessionId, modelPresetKey(row.provider, row.model), activeSessionId)
+        : false
+
+      if (remembered !== undefined) {
+        setDaybreakSelection(storedSessionId, remembered, activeSessionId)
+      }
     },
     // Selecting a model row restores that model's remembered preset onto the
     // session (effort/fast). applyModelPreset owns the batched gateway write.
@@ -179,6 +224,7 @@ export function useModelMenuController({
     // switch never hits the primary (busy) session by accident.
     select: (model, provider) => {
       nextEdit(`${hostScope}::${activeSessionId ?? 'draft'}::daybreak-intent`)
+
       return onSelectModel({ model, provider, sessionId: activeSessionId || null })
     },
 
@@ -189,9 +235,16 @@ export function useModelMenuController({
       // Non-active edits stay preset-only — no model switch, no session write.
       if (!row.isActive) {
         setModelPreset(row.provider, row.model, patch)
+
         // Invalidate a pending rollback for the same globally remembered dimension.
-        if (patch.effort !== undefined) nextEdit(`${modelPresetKey(row.provider, row.model)}::effort`)
-        if (modelPresetServiceTier(patch) !== undefined) nextEdit(`${modelPresetKey(row.provider, row.model)}::speed`)
+        if (patch.effort !== undefined) {
+          nextEdit(`${modelPresetKey(row.provider, row.model)}::effort`)
+        }
+
+        if (modelPresetServiceTier(patch) !== undefined) {
+          nextEdit(`${modelPresetKey(row.provider, row.model)}::speed`)
+        }
+
         return
       }
 

@@ -35,10 +35,13 @@ describe('model presets', () => {
 
   it('keeps Ultrafast distinct and a later legacy Fast edit selects priority', async () => {
     const calls: unknown[] = []
+
     const request = async <T>(method: string, params?: Record<string, unknown>) => {
       calls.push({ method, params })
+
       return {} as T
     }
+
     setModelPreset('openai-codex', 'gpt-6-astra', { serviceTier: 'ultrafast', effort: 'ultra' })
     await applyModelPreset(getModelPreset('openai-codex', 'gpt-6-astra'), {
       failMessage: 'failed',
@@ -93,10 +96,15 @@ describe('model presets', () => {
   })
   it('rolls back only the failed speed while still writing speed after an effort error', async () => {
     setCurrentServiceTier('normal')
+
     const request = vi.fn(async (_method: string, params?: Record<string, unknown>) => {
-      if (params?.key === 'reasoning') throw new Error('effort rejected')
+      if (params?.key === 'reasoning') {
+        throw new Error('effort rejected')
+      }
+
       return {} as never
     })
+
     await applyModelPreset(
       { effort: 'ultra', serviceTier: 'ultrafast' },
       {
@@ -125,6 +133,7 @@ describe('model presets', () => {
 
   it('keeps a newer speed when an older write fails late', async () => {
     let rejectOld!: (error: Error) => void
+
     const old = applyModelPreset(
       { serviceTier: 'priority' },
       {
@@ -136,6 +145,7 @@ describe('model presets', () => {
           })
       }
     )
+
     const newer = applyModelPreset(
       { serviceTier: 'ultrafast' },
       {
@@ -144,6 +154,7 @@ describe('model presets', () => {
         request: async () => ({}) as never
       }
     )
+
     await vi.waitFor(() => expect(rejectOld).toBeTypeOf('function'))
     rejectOld(new Error('old write failed'))
     await old
@@ -155,10 +166,12 @@ describe('model presets', () => {
     const rejects: ((error: Error) => void)[] = []
     const request = () => new Promise<never>((_resolve, reject) => rejects.push(reject))
     const fast = applyModelPreset({ serviceTier: 'priority' }, { failMessage: 'failed', sessionId: 'both', request })
+
     const ultrafast = applyModelPreset(
       { serviceTier: 'ultrafast' },
       { failMessage: 'failed', sessionId: 'both', request }
     )
+
     await vi.waitFor(() => expect(rejects).toHaveLength(1))
     rejects[0](new Error('Fast rejected'))
     await fast
@@ -172,16 +185,19 @@ describe('model presets', () => {
     setCurrentServiceTier('normal')
     let finishEffort!: () => void
     const speedRejects: ((error: Error) => void)[] = []
+
     const request = (_method: string, params?: Record<string, unknown>) =>
       params?.key === 'reasoning'
         ? new Promise<never>(resolve => {
             finishEffort = () => resolve({} as never)
           })
         : new Promise<never>((_resolve, reject) => speedRejects.push(reject))
+
     const preset = applyModelPreset(
       { effort: 'ultra', serviceTier: 'priority' },
       { failMessage: 'failed', sessionId: 'mixed', request }
     )
+
     const newer = applyModelPreset({ serviceTier: 'ultrafast' }, { failMessage: 'failed', sessionId: 'mixed', request })
     await vi.waitFor(() => expect(speedRejects).toHaveLength(1))
     speedRejects[0](new Error('Fast rejected'))

@@ -167,20 +167,22 @@ export function ModelOptionsContent({
       {daybreak ? (
         <DropdownMenuItem
           className={dropdownMenuRow}
-          title={!isActive ? 'Select this model to change Daybreak for this chat.' : undefined}
           onSelect={event => {
             event.preventDefault()
-            if (isActive && !daybreak.required) daybreak.onChange(!daybreak.checked)
+
+            if (!daybreak.required) {
+              daybreak.onChange(!daybreak.checked)
+            }
           }}
         >
           Daybreak
           <Switch
             aria-label="Daybreak"
             checked={daybreak.checked}
-            disabled={daybreak.required || !isActive}
             className="ml-auto"
-            onClick={event => event.stopPropagation()}
+            disabled={daybreak.required}
             onCheckedChange={daybreak.onChange}
+            onClick={event => event.stopPropagation()}
             size="xs"
           />
         </DropdownMenuItem>

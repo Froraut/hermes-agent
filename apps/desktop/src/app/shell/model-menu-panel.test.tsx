@@ -4,19 +4,18 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 import { DropdownMenu, DropdownMenuContent } from '@/components/ui/dropdown-menu'
 import { $customModels } from '@/store/custom-models'
-import { $daybreakSelections } from '@/store/daybreak'
+import { $daybreakModelChoices, $daybreakSelections, daybreakSelectionFor } from '@/store/daybreak'
+import { $modelPresets, setModelPreset } from '@/store/model-presets'
 import { $collapsedProviders, toggleCollapsedProvider } from '@/store/provider-collapse'
 import {
   $activeSessionId,
   $currentFastMode,
-  $currentServiceTier,
   $currentModel,
   $currentProvider,
+  $currentServiceTier,
   $selectedStoredSessionId,
   setCurrentModelSource
 } from '@/store/session'
-import { $modelPresets, setModelPreset } from '@/store/model-presets'
-import { dropSessionState } from '@/store/session-states'
 
 import { ModelMenuPanel } from './model-menu-panel'
 
@@ -65,6 +64,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   $daybreakSelections.set({})
+  $daybreakModelChoices.set({})
   $selectedStoredSessionId.set(null)
   vi.clearAllMocks()
 })
@@ -191,6 +191,41 @@ describe('ModelMenuPanel current selection', () => {
     renderPanel()
     await screen.findByRole('menuitem', { name: /GPT-6-sol/ })
     expect(screen.queryByRole('switch', { name: 'Daybreak' })).toBeNull()
+  })
+
+  it('remembers Daybreak from an unselected row and applies it when that row is selected', async () => {
+    $activeSessionId.set(null)
+    $currentProvider.set('openai-codex')
+    $currentModel.set('gpt-6-sol')
+    getGlobalModelOptions.mockResolvedValue({
+      providers: [
+        {
+          name: 'ChatGPT or Codex Subscription',
+          slug: 'openai-codex',
+          models: ['gpt-6-sol', 'gpt-6-luna'],
+          capabilities: {
+            'gpt-6-sol': { daybreak: true, fast: true, reasoning: true },
+            'gpt-6-luna': { daybreak: true, fast: true, reasoning: true }
+          }
+        }
+      ]
+    })
+    renderPanel()
+    const luna = await screen.findByRole('menuitem', { name: /GPT-6-luna/ })
+    fireEvent.pointerMove(luna, { pointerType: 'mouse' })
+    const daybreak = await screen.findByRole('switch', { name: 'Daybreak' })
+    expect(daybreak.hasAttribute('disabled')).toBe(false)
+
+    fireEvent.click(daybreak)
+    await vi.waitFor(() =>
+      expect(screen.getByRole('switch', { name: 'Daybreak' }).getAttribute('aria-checked')).toBe('true')
+    )
+    // Preference only: the selected model's conversation choice is untouched.
+    expect(daybreakSelectionFor(null)).toBeUndefined()
+
+    fireEvent.click(luna)
+    await vi.waitFor(() => expect(daybreakSelectionFor(null)).toBe(true))
+    $modelPresets.set({})
   })
 
   it('keeps the checkmark on the live SessionView model when a stale options response disagrees', async () => {

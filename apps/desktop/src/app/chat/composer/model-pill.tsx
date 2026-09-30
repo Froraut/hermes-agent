@@ -1,5 +1,5 @@
-import { atom } from 'nanostores'
 import { useStore } from '@nanostores/react'
+import { atom } from 'nanostores'
 import { useEffect, useRef, useState } from 'react'
 
 import { useSessionView } from '@/app/chat/session-view'
@@ -30,6 +30,7 @@ import type { ChatBarState } from './types'
 // truncates when the row is genuinely out of room (#49340) — not at an
 // arbitrary 160px.
 const UNKNOWN_TIER = atom('')
+
 const PILL = cn(
   'h-(--composer-control-size) min-w-0 shrink gap-1 rounded-md px-2 text-xs font-normal',
   'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'

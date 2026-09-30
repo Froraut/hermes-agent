@@ -1028,6 +1028,7 @@ describe('startFreshSessionDraft', () => {
         handle.startFreshSessionDraft({ preserveRoute: true, workspaceTarget: null })
       }
     )
+
     expect(params).toMatchObject({ model: 'gpt-6-astra', fast: true, service_tier: 'ultrafast' })
     $currentServiceTier.set('')
   })

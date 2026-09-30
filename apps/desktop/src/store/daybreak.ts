@@ -15,6 +15,10 @@ function draftKey(): string {
 
 export const $daybreakSelections = atom<Record<string, boolean>>({})
 
+// A choice made on a model row that isn't selected yet, per conversation and
+// provider::model. Like a speed preset, it applies when that model is selected.
+export const $daybreakModelChoices = atom<Record<string, Record<string, boolean>>>({})
+
 /** These model ids require a Daybreak program even when no switch choice is sent. */
 export function daybreakOnlyModel(model: string): boolean {
   const slug = model.trim().toLowerCase()
@@ -41,7 +45,38 @@ export function setDaybreakSelection(
   $daybreakSelections.set({ ...$daybreakSelections.get(), [daybreakKeyFor(storedSessionId, runtimeId)]: enabled })
 }
 
+export function daybreakModelChoiceFor(
+  storedSessionId: null | string,
+  modelKey: string,
+  runtimeId?: null | string
+): boolean | undefined {
+  const choices = $daybreakModelChoices.get()
+
+  return (
+    choices[daybreakKeyFor(storedSessionId, runtimeId)]?.[modelKey] ??
+    (runtimeId ? choices[runtimeId]?.[modelKey] : undefined)
+  )
+}
+
+export function setDaybreakModelChoice(
+  storedSessionId: null | string,
+  modelKey: string,
+  enabled: boolean,
+  runtimeId?: null | string
+): void {
+  const choices = $daybreakModelChoices.get()
+  const key = daybreakKeyFor(storedSessionId, runtimeId)
+  $daybreakModelChoices.set({ ...choices, [key]: { ...choices[key], [modelKey]: enabled } })
+}
+
 export function adoptDraftDaybreakSelection(storedSessionId: string, sourceDraftKey: string): void {
+  const choices = $daybreakModelChoices.get()
+
+  if (sourceDraftKey in choices) {
+    const { [sourceDraftKey]: draftChoices, ...restChoices } = choices
+    $daybreakModelChoices.set({ ...restChoices, [storedSessionId]: { ...choices[storedSessionId], ...draftChoices } })
+  }
+
   const selections = $daybreakSelections.get()
 
   if (!(sourceDraftKey in selections)) {

@@ -141,8 +141,11 @@ export interface ModelChoice {
 export interface ModelMenuController {
   /** Detached task pickers can edit effort but have no speed write path. */
   allowSpeed?: boolean
-  daybreakFor?: (model: string) => { checked: boolean; required: boolean }
+  daybreakFor?: (row: { model: string; provider: string; isActive: boolean }) => { checked: boolean; required: boolean }
   setDaybreak?: (enabled: boolean, row: { model: string; provider: string; isActive: boolean }) => void
+  /** After a row is selected: apply its remembered Daybreak choice, or clear
+   *  the conversation's choice when the model doesn't support Daybreak. */
+  applyDaybreak?: (row: { model: string; provider: string }, supported: boolean) => void
   /** Restore a model's remembered settings after it is selected. Separate from
    *  `setOptions` because it is one atomic "apply this model's preset" write,
    *  not a user editing one control — surfaces that write through to a session
@@ -390,9 +393,10 @@ export function ModelCatalogMenu({
       return false
     }
 
-    if (!caps?.daybreak) controller.setDaybreak?.(false, { model: family.id, provider: provider.slug, isActive: true })
+    controller.applyDaybreak?.({ model: family.id, provider: provider.slug }, caps?.daybreak ?? false)
 
     const rememberedTier = preset.serviceTier ?? (preset.fast ? 'priority' : 'normal')
+
     const tier =
       rememberedTier === 'ultrafast'
         ? caps?.ultrafast
@@ -825,10 +829,15 @@ export function ModelCatalogMenu({
                           ) : null}
                         </DropdownMenuSubTrigger>
                         <ModelEditSubmenu
+                          canDisableReasoning={caps?.can_disable_reasoning ?? undefined}
                           daybreak={
                             caps?.daybreak && controller.daybreakFor && controller.setDaybreak
                               ? {
-                                  ...controller.daybreakFor(family.id),
+                                  ...controller.daybreakFor({
+                                    model: family.id,
+                                    provider: group.provider.slug,
+                                    isActive: isCurrent
+                                  }),
                                   onChange: enabled =>
                                     controller.setDaybreak!(enabled, {
                                       model: family.id,
@@ -838,13 +847,10 @@ export function ModelCatalogMenu({
                                 }
                               : undefined
                           }
-                          canDisableReasoning={caps?.can_disable_reasoning ?? undefined}
                           defaultEffort={defaultEffort}
                           effort={effEffort}
                           effortWire={isCurrent ? current.effortWire : undefined}
                           fastControl={fastControl}
-                          serviceTier={effTier}
-                          ultrafastSupported={controller.allowSpeed !== false && (caps?.ultrafast ?? false)}
                           isActive={isCurrent}
                           model={family.id}
                           onSelectModel={nextModel => controller.select(nextModel, group.provider.slug)}
@@ -857,6 +863,8 @@ export function ModelCatalogMenu({
                           }
                           provider={group.provider.slug}
                           reasoning={caps?.reasoning ?? true}
+                          serviceTier={effTier}
+                          ultrafastSupported={controller.allowSpeed !== false && (caps?.ultrafast ?? false)}
                         />
                       </DropdownMenuSub>
                     )
