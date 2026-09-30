@@ -591,3 +591,46 @@ def test_builtin_tool_without_required_gets_empty_required_list():
         "properties": {"opts": {"type": "object", "properties": {"k": {"type": "string"}}}},
     })])[0]["function"]["parameters"]
     assert nested["properties"]["opts"]["required"] == []
+
+
+def _as_model_writes(value):
+    """Args as a model writes them from the sanitized schema: every key in its shown spelling."""
+    if isinstance(value, dict):
+        return {sanitize_property_key(k): _as_model_writes(v) for k, v in value.items()}
+    return [_as_model_writes(v) for v in value] if isinstance(value, list) else value
+
+
+def test_unrename_restores_conditional_and_pattern_keys_only_where_they_apply():
+    """The sanitizer also renames illegal keys under if/then/else, dependentSchemas,
+    patternProperties, unevaluatedProperties and unevaluatedItems; args the model writes with the
+    keys shown there must reach the server with the wire keys. A position that does not describe
+    a key never renames it: the object's own properties beat a conditional branch (root "$id" and
+    a real "_id" in ``then`` are both shown as "_id"), a dependent schema needs its trigger key,
+    unevaluatedItems skips prefixItems entries, and ``contains`` never renames an element."""
+    from tools.schema_sanitizer import unrename_tool_args
+
+    def obj(*keys):
+        return {"type": "object", "properties": {k: {"type": "string"} for k in keys}}
+
+    special = {"type": "object", "properties": {"kind": {"const": "special"}, "$id": {"type": "string"}},
+               "required": ["kind"]}
+    params = {
+        "type": "object",
+        "properties": {"mode": {"type": "string"}, "$id": {"type": "string"}, "options": {"type": "object"},
+                       "rows": {"type": "array", "items": {"type": "object"}, "contains": special},
+                       "rest": {"type": "array", "prefixItems": [obj("_tag")], "unevaluatedItems": obj("#tag")}},
+        "if": {"properties": {"mode": {"const": "odata"}}},
+        "then": {"properties": {"$filter": {"type": "string"}, "options": obj("$top"), "_id": {"type": "string"}}},
+        "else": {"properties": {"q:text": {"type": "string"}}},
+        "dependentSchemas": {"mode": obj("@context"), "tenant": obj("$scope")},
+        "patternProperties": {"^x-": obj("$eq")},
+        "unevaluatedProperties": obj("@type"),
+    }
+    wire = {"mode": "odata", "$id": "r", "$filter": "a", "options": {"$top": "5"}, "q:text": "hi",
+            "@context": "c", "_scope": {"@type": "S"}, "x-meta": {"$eq": "v"}, "extra": {"@type": "T"},
+            "rows": [{"kind": "normal", "_id": "n"}], "rest": [{"_tag": "p"}, {"#tag": "t"}]}
+
+    shown = sanitize_tool_schemas([_tool("t", params)])[0]["function"]["parameters"]
+    assert set(shown["then"]["properties"]) <= set(_as_model_writes(wire))
+    assert set(shown["patternProperties"]["^x-"]["properties"]) == set(_as_model_writes(wire["x-meta"]))
+    assert unrename_tool_args(params, _as_model_writes(wire)) == wire
