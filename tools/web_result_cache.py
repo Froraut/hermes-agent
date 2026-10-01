@@ -1,7 +1,7 @@
 """Result caching for web_search / web_extract; both caches TTL-bounded (default 20 min,
 ``web.cache_ttl_minutes``; disable with ``web.cache_enabled: false``), only successful responses cache.
-* **Search memo** — in-memory, per-process, single-flighted: concurrent identical queries share one
-  paid request. Limits bucket to 10/20/50/100 so near-identical requests share an entry.
+* **Search memo** — in-memory, per-process, keyed per profile home, single-flighted: concurrent identical
+  queries share one paid request. Limits bucket to 10/20/50/100 so near-identical requests share an entry.
 * **Extract cache** — disk-backed under ``cache/web`` (cross-process) with a JSON sidecar index:
   URL digest → (file, fetched_at, title). Hits re-run the normal truncate pipeline.
 Lives here, not in tool dispatch, so hits sit *after* every safety check and skip only the vendor call.
@@ -17,6 +17,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
+
+from hermes_constants import hermes_home_key
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
@@ -89,7 +91,9 @@ class SearchMemo:
 
     @staticmethod
     def _key(provider: str, query: str, limit: int) -> tuple:
-        return (provider, normalize_query(query), bucket_limit(limit))
+        # Profile home first: under multiplex each profile's provider reads its own config and
+        # secrets (a private SearXNG, its own API key), so one profile's hit must never serve another.
+        return (hermes_home_key(), provider, normalize_query(query), bucket_limit(limit))
 
     def lookup(self, provider: str, query: str, limit: int) -> Optional[dict]:
         if not cache_enabled():

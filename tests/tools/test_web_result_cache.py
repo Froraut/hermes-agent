@@ -145,6 +145,43 @@ def test_single_flight_coalesces_concurrent_identical_queries():
     assert len(results) == 2 and all(r["success"] for r in results)
 
 
+def test_search_memo_never_serves_one_profile_another_profiles_results(tmp_path):
+    """Multiplexed profiles each reach their own backend: a profile's cached hit (e.g. from a
+    private SearXNG) must not answer the same query for a different profile, and switching back
+    (A→B→A) still serves A its own cached result. Runs under multiplex through the gateway's real
+    per-turn binding (home override + the profile's own .env as secret scope)."""
+    from agent.secret_scope import get_secret, set_multiplex_active
+    from gateway.run import _profile_runtime_scope
+    from tools.web_tools import _memoized_search
+
+    calls = []
+
+    class ProfileSearxng:  # endpoint comes from the calling profile's own .env
+        name = "searxng"
+
+        def search(self, query, limit):
+            calls.append(get_secret("SEARXNG_URL"))
+            return {"success": True, "data": {"web": [{"title": query, "url": f"{calls[-1]}/doc"}]}}
+
+    def search_as(home):
+        with _profile_runtime_scope(home):
+            return _memoized_search(ProfileSearxng(), "q3 roadmap", 5)["data"]["web"][0]["url"]
+
+    wrc.search_memo.clear()
+    homes = {}
+    for name in ("prof-a", "prof-b"):
+        homes[name] = tmp_path / name
+        homes[name].mkdir()
+        (homes[name] / ".env").write_text(f"SEARXNG_URL=https://{name}.internal\n", encoding="utf-8")
+    set_multiplex_active(True)
+    try:
+        seen = [search_as(homes[n]) for n in ("prof-a", "prof-b", "prof-a")]
+    finally:
+        set_multiplex_active(False)
+    assert seen == ["https://prof-a.internal/doc", "https://prof-b.internal/doc", "https://prof-a.internal/doc"]
+    assert calls == ["https://prof-a.internal", "https://prof-b.internal"]  # A's return trip is A's own hit
+
+
 # ── extract cache ────────────────────────────────────────────────────────
 
 def test_extract_cache_roundtrip(_isolated_cache):
