@@ -109,6 +109,13 @@ def _parse_service_response(domain: str, service: str, result: Any) -> Dict[str,
     return {"success": True, "service": f"{domain}.{service}", "affected_entities": affected}
 
 
+def _policy_allows(value: str, configured: str) -> bool:
+    """Match an exact value or a ``domain.*`` entry in a comma-separated policy."""
+    entries = {entry.strip() for entry in configured.split(",") if entry.strip()}
+    domain = value.split(".", 1)[0]
+    return value in entries or f"{domain}.*" in entries
+
+
 async def _async_call_service(
     domain: str, service: str, entity_id: Optional[str] = None, data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -193,6 +200,28 @@ def _handle_call_service(args: dict, **kw) -> str:
             data = json.loads(data) if data.strip() else None
         except json.JSONDecodeError as e:
             return tool_error(f"Invalid JSON string in 'data' parameter: {e}")
+    if data is not None and not isinstance(data, dict):
+        return tool_error("Invalid 'data' parameter: expected a JSON object")
+
+    target = entity_id or (data or {}).get("entity_id")
+    if not isinstance(target, str) or not _ENTITY_ID_RE.match(target):
+        return tool_error("Home Assistant service calls require a valid target entity_id")
+    service_name = f"{domain}.{service}"
+    if not _policy_allows(service_name, get_secret("HASS_ALLOWED_SERVICES", "") or ""):
+        return tool_error(
+            f"Service '{service_name}' is not allowed by HASS_ALLOWED_SERVICES")
+    if not _policy_allows(target, get_secret("HASS_ALLOWED_TARGETS", "") or ""):
+        return tool_error(
+            f"Target '{target}' is not allowed by HASS_ALLOWED_TARGETS")
+
+    from tools.approval import request_tool_approval
+    approval = request_tool_approval(
+        "ha_call_service",
+        f"Call Home Assistant service {service_name} on {target}",
+        rule_key=f"homeassistant:{service_name}:{target}",
+    )
+    if not approval.get("approved"):
+        return tool_error(approval.get("message") or "Home Assistant service call denied")
     return _dispatch(
         _async_call_service(domain, service, entity_id, data),
         "ha_call_service", f"Failed to call {domain}.{service}")
