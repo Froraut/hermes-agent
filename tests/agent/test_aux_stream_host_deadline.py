@@ -233,3 +233,38 @@ def test_protected_provider_daemon_inherits_the_host_deadline():
 
     assert seen["thread"] != threading.current_thread().name
     assert seen["deadline"] == deadline
+
+
+def test_codex_blocked_iterator_cannot_hold_owner_past_host_deadline():
+    """The deadline is enforced by the owner, not by an iterator event hook."""
+    release = threading.Event()
+
+    class _NeverYields:
+        def __iter__(self):
+            release.wait(timeout=1)
+            return iter(())
+
+        def close(self):
+            pass
+
+    class _Responses:
+        def create(self, **_kwargs):
+            return _NeverYields()
+
+    real_client = SimpleNamespace(
+        responses=_Responses(), api_key="test", base_url="https://example.test/codex",
+        close=lambda: None,
+    )
+    client = aux.CodexAuxiliaryClient(real_client, "gpt-test")
+    started = time.monotonic()
+    try:
+        with aux.aux_stream_deadline(started + 0.05):
+            with pytest.raises(TimeoutError, match="host deadline"):
+                aux._run_protected_sync_provider_call(
+                    lambda request: client.chat.completions.create(**request),
+                    {"model": "gpt-test", "messages": [], "timeout": 30},
+                )
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 0.5

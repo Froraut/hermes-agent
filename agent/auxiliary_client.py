@@ -446,19 +446,24 @@ def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any],
     transcript/commit state, never holds the session lock). Unprotected / no cancel source: direct.
     """
     source_cancel_check = _capture_aux_cancel_check()
-    if not _aux_interrupt_protected() or not callable(source_cancel_check):
+    host_deadline = _current_aux_stream_deadline()
+    has_explicit_cancel = _aux_interrupt_protected() and callable(source_cancel_check)
+    # A provider iterator can block inside ``next()`` forever, before any per-event
+    # deadline hook gets control. Isolate calls with a host deadline even without an
+    # explicit-cancel source so the owner enforces the wall-clock budget.
+    if not has_explicit_cancel and not isinstance(host_deadline, (int, float)):
         return callback(kwargs)
     # One linearized outcome per attempt: the host Event is reused/cleared on later turns and
     # the Codex timeout Timer may race owner polling — same lock for both.
-    cancel_check = _AuxiliaryCancellationDecision(source_cancel_check)
-    if cancel_check():
+    cancel_check = _AuxiliaryCancellationDecision(
+        source_cancel_check if callable(source_cancel_check) else lambda: False)
+    if has_explicit_cancel and cancel_check():
         raise AuxiliaryExplicitCancellation()
     # Thread-locals do not cross into the daemon: timing hooks fire from the thread running
     # the callback, and the host deadline is inert unless carried along.
     progress_hook = getattr(_aux_progress, "hook", None)
     dispatch_hook = getattr(_aux_dispatch, "hook", None)
     provider_response_hook = getattr(_aux_provider_response, "hook", None)
-    host_deadline = _current_aux_stream_deadline()
     # #99692: the stream is consumed on the daemon below, and thread-locals do not cross that boundary — an
     # owner-thread-only deadline would leave the fix inert on exactly the path large-session compression
     # takes (protected call + hard-cancel source installed).
@@ -473,7 +478,7 @@ def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any],
                 _aux_thread_local_hook(_aux_dispatch, dispatch_hook),
                 _aux_thread_local_hook(_aux_provider_response, provider_response_hook),
                 aux_stream_deadline(host_deadline),
-                aux_interrupt_protection(cancel_check=cancel_check),
+                aux_interrupt_protection(cancel_check=cancel_check, active=has_explicit_cancel),
             ):
                 outcome["result"] = callback(kwargs)
         except BaseException as exc:
@@ -489,6 +494,10 @@ def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any],
         # host Event land in the same polling interval.
         if _captured_aux_cancel_requested(cancel_check):
             raise AuxiliaryExplicitCancellation()
+        if isinstance(host_deadline, (int, float)) and time.monotonic() >= host_deadline:
+            if has_explicit_cancel and _captured_aux_cancel_requested(cancel_check):
+                raise AuxiliaryExplicitCancellation()
+            raise TimeoutError("auxiliary provider timed out at the host deadline")
         if not done.wait(0.02):
             continue
         if _captured_aux_cancel_requested(cancel_check):
