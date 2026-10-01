@@ -1403,7 +1403,10 @@ class ProcessRegistry(ProcessCheckpointMixin):
             f"rc=$?; printf '%s\\n' \"$rc\" > {q(exit_path)} ) & "
             f"echo $! > {q(pid_path)} && cat {q(pid_path)}")
         try:
-            result = env.execute(bg_command, timeout=timeout, rewrite_compound_background=False)
+            # Launch in the resolved cwd: without it execute() falls back to env.cwd, the
+            # shared cwd of whichever command (any session) last reported one. A bad
+            # cwd makes the wrapper's cd exit 126 before the launch -> failed_start.
+            result = env.execute(bg_command, cwd=cwd or "", timeout=timeout, rewrite_compound_background=False)
             output = result.get("output", "").strip()
             session.pid = next((int(ln) for ln in map(str.strip, output.splitlines()) if ln.isdigit()), None)
             # No PID from the wrapper (syntax error, broken redirect): a failed launch,
