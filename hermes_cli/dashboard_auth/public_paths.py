@@ -13,11 +13,8 @@ PUBLIC_API_PATHS: frozenset[str] = frozenset({
     # Portal wildcard liveness probe (``docs/agent-dashboard-public-url-contract.md``,
     # NAS side): version, gateway state, session count, auth-gate shape. No secrets.
     "/api/status",
-    # Read-only config-defaults / schema feeds for the SPA's Config page.
-    "/api/config/defaults",
-    "/api/config/schema",
-    # Read-only model metadata — same shape as public provider catalogs.
-    "/api/model/info",
+    # Configuration, model/provider and plugin metadata is session-gated below;
+    # none of it is required to render the login/bootstrap surface.
     # Read-only theme manifests for the dashboard skin engine.
     "/api/dashboard/themes",
     # Chronos managed-cron fire webhook (NAS -> agent). NOT cookie-gated: it
