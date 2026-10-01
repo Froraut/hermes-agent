@@ -1227,7 +1227,7 @@ def test_attach_url_happy_path_public_host(worker_env, default_url_guard, monkey
 
     payload = b"public fetch body"
 
-    def fake_stream(method, url, **kwargs):
+    def fake_stream(client, method, url, **kwargs):
         assert url == "http://files.example.com/docs/spec.pdf"
         return _FakeStreamResponse(
             status_code=200,
@@ -1235,7 +1235,7 @@ def test_attach_url_happy_path_public_host(worker_env, default_url_guard, monkey
             body=payload,
         )
 
-    monkeypatch.setattr(httpx, "stream", fake_stream)
+    monkeypatch.setattr(httpx.Client, "stream", fake_stream)
 
     out = kt._handle_attach_url({"url": "http://files.example.com/docs/spec.pdf"})
     d = json.loads(out)
@@ -1250,3 +1250,45 @@ def test_attach_url_happy_path_public_host(worker_env, default_url_guard, monkey
         assert Path(atts[0].stored_path).read_bytes() == payload
     finally:
         conn.close()
+
+
+def test_attach_url_blocks_dns_rebinding_to_loopback(worker_env, default_url_guard, monkeypatch):
+    """A host that answers public for the pre-flight check and loopback at connect time (DNS
+    rebinding) must not reach the internal service or store its response."""
+    import http.server
+    import socket as _socket
+    import threading
+
+    from tools import url_safety
+
+    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(var, raising=False)
+
+    class _InternalOnly(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b"internal-only"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _InternalOnly)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    real_getaddrinfo = _socket.getaddrinfo
+    answers = iter(["93.184.216.34"])  # first lookup public, every later one loopback
+
+    def rebinding_getaddrinfo(host, port, *args, **kwargs):
+        if host != "rebind.example.com":
+            return real_getaddrinfo(host, port, *args, **kwargs)
+        return [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", (next(answers, "127.0.0.1"), port or 0))]
+
+    monkeypatch.setattr(url_safety.socket, "getaddrinfo", rebinding_getaddrinfo)
+    try:
+        _assert_attach_url_blocked(worker_env, f"http://rebind.example.com:{server.server_port}/secret")
+    finally:
+        server.shutdown()
+        server.server_close()
