@@ -8,6 +8,7 @@ conservative: originals are kept whenever a repair is not unambiguous.
 
 import json
 import logging
+from decimal import Decimal
 from typing import Any, Dict
 
 from tools.registry import registry
@@ -184,12 +185,21 @@ def _coerce_json(value: str, expected_python_type: type):
 def _coerce_number(value: str, integer_only: bool = False):
     """Parse *value* as a number; original string on failure, inf/nan, or decimals when integer_only."""
     try:
+        return int(value)  # exact at any size; float() rounds integers past 2**53 to another ID
+    except ValueError:
+        pass
+    try:
         f = float(value)
     except (ValueError, OverflowError):
         return value
     if f != f or f in (float("inf"), float("-inf")):
         return value  # not JSON-serializable
-    return int(f) if f == int(f) else value if integer_only else f
+    # Integral or not is read from the digits written, not from f: from 2**52 on the float has
+    # already rounded ("9007199254740993.0" and "4503599627370496.5" both land on integral floats).
+    written = Decimal(value)  # accepts every spelling float() does
+    if written == written.to_integral_value():
+        return int(written)
+    return value if integer_only else f
 
 
 def _coerce_boolean(value: str):
