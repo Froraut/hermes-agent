@@ -47,6 +47,14 @@ Type in the filter box to narrow by provider name, slug, or model ID.
 
 Pick a model, hit **Switch**, and Hermes writes it to `~/.hermes/config.yaml` under the `model` section. **This applies to new sessions only** — any chat tab you already have open keeps running whatever model it started with. To hot-swap the current chat, use the `/model` slash command inside it.
 
+### Ultra with OpenAI / ChatGPT subscription models
+
+Codex **Ultra** is a native harness mode: it combines model reasoning with the additional orchestration behavior supported by the selected model and account. Codex resolves the model-facing effort itself, typically to `max`. Sending `ultra` directly to a Responses inference endpoint does not activate that harness mode.
+
+To use native Ultra in Hermes, enable `/codex-runtime on`, start a new chat as directed by the command, and choose **Ultra** in the reasoning menu or use `/reasoning ultra`. Hermes sends the level you explicitly picked for the session as `turn/start.effort`; later explicit choices such as `high` or `none` follow on subsequent turns. A profile default (`agent.reasoning_effort`) is not forwarded, so without an explicit pick Codex keeps its own configured effort.
+
+The Desktop status shows **Ultra** for a native Codex turn. On the direct ChatGPT OAuth Responses route, **Ultra→Max** reports the inference-level conversion.
+
 ### Mid-session switches and context warnings
 
 When you switch models **inside an active session** (Herm TUI model picker, `hermes` CLI, or `/model` on Telegram/Discord), Hermes estimates whether your **next message** will run **preflight context compression** against the new model's window. If the session is already near or above that model's compression threshold (see [Context Compression](./configuration.md#context-compression)), the switch reply includes a warning — the same `warning_message` path used for expensive-model notices. The switch still applies immediately; compression runs on the **first user message after the switch**, before the model answers.
