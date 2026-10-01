@@ -201,13 +201,9 @@ def _desktop_staging_owner_alive(pid: int) -> bool:
     """Whether a staging owner still exists; permission refusal means alive."""
     if pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    # Never os.kill(pid, 0): on Windows it delivers CTRL_C_EVENT to the target's console group.
+    from gateway.status import _pid_exists
+    return _pid_exists(pid)
 
 
 def _desktop_staging_scope(desktop_dir: Path, env: Optional[dict] = None) -> str:
