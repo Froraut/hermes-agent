@@ -374,6 +374,46 @@ class TestReadFileRaw:
 class TestValidationPhase:
     """Bug 2 regression tests — validation prevents partial apply."""
 
+    def test_apply_failure_rolls_back_and_stops_later_operations(self):
+        patch = """\
+*** Begin Patch
+*** Update File: a.py
+-old_a
++new_a
+*** Update File: b.py
+-old_b
++new_b
+*** Update File: c.py
+-old_c
++new_c
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+        files = {"a.py": "old_a", "b.py": "old_b", "c.py": "old_c"}
+        writes = []
+
+        class FakeFileOps:
+            def read_file_raw(self, path):
+                return SimpleNamespace(content=files[path], error=None)
+
+            def write_file(self, path, content, pre_content=None):
+                writes.append((path, content))
+                if path == "b.py" and content == "new_b":
+                    return SimpleNamespace(error="injected write failure")
+                files[path] = content
+                return SimpleNamespace(error=None)
+
+            def delete_file(self, path):
+                files.pop(path, None)
+                return SimpleNamespace(error=None)
+
+        result = apply_v4a_operations(ops, FakeFileOps())
+
+        assert result.success is False
+        assert files == {"a.py": "old_a", "b.py": "old_b", "c.py": "old_c"}
+        assert ("c.py", "new_c") not in writes
+        assert "rolled back" in result.error.lower()
+
     def test_validation_failure_writes_nothing(self):
         """If one hunk is invalid, no files should be written."""
         patch = """\
