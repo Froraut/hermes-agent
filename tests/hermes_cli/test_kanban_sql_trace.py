@@ -27,7 +27,7 @@ def test_install_if_enabled_patches_connect_and_traces_task_writes(
     monkeypatch.setattr(trace, "_INSTALLED", False)
     monkeypatch.setattr(sqlite3, "connect", original_connect)
     monkeypatch.setattr(sqlite3.dbapi2, "connect", original_connect)
-    caplog.set_level(logging.WARNING, logger=trace.logger.name)
+    caplog.set_level(logging.INFO, logger=trace.logger.name)
 
     assert trace.install_if_enabled() is True
     assert sqlite3.connect is trace._traced_connect
@@ -44,8 +44,7 @@ def test_install_if_enabled_patches_connect_and_traces_task_writes(
     )
 
     text = caplog.text
-    assert "[kanban-sql-trace] tasks write" in text
-    assert "INSERT INTO tasks" in text
+    assert "[kanban-sql-trace] tasks write op=INSERT" in text
     assert "t_install_test" not in text
     assert "private title" not in text
     assert "private body" not in text
@@ -53,132 +52,111 @@ def test_install_if_enabled_patches_connect_and_traces_task_writes(
 
 
 def _db(tmp_path):
-    conn = sqlite3.connect(tmp_path / "trace.db")
+    conn = sqlite3.connect(tmp_path / "trace.db", isolation_level=None)
     conn.execute(
         "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, body TEXT, status TEXT)"
     )
     conn.execute("CREATE TABLE other (id TEXT, value TEXT)")
+    conn.execute("INSERT INTO tasks VALUES ('t_deadbeef', 'PRIVATE TITLE', 'body', 'ready')")
+    trace._install_connection_trace(conn, tmp_path / "trace.db")
     return conn
 
 
-def test_task_write_trace_logs_shape_stack_and_context_without_values(
+def _records(caplog):
+    return [r for r in caplog.records if "[kanban-sql-trace] tasks write" in r.getMessage()]
+
+
+def test_task_write_trace_logs_op_stack_and_context_without_values(
     tmp_path, monkeypatch, caplog
 ):
-    conn = _db(tmp_path)
     monkeypatch.setenv("HERMES_PROFILE", "mara")
     monkeypatch.setenv("HERMES_KANBAN_BOARD", "default")
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_context_secret")
-    trace._install_connection_trace(conn, tmp_path / "trace.db")
+    conn = _db(tmp_path)
+    caplog.set_level(logging.INFO, logger=trace.logger.name)
 
-    caplog.set_level(logging.WARNING, logger=trace.logger.name)
     conn.execute(
         "INSERT INTO tasks (id, title, body, status) VALUES (?, ?, ?, ?)",
-        ("t_deadbeef", "secret title", "very secret body", "running"),
+        ("t_cafe0001", "secret title", "very secret body", "running"),
     )
 
     text = caplog.text
-    assert "[kanban-sql-trace] tasks write" in text
-    assert "INSERT INTO tasks" in text
+    assert "op=INSERT via_trigger=''" in text
     assert "profile_env='mara'" in text
     assert "board_env='default'" in text
     assert "task_env_set=True" in text
     assert "test_kanban_sql_trace.py" in text
-    assert "t_context_secret" not in text
-    assert "t_deadbeef" not in text
-    assert "secret title" not in text
-    assert "very secret body" not in text
-    conn.close()
-
-
-def test_task_write_trace_redacts_sqlite_double_quoted_values(tmp_path, caplog):
-    conn = _db(tmp_path)
-    trace._install_connection_trace(conn, tmp_path / "trace.db")
-    caplog.set_level(logging.WARNING, logger=trace.logger.name)
-
-    conn.execute(
-        'UPDATE tasks SET title = "PRIVATE TITLE" WHERE id = "t_deadbeef"'
-    )
-
-    text = caplog.text
-    assert "[kanban-sql-trace] tasks write" in text
-    assert "UPDATE tasks" in text
-    assert "PRIVATE TITLE" not in text
-    assert "t_deadbeef" not in text
-    conn.close()
-
-
-def test_quoted_task_identifier_is_detected_before_sql_redaction(tmp_path, caplog):
-    conn = _db(tmp_path)
-    trace._install_connection_trace(conn, tmp_path / "trace.db")
-    caplog.set_level(logging.WARNING, logger=trace.logger.name)
-
-    conn.execute(
-        'UPDATE "main"."tasks" SET "title" = \'PRIVATE TITLE\' '
-        'WHERE "id" = \'t_deadbeef\''
-    )
-
-    text = caplog.text
-    assert "[kanban-sql-trace] tasks write op=UPDATE" in text
-    assert "PRIVATE TITLE" not in text
-    assert "t_deadbeef" not in text
-    conn.close()
-
-
-def test_trace_ignores_reads_and_other_tables(tmp_path, caplog):
-    conn = _db(tmp_path)
-    trace._install_connection_trace(conn, tmp_path / "trace.db")
-    caplog.set_level(logging.WARNING, logger=trace.logger.name)
-
-    conn.execute("SELECT * FROM tasks").fetchall()
-    conn.execute("INSERT INTO other (id, value) VALUES (?, ?)", ("x", "hidden"))
-
-    assert "[kanban-sql-trace]" not in caplog.text
+    for secret in ("t_context_secret", "t_cafe0001", "secret title", "very secret body"):
+        assert secret not in text
     conn.close()
 
 
 @pytest.mark.parametrize(
-    ("statement", "secrets"),
+    ("statement", "op"),
     [
-        (
-            "UPDATE tasks SET body='don''t leak' WHERE id='t_deadbeef'",
-            ("don''t leak", "t_deadbeef"),
-        ),
-        (
-            'UPDATE tasks SET title="PRIVATE TITLE" WHERE id="t_deadbeef"',
-            ("PRIVATE TITLE", "t_deadbeef"),
-        ),
-        (
-            'UPDATE tasks SET title="PRIVATE ""TITLE""" WHERE id=1',
-            ("PRIVATE", "TITLE"),
-        ),
-        (
-            "UPDATE tasks SET result=X'CAFE' WHERE id=1",
-            ("CAFE",),
-        ),
-        (
-            "UPDATE tasks SET priority=-42.5, score=6.02e23 WHERE id=1",
-            ("-42.5", "6.02e23"),
-        ),
-        (
-            "UPDATE tasks SET priority=0xCAFE WHERE id=1",
-            ("CAFE",),
-        ),
-        (
-            "UPDATE tasks SET priority=1 -- private line\nWHERE id=2",
-            ("private line",),
-        ),
-        (
-            "UPDATE tasks SET priority=1 /* private block */ WHERE id=2",
-            ("private block",),
-        ),
+        ("DELETE FROM tasks WHERE id = 't_deadbeef'", "DELETE"),
+        ('DELETE FROM "main"."tasks"', "DELETE"),
+        ("UPDATE tasks SET id = 't_running' WHERE id = 't_deadbeef'", "UPDATE id"),
+        ("UPDATE \"TASKS\" SET \"ID\" = 't_running'", "UPDATE id"),
+        ("DROP TABLE tasks", "DROP TABLE"),
     ],
 )
-def test_redaction_removes_private_sql_tokens(statement, secrets):
-    shaped = trace._redacted_sql_shape(statement)
+def test_identity_changing_writes_are_warnings(tmp_path, caplog, statement, op):
+    conn = _db(tmp_path)
+    caplog.set_level(logging.INFO, logger=trace.logger.name)
 
-    for secret in secrets:
-        assert secret not in shaped
-    assert shaped.startswith("UPDATE tasks SET")
+    conn.execute(statement)
+
+    records = [r for r in _records(caplog) if f"op={op} " in r.getMessage()]
+    assert records and all(r.levelno == logging.WARNING for r in records)
+    assert "PRIVATE TITLE" not in caplog.text and "t_running" not in caplog.text
+    conn.close()
+
+
+def test_routine_updates_reads_and_other_tables_are_not_logged(tmp_path, caplog):
+    conn = _db(tmp_path)
+    caplog.set_level(logging.DEBUG, logger=trace.logger.name)
+
+    conn.execute("UPDATE tasks SET status = 'running', title = 'x' WHERE id = 't_deadbeef'")
+    conn.execute("SELECT * FROM tasks").fetchall()
+    # Statement text that merely mentions a tasks write is not a tasks write.
+    conn.execute(
+        "INSERT INTO other (id, value) VALUES (?, ?)",
+        ("x", "please run: DELETE FROM tasks WHERE id = 't_deadbeef'"),
+    )
+
+    assert _records(caplog) == []
+    conn.close()
+
+
+def test_write_issued_by_a_trigger_names_the_trigger(tmp_path, caplog):
+    conn = _db(tmp_path)
+    conn.execute(
+        "CREATE TRIGGER rogue AFTER INSERT ON other BEGIN "
+        "DELETE FROM tasks; INSERT INTO tasks (id, title, status) VALUES ('t_running', '', 'running'); END"
+    )
+    caplog.set_level(logging.INFO, logger=trace.logger.name)
+
+    conn.execute("INSERT INTO other (id, value) VALUES ('1', '2')")
+
+    records = _records(caplog)
+    assert {r.getMessage().split(" via_trigger=")[1].split(" ")[0] for r in records} == {"'rogue'"}
+    # Even the INSERT is a warning when a trigger issues it.
+    assert all(r.levelno == logging.WARNING for r in records)
+    conn.close()
+
+
+def test_trace_failure_never_denies_the_statement(tmp_path, monkeypatch):
+    conn = _db(tmp_path)
+
+    def _boom():
+        raise RuntimeError("context lookup failed")
+
+    monkeypatch.setattr(trace, "_runtime_context", _boom)
+    conn.execute("DELETE FROM tasks WHERE id = 't_deadbeef'")
+
+    assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    conn.close()
 
 
 def test_runtime_context_exposes_task_presence_not_task_id(monkeypatch):
