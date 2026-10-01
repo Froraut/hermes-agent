@@ -503,11 +503,12 @@ def _recycle_local_session(task_id: str, session_info: Dict[str, Any], task_sock
     if _browser_in_sandbox():
         # The daemon lives in the sandbox: no host pid, no host socket. Ask the CLI there to close it, evict the record.
         _sandbox_close_daemon(session_name)
+        scoped_key = _bt._home_scoped_key(task_id)
         with _bt._cleanup_lock:
-            if _bt._active_sessions.get(task_id) is session_info:
-                _bt._active_sessions.pop(task_id, None)
-                _bt._session_last_activity.pop(task_id, None)
-        _bt._suspect_browser_sessions.pop(task_id, None)
+            if _bt._active_sessions.get(scoped_key) is session_info:
+                _bt._active_sessions.pop(scoped_key, None)
+                _bt._session_last_activity.pop(scoped_key, None)
+        _bt._suspect_browser_sessions.pop(scoped_key, None)
         return
     daemon_pid = _read_browser_daemon_pid(task_socket_dir, session_name) if session_name else None
     daemon_alive = (

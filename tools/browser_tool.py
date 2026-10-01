@@ -262,12 +262,12 @@ from tools import browser_tool_cloud as _cloud
 from tools import browser_tool_lightpanda_fallback as _lp
 
 
-# Single shared real-profile copy-browser session: concurrent tasks reuse it
-# instead of each launching a rival Chromium on the same copied user-data-dir.
+# One real-profile copy-browser per owning home: concurrent tasks in that
+# profile reuse it instead of launching rival Chromium processes on one copy.
 _REAL_PROFILE_SESSION = "hermes-real-profile"
 _real_profile_cdp_lock = threading.Lock()
-_real_profile_cdp_cache: dict = {}
-_real_profile_chrome_procs: list = []  # Popen handles of directly-launched real browsers
+_real_profile_cdp_cache: Dict[str, str] = {}  # hermes_home_key -> CDP discovery root
+_real_profile_chrome_procs: Dict[str, list] = {}  # hermes_home_key -> directly-launched browsers
 
 
 
@@ -1106,14 +1106,14 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
                 "browser mode."
             ))
 
-    # Camofox keeps its own raw-task_id-keyed session map, so pass the raw id.
+    # Camofox scopes its own session map, so pass the raw id and let that backend add the current home.
     if _is_camofox_mode():
         return _camofox_eval(expression, task_id)
 
     # The supervisor answers over its own WebSocket and never reaches _run_browser_command, so the Bot
     # Desktop lease fence has to bracket it here too — otherwise the one command that reads arbitrary
     # page state is the one a human's takeover does not stop. Same fence, same session identity.
-    fenced = _session.run_fenced(_active_sessions.get(effective_task_id) or {},
+    fenced = _session.run_fenced(_active_sessions.get(_home_scoped_key(effective_task_id)) or {},
                                  lambda: {"fast": _eval_supervisor_fast_path(effective_task_id, expression)})
     if fenced.get("code") == "human_has_control":
         return _dumps(fenced)
