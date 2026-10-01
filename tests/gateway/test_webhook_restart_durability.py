@@ -9,7 +9,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from gateway.config import PlatformConfig
-from gateway.platforms.webhook import WebhookAdapter
+from gateway.platforms.webhook import WebhookAdapter, _WebhookDeliveryIdentity
 
 
 @pytest.mark.asyncio
@@ -53,6 +53,8 @@ async def test_restart_preserves_idempotency_and_delivery_envelope(tmp_path, mon
         assert (await response.json())["status"] == "duplicate"
 
     assert len(received) == 1
-    envelope = restarted._delivery_info["webhook:alerts:fake-delivery-1"]
+    identity = _WebhookDeliveryIdentity.from_parts(None, "alerts", "fake-delivery-1")
+    assert identity in restarted._seen_deliveries
+    envelope = restarted._delivery_info[identity.session_chat_id]
     assert envelope["deliver"] == "telegram"
     assert envelope["deliver_extra"] == {"chat_id": "fake-chat"}
