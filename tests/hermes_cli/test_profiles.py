@@ -12,7 +12,9 @@ import socket
 import stat
 import sys
 import tarfile
+import threading
 import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -1239,6 +1241,41 @@ class TestRenameProfile:
         assert verb.call_count == 1
         assert verb.call_args.args[1:] == ("oldname", "newname")
         acquire.assert_not_called()
+
+    def test_rename_fences_target_creation_until_identity_migration_finishes(self, profile_env):
+        """The target slug must not admit another identity until the rename commits."""
+        create_profile("oldname", no_alias=True)
+        migration_entered = threading.Event()
+        release_migration = threading.Event()
+        create_started = threading.Event()
+        create_finished = threading.Event()
+
+        def paused_migration(*_args):
+            migration_entered.set()
+            assert release_migration.wait(5)
+
+        def create_target():
+            create_started.set()
+            try:
+                return create_profile("newname", no_alias=True)
+            finally:
+                create_finished.set()
+
+        with patch("hermes_cli.profiles.check_alias_collision", return_value="skip"), \
+             patch("hermes_cli.profiles._live_default_multiplexer", return_value=False), \
+             patch("hermes_cli.profile_identity._migrate_profile_identity", side_effect=paused_migration), \
+             ThreadPoolExecutor(max_workers=2) as pool:
+            rename = pool.submit(rename_profile, "oldname", "newname")
+            assert migration_entered.wait(5)
+            target = pool.submit(create_target)
+            assert create_started.wait(5)
+            assert not create_finished.wait(0.25)
+            release_migration.set()
+            assert rename.result(timeout=5).name == "newname"
+            with pytest.raises(FileExistsError, match="already exists"):
+                target.result(timeout=5)
+
+        assert (profile_env / ".hermes" / "profiles" / "newname").is_dir()
 
 
 
