@@ -257,6 +257,71 @@ class TestDiscoveryShape:
         ]
         assert len(adaptive_json.encode("utf-8")) < len(full_json.encode("utf-8")) * 0.6
 
+    def test_discovery_hydrates_only_visible_prebounded_payloads(self, db, monkeypatch):
+        """Recall must omit hidden/rewound rows and cap one huge content/tool payload
+        before the SQLite row is decoded into the outer tool result."""
+        db.create_session("visible", source="cli")
+        db.append_message(
+            "visible", role="user", content="HIDDEN_NEIGHBOR_MARKER",
+            display_kind="hidden",
+        )
+        anchor = db.append_message(
+            "visible",
+            role="assistant",
+            content="cobalt hydration needle " + "x" * 80_000,
+            tool_calls=[{
+                "id": "huge-call",
+                "type": "function",
+                "function": {"name": "terminal", "arguments": "y" * 80_000},
+            }],
+        )
+        rewound = db.append_message(
+            "visible", role="user", content="REWOUND_NEIGHBOR_MARKER"
+        )
+        db._conn.execute(
+            "UPDATE messages SET active = 0, compacted = 0 WHERE id = ?", (rewound,)
+        )
+        db.append_message("visible", role="assistant", content="visible resolution")
+
+        db.create_session("hidden-session", source="cli")
+        db._conn.execute("UPDATE sessions SET hidden = 1 WHERE id = 'hidden-session'")
+        db.append_message(
+            "hidden-session", role="user",
+            content="cobalt hydration needle PRIVATE_SESSION_MARKER",
+        )
+        db._conn.commit()
+
+        decode_content = db._decode_content
+        decoded_sizes = []
+
+        def assert_prebounded(value):
+            if isinstance(value, str):
+                decoded_sizes.append(len(value))
+                assert len(value) <= 4_000
+            return decode_content(value)
+
+        monkeypatch.setattr(db, "_decode_content", assert_prebounded)
+
+        raw = session_search(
+            query="cobalt hydration needle", limit=10, detail="full", db=db
+        )
+        result = json.loads(raw)
+
+        assert result["success"] is True
+        assert [entry["session_id"] for entry in result["results"]] == ["visible"]
+        assert decoded_sizes and max(decoded_sizes) <= 4_000
+        assert "HIDDEN_NEIGHBOR_MARKER" not in raw
+        assert "REWOUND_NEIGHBOR_MARKER" not in raw
+        assert "PRIVATE_SESSION_MARKER" not in raw
+        assert len(raw) < 30_000
+        message = next(
+            item for item in result["results"][0]["messages"] if item["id"] == anchor
+        )
+        assert message["content_truncated"] is True
+        assert message["original_content_chars"] > 80_000
+        assert message["tool_calls_truncated"] is True
+        assert message["original_tool_calls_chars"] > 80_000
+
 
     def test_current_session_filtered_out(self, db):
         _seed_modpack_sessions(db)

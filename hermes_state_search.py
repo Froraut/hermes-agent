@@ -18,6 +18,7 @@ from hermes_state_common import (
     MAX_FTS5_QUERY_CHARS, SCHEMA_VERSION, _FTS_CJK_TRIGGERS,
     escape_like as _escape_like, fts_rebuild_admission, fts_trigram_session_sql, routed_sessions_setting,
 )
+from hermes_state_messages import DISPLAY_VISIBLE_SQL, _RECALL_VISIBLE_SQL
 
 # Pre-split logger identity so log filtering/capture is unchanged.
 logger = logging.getLogger("hermes_state")
@@ -44,6 +45,7 @@ _QUOTED_PHRASE_RE = re.compile(r'"[^"]*"')
 
 # Column list shared by every search route (snippet + metadata, never content).
 _SEARCH_SELECT_TAIL = "m.timestamp, m.tool_name, s.source, s.model, s.started_at AS session_started"
+_SEARCH_SNIPPET_CHARS = 500
 _LIKE_SNIPPET_SQL = "substr(m.content, max(1, instr(m.content, ?) - 40), 120) AS snippet"
 _LIKE_ANY_COLUMN_SQL = (
     "(m.content LIKE ? ESCAPE '\\' OR m.tool_name LIKE ? ESCAPE '\\' OR m.tool_calls LIKE ? ESCAPE '\\')"
@@ -55,20 +57,29 @@ _LIKE_COALESCED_COLUMN_SQL = (
 )
 # ``sort`` -> ORDER BY for the FTS routes; unknown values are rank-only (user input passes through).
 _FTS_ORDER_BY = {"newest": "ORDER BY m.timestamp DESC, rank", "oldest": "ORDER BY m.timestamp ASC, rank"}
+# Canonical LIKE is the degraded read path when the derived index cannot be used. A
+# progress deadline keeps that full-table fallback from monopolising a large live store.
+_CANONICAL_SEARCH_TIMEOUT_SECONDS = 3.0
 # Indexed neighbor seeks avoid scanning whole sessions for a sparse set of hits.
-_CONTEXT_WINDOW_SQL = """WITH target AS (
-    SELECT session_id, timestamp, id FROM messages WHERE id IN ({ids})
+_CONTEXT_WINDOW_SQL = f"""WITH target AS (
+    SELECT session_id, timestamp, id FROM messages WHERE id IN ({{ids}})
 )
-SELECT t.id AS match_id, m.role, m.content
+SELECT t.id AS match_id, m.role, substr(m.content, 1, 1000) AS content
 FROM target t JOIN messages m ON m.id IN (
     t.id,
     (SELECT p.id FROM messages p
      WHERE p.session_id = t.session_id AND (p.timestamp, p.id) < (t.timestamp, t.id)
+       AND (? OR p.active = 1 OR p.compacted = 1)
+       AND COALESCE(p.display_kind, '') <> 'hidden'{DISPLAY_VISIBLE_SQL}
      ORDER BY p.timestamp DESC, p.id DESC LIMIT 1),
     (SELECT n.id FROM messages n
      WHERE n.session_id = t.session_id AND (n.timestamp, n.id) > (t.timestamp, t.id)
+       AND (? OR n.active = 1 OR n.compacted = 1)
+       AND COALESCE(n.display_kind, '') <> 'hidden'{DISPLAY_VISIBLE_SQL}
      ORDER BY n.timestamp, n.id LIMIT 1)
 )
+WHERE (? OR m.active = 1 OR m.compacted = 1)
+  AND COALESCE(m.display_kind, '') <> 'hidden'{DISPLAY_VISIBLE_SQL}
 ORDER BY t.id, m.timestamp, m.id"""
 # Unified Ideographs, Extension A, Extension B, CJK Symbols, Hiragana, Katakana, Hangul Syllables.
 _CJK_RANGES = (
@@ -171,7 +182,10 @@ def _search_filter_clauses(
     if not include_inactive:
         where.append("(m.active = 1 OR m.compacted = 1)")
     # display_kind="hidden" rows are model-facing scaffolding the person never saw; a hit would confuse.
-    where.append("COALESCE(m.display_kind, '') <> 'hidden'")
+    where.append(f"COALESCE(m.display_kind, '') <> 'hidden'{DISPLAY_VISIBLE_SQL}")
+    # Hidden sessions (notably canonical Bot Chat internals) are absent from every
+    # personal-history listing and must not reappear through content search.
+    where.append("COALESCE(s.hidden, 0) = 0")
     if source_filter is not None:
         where.append(f"s.source IN ({','.join('?' for _ in source_filter)})")
         params.extend(source_filter)
@@ -730,7 +744,9 @@ class SessionSearchMixin:
 
     def get_anchored_view(
         self, session_id: str, around_message_id: int, window: int = 5, bookend: int = 3,
-        keep_roles: Optional[Tuple[str, ...]] = ("user", "assistant")) -> Dict[str, Any]:
+        keep_roles: Optional[Tuple[str, ...]] = ("user", "assistant"), *,
+        recall_visible: bool = False, max_content_chars: Optional[int] = None,
+        max_tool_calls_chars: Optional[int] = None) -> Dict[str, Any]:
         """Anchored window (``get_messages_around``) plus session bookends, so one call yields the
         goal and the resolution of a long session. ``window`` is filtered to ``keep_roles``
         (None disables) EXCEPT the anchor; ``bookend_start`` / ``bookend_end`` are the
@@ -738,7 +754,11 @@ class SessionSearchMixin:
         window (empty when it overlaps the head/tail). Empty result when the anchor isn't
         in the session."""
         bookend = max(bookend, 0)
-        primitive = self.get_messages_around(session_id, around_message_id, window=window)
+        primitive = getattr(self, "get_messages_around")(
+            session_id, around_message_id, window=window,
+            recall_visible=recall_visible, max_content_chars=max_content_chars,
+            max_tool_calls_chars=max_tool_calls_chars,
+        )
         window_rows = primitive["window"]
         if not window_rows:
             return {"window": [], "messages_before": 0, "messages_after": 0, "bookend_start": [], "bookend_end": []}
@@ -750,13 +770,20 @@ class SessionSearchMixin:
         bookend_start_rows: List[Any] = []
         bookend_end_rows: List[Any] = []
         if bookend > 0:
+            bounded = max_content_chars is not None or max_tool_calls_chars is not None
+            select = (
+                getattr(self, "_bounded_recall_select")(
+                    max_content_chars or 4000, max_tool_calls_chars or 4000
+                ) if bounded else "*"
+            )
+            visible = _RECALL_VISIBLE_SQL if recall_visible else ""
             role_clause = "" if keep_roles is None else f" AND role IN ({','.join('?' for _ in keep_roles)})"
             role_params = [] if keep_roles is None else list(keep_roles)
             with self._read_ctx() as conn:
                 def _bookend(op: str, boundary_id: int, order: str):
                     return conn.execute(
-                        f"SELECT * FROM messages "
-                        f"WHERE session_id = ? AND id {op} ?{role_clause} "
+                        f"SELECT {select} FROM messages "
+                        f"WHERE session_id = ? AND id {op} ?{role_clause}{visible} "
                         f"AND length(content) > 0 "
                         f"ORDER BY id {order} LIMIT ?",
                         (session_id, boundary_id, *role_params, bookend),
@@ -766,6 +793,8 @@ class SessionSearchMixin:
                 bookend_end_rows = list(reversed(_bookend(">", window_rows[-1]["id"], "DESC")))
 
         def _hydrate(row) -> Dict[str, Any]:
+            if max_content_chars is not None or max_tool_calls_chars is not None:
+                return getattr(self, "_row_to_bounded_recall_message")(row)
             return self._row_to_message_dict(row, warn_context="get_anchored_view", summary_flag=False)
         return {
             "window": filtered_window, "messages_before": primitive["messages_before"],
@@ -934,7 +963,7 @@ class SessionSearchMixin:
         _search_filter_clauses(where, params, **filters)
         params.extend([limit, offset])
         sql = _search_select_sql(
-            f"snippet({table}, -1, '>>>', '<<<', '...', 40) AS snippet",
+            f"substr(snippet({table}, -1, '>>>', '<<<', '...', 40), 1, {_SEARCH_SNIPPET_CHARS}) AS snippet",
             f"{table}\n            JOIN messages m ON m.id = {table}.rowid", where, order_by_sql, "LIMIT ? OFFSET ?",
         )
         return sql, params
@@ -961,10 +990,41 @@ class SessionSearchMixin:
                 fail_open, exc)
             return None
 
-    def _like_rows(self, where: List[str], params: list, *, order_by: str, limit_sql: str) -> List[Dict[str, Any]]:
-        """Canonical-table LIKE scan; ``params[0]`` is the snippet anchor term."""
+    def _like_rows(self, where: List[str], params: list, *, order_by: str, limit_sql: str,
+                   timeout_seconds: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Canonical-table LIKE scan; ``params[0]`` is the snippet anchor term.
+
+        A fallback may need to scan the canonical message table, so callers can set a
+        cooperative SQLite VM deadline. Timing out raises instead of manufacturing a
+        successful empty result.
+        """
         sql = _search_select_sql(_LIKE_SNIPPET_SQL, "messages m", where, order_by, limit_sql)
-        return [dict(row) for row in self._read_all(sql, params)]
+        if timeout_seconds is None:
+            return [dict(row) for row in getattr(self, "_read_all")(sql, params)]
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        interrupted_by_deadline = False
+
+        def _deadline_progress_handler() -> int:
+            nonlocal interrupted_by_deadline
+            if time.monotonic() >= deadline:
+                interrupted_by_deadline = True
+                return 1
+            return 0
+
+        try:
+            with getattr(self, "_read_ctx")() as conn:
+                conn.set_progress_handler(_deadline_progress_handler, 1000)
+                try:
+                    rows = conn.execute(sql, params).fetchall()
+                finally:
+                    conn.set_progress_handler(None, 0)
+        except sqlite3.OperationalError as exc:
+            if interrupted_by_deadline and "interrupt" in str(exc).lower():
+                raise TimeoutError(
+                    f"canonical session search exceeded {timeout_seconds:g}s deadline"
+                ) from exc
+            raise
+        return [dict(row) for row in rows]
 
     @staticmethod
     def _compile_like_boolean_query(query: str) -> Tuple[str, List[Any], Optional[str]]:
@@ -1014,7 +1074,8 @@ class SessionSearchMixin:
         _search_filter_clauses(where, params, **filters)
         order = "ASC" if isinstance(sort, str) and sort.strip().lower() == "oldest" else "DESC"
         return self._like_rows(where, [snippet_term, *params, limit, offset],
-                               order_by=f"ORDER BY m.timestamp {order}, m.id {order}", limit_sql="LIMIT ? OFFSET ?")
+                               order_by=f"ORDER BY m.timestamp {order}, m.id {order}", limit_sql="LIMIT ? OFFSET ?",
+                               timeout_seconds=_CANONICAL_SEARCH_TIMEOUT_SECONDS)
 
     def _refresh_fts_stale_state(self) -> None:
         """Observe fail-open initiated by another process sharing state.db."""
@@ -1029,7 +1090,8 @@ class SessionSearchMixin:
             self._fts_enabled = self._trigram_available = self._fts_cjk_available = False
 
     def _finalize_search_matches(
-        self, matches: List[Dict[str, Any]], result_fields: Optional[Collection[str]] = None) -> List[Dict[str, Any]]:
+        self, matches: List[Dict[str, Any]], result_fields: Optional[Collection[str]] = None,
+        include_inactive: bool = False) -> List[Dict[str, Any]]:
         """Attach neighboring messages in bounded batches, only when context is requested."""
         if result_fields is None or "context" in result_fields:
             for start in range(0, len(matches), 500):
@@ -1038,7 +1100,9 @@ class SessionSearchMixin:
                 try:
                     sql = _CONTEXT_WINDOW_SQL.format(ids=",".join("?" for _ in contexts))
                     with self._read_ctx() as conn:
-                        rows = conn.execute(sql, list(contexts)).fetchall()
+                        rows = conn.execute(
+                            sql, [*contexts, include_inactive, include_inactive, include_inactive]
+                        ).fetchall()
                     for row in rows:
                         contexts[row["match_id"]].append(row)
                 except Exception:
@@ -1108,13 +1172,17 @@ class SessionSearchMixin:
         # opt-in full-body path and scans canonical rows via LIKE.
         if role_filter and "tool" in role_filter:
             matches = self._search_messages_like_fallback(query, limit=limit, offset=offset, sort=sort, **filters)
-            return self._finalize_search_matches(matches, result_fields=result_fields)
+            return self._finalize_search_matches(
+                matches, result_fields=result_fields, include_inactive=include_inactive)
         self._refresh_fts_stale_state()
         if self._fts_stale:
             matches = self._search_messages_like_fallback(query, limit=limit, offset=offset, sort=sort, **filters)
-            return self._finalize_search_matches(matches, result_fields=result_fields)
+            return self._finalize_search_matches(
+                matches, result_fields=result_fields, include_inactive=include_inactive)
         if not self._fts_enabled:
-            return []
+            matches = self._search_messages_like_fallback(query, limit=limit, offset=offset, sort=sort, **filters)
+            return self._finalize_search_matches(
+                matches, result_fields=result_fields, include_inactive=include_inactive)
 
         order_by_sql = _FTS_ORDER_BY.get(sort.strip().lower() if isinstance(sort, str) else None, "ORDER BY rank")
         route = dict(order_by_sql=order_by_sql, limit=limit, offset=offset, **filters)
@@ -1130,7 +1198,12 @@ class SessionSearchMixin:
             try:
                 matches = [dict(row) for row in self._read_all(sql, params)]
             except sqlite3.OperationalError:
-                return []  # FTS5 syntax error despite sanitization
+                # Missing/unsupported FTS and query-parser failures are derived-index
+                # failures, not proof that canonical history has no match.
+                matches = self._search_messages_like_fallback(
+                    query, limit=limit, offset=offset, sort=sort, **filters)
+                return self._finalize_search_matches(
+                    matches, result_fields=result_fields, include_inactive=include_inactive)
             except sqlite3.DatabaseError as exc:
                 # Corruption parent class: detach the derived indexes and answer from
                 # canonical rows; repair paths own the rebuild.
@@ -1186,7 +1259,8 @@ class SessionSearchMixin:
                 matches = self._match_rows("messages_fts", relaxed, fail_open="OR-relaxed",
                                            operational_debug="OR-relaxed FTS retry failed; keeping empty result",
                                            **route) or matches
-        return self._finalize_search_matches(matches, result_fields=result_fields)
+        return self._finalize_search_matches(
+            matches, result_fields=result_fields, include_inactive=include_inactive)
 
     def _search_cjk(self, query: str, wants_unindexed_rows: bool, route: Dict[str, Any]) -> List[Dict[str, Any]]:
         """CJK routing: the unicode61 table splits CJK into single characters (false positives,
