@@ -2951,6 +2951,7 @@ export interface SessionCreateParams {
   hidden?: boolean
   room_plumbing?: boolean
   follow_profile_config?: boolean
+  idempotency_key?: string | null
 }
 /** One create-time transcript row (``session_history._coerce_seed_history``); ``text`` is the legacy alias of ``content``; only ``display_kind: "hidden"`` is accepted from the wire. Clients forward stored rows verbatim (``_row_id``, ``timestamp``, …) and the coercer drops what it does not use, so the row stays open. */
 export interface SeedMessage {
@@ -3002,6 +3003,7 @@ export interface SessionBranchStoredParams {
   cols?: number | null
   source?: string | null
   cwd?: string | null
+  idempotency_key?: string | null
 }
 export interface SessionBranchStoredResult {
   session_id: string
@@ -3265,6 +3267,7 @@ export interface SessionBranchParams {
   profile?: string | null
   name?: string | null
   count?: number | null
+  idempotency_key?: string | null
 }
 export interface SessionBranchResult {
   session_id: string
@@ -3279,6 +3282,7 @@ export interface SessionBranchWholeParams {
   session_id: string
   profile?: string | null
   name?: string | null
+  idempotency_key?: string | null
 }
 export interface SessionBranchWholeResult {
   session_id: string
@@ -3646,6 +3650,7 @@ export interface CommandsCatalogResult {
 export interface CommandCatalogMeta {
   argument_mode?: ArgumentMode | null
   desktop?: string | null
+  desktop_subcommands?: string[] | null
 }
 export type ArgumentMode = 'options' | 'text' | 'mixed'
 export interface CommandCategory {
