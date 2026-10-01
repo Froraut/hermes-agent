@@ -128,6 +128,7 @@ export interface ModelChoice {
   /** Level the route actually sends for `effort` (`session.info.reasoning_effort_wire`); '' = unknown. */
   effortWire?: string
   fast: boolean
+  serviceTier?: string
   model: string
   provider: string
 }
@@ -141,18 +142,23 @@ export interface ModelChoice {
  * Returning `{}` is fine — the row then shows Hermes' defaults.
  */
 export interface ModelMenuController {
+  /** Detached task pickers can edit effort but have no speed write path. */
+  allowSpeed?: boolean
   /** Restore a model's remembered settings after it is selected. Separate from
    *  `setOptions` because it is one atomic "apply this model's preset" write,
    *  not a user editing one control — surfaces that write through to a session
    *  need to batch it. Values are already capability-gated by the menu. */
-  applyPreset: (preset: { effort?: string; fast?: boolean }, row: { model: string; provider: string }) => void
+  applyPreset: (
+    preset: { effort?: string; fast?: boolean; serviceTier?: string },
+    row: { model: string; provider: string }
+  ) => void
   current: ModelChoice
-  presetFor: (provider: string, model: string) => { effort?: string; fast?: boolean }
+  presetFor: (provider: string, model: string) => { effort?: string; fast?: boolean; serviceTier?: string }
   /** Commit a model row. Return false to abort (a failed session switch). */
   select: (model: string, provider: string) => Promise<boolean | void> | void
   /** Edit ONE option on a row. `isActive` says whether it's the current model. */
   setOptions: (
-    patch: { effort?: string; fast?: boolean },
+    patch: { effort?: string; fast?: boolean; serviceTier?: string },
     row: { isActive: boolean; model: string; provider: string }
   ) => void
 }
@@ -411,10 +417,21 @@ export function ModelCatalogMenu({
       return false
     }
 
+    const rememberedTier = preset.serviceTier ?? (preset.fast ? 'priority' : 'normal')
+
+    const tier =
+      rememberedTier === 'ultrafast'
+        ? caps?.ultrafast
+          ? 'ultrafast'
+          : 'normal'
+        : rememberedTier === 'priority' && caps?.fast
+          ? 'priority'
+          : 'normal'
+
     controller.applyPreset(
       {
         effort: (caps?.reasoning ?? true) ? (preset.effort ?? defaultEffort) : undefined,
-        fast: (caps?.fast ?? false) ? (preset.fast ?? false) : undefined
+        ...(controller.allowSpeed !== false ? { serviceTier: tier, fast: tier !== 'normal' } : {})
       },
       { model: family.id, provider: provider.slug }
     )
@@ -993,13 +1010,12 @@ function ModelFamilyRow({
   const preset = controller.presetFor(provider.slug, family.id)
   const effEffort = isCurrent ? current.effort : (preset.effort ?? '')
   const effFast = isCurrent ? current.fast : (preset.fast ?? false)
+  const effTier = isCurrent ? current.serviceTier : preset.serviceTier
 
-  const fastControl: FastControl = resolveFastControl(
-    activeId ?? family.id,
-    provider.models ?? [],
-    caps?.fast ?? false,
-    effFast
-  )
+  const fastControl: FastControl =
+    controller.allowSpeed === false
+      ? { kind: 'none' }
+      : resolveFastControl(activeId ?? family.id, provider.models ?? [], caps?.fast ?? false, effFast)
 
   // Row meta (provider, variant tag, fast mode, reasoning effort) renders as
   // discrete badge chips BESIDE the name — not appended to it — so "High"
@@ -1009,7 +1025,11 @@ function ModelFamilyRow({
   const metaTags = [
     showProvider ? provider.name : null,
     tag || null,
-    fastControl.kind !== 'none' && fastControl.on ? copy.fast : null,
+    fastControl.kind !== 'none' && fastControl.on && !(fastControl.kind === 'param' && fastControl.canEnable === false)
+      ? effTier === 'ultrafast'
+        ? t.shell.modelOptions.ultrafast
+        : copy.fast
+      : null,
     (caps?.reasoning ?? true) && !(isCurrent && current.effortPending)
       ? reasoningEffortLabel(effEffort || defaultEffort, isCurrent ? current.effortWire : undefined)
       : null
@@ -1124,6 +1144,8 @@ function ModelFamilyRow({
         }
         provider={provider.slug}
         reasoning={caps?.reasoning ?? true}
+        serviceTier={effTier}
+        ultrafastSupported={controller.allowSpeed !== false && (caps?.ultrafast ?? false)}
       />
     </DropdownMenuSub>
   )

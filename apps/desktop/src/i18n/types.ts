@@ -1560,6 +1560,8 @@ export interface Translations {
       defaultsLabel: string
       reasoning: string
       reasoningOff: string
+      speed: string
+      speedStandard: string
       defaultsFailed: string
       loadFailed: string
       restartRequired: string
@@ -3918,6 +3920,8 @@ export interface Translations {
       options: string
       thinking: string
       fast: string
+      ultrafast: string
+      useStandardSpeed: string
       effort: string
       minimal: string
       low: string
