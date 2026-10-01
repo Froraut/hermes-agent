@@ -305,18 +305,23 @@ def _skill_not_found_error(name: str, suffix: str = "") -> str:
     return base + suffix
 
 
+def _names_skill_md(name: str, file_path: Optional[str]) -> bool:
+    """True when ``file_path`` spells the skill's own SKILL.md ('SKILL.md' or '<skill>/SKILL.md').
+    Callers route it to SKILL.md semantics (frontmatter validation, the delete guards) instead
+    of the supporting-file branches, which would skip them or resolve a nested file."""
+    parts = Path(file_path or "").parts
+    return (bool(parts) and parts[-1] == "SKILL.md"
+            and (len(parts) == 1 or (len(parts) == 2 and parts[0] == Path(name or "").name)))
+
+
 def _validate_file_path(file_path: str) -> Optional[str]:
-    """Validate a write_file/remove_file path: under an allowed subdir, no escape."""
+    """Validate a supporting-file path: under an allowed subdir, no escape."""
     from tools.path_security import has_traversal_component
     if not file_path:
         return "file_path is required."
     parts = Path(file_path).parts
-    # Traversal first, so the SKILL.md exception is unreachable by a traversal-laden path.
     if has_traversal_component(file_path):
         return "Path traversal ('..') is not allowed."
-    # SKILL.md lives at the skill root; accept 'SKILL.md' and '<skill>/SKILL.md'.
-    if parts and parts[-1] == "SKILL.md" and len(parts) in (1, 2):
-        return None
     if not parts or parts[0] not in ALLOWED_SUBDIRS:
         allowed = ", ".join(sorted(ALLOWED_SUBDIRS))
         return f"File must be under one of: {allowed}. Got: '{file_path}'"
@@ -476,6 +481,8 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str = N
         return _err(_PATCH_NEEDS_NEW_STRING)
     # No old_string == new_string guard here: fuzzy_find_and_replace rejects that with a
     # richer error (file_preview) this layer cannot produce.
+    if _names_skill_md(name, file_path):
+        file_path = None  # the SKILL.md path below: frontmatter validation + lint
     skill_dir, guard = _locate_for_write(name, "patch")
     if guard:
         return guard
@@ -563,10 +570,12 @@ def _rmdir_if_empty(parent: Path, stop: Path) -> None:
 
 def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     """Add or overwrite a supporting file within any skill directory."""
-    if err := _validate_file_path(file_path):
-        return _err(err)
     if not file_content and file_content != "":
         return _err("file_content is required.")
+    if _names_skill_md(name, file_path):
+        return _edit_skill(name, file_content)  # a full SKILL.md rewrite, validated as one
+    if err := _validate_file_path(file_path):
+        return _err(err)
     if (content_bytes := len(file_content.encode("utf-8"))) > MAX_SKILL_FILE_BYTES:
         return _err(f"File content is {content_bytes:,} bytes (limit: {MAX_SKILL_FILE_BYTES:,} "
                     f"bytes / 1 MiB). Consider splitting into smaller files.")
@@ -589,6 +598,9 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
 
 def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
     """Remove a supporting file from any skill directory."""
+    if _names_skill_md(name, file_path):
+        return _err(f"SKILL.md is the skill itself; removing it deletes skill '{name}'. "
+                    "Use action='delete' instead.")
     if err := _validate_file_path(file_path):
         return _err(err)
     skill_dir, guard = _locate_for_write(name, "remove_file", org_guard=False)
