@@ -190,6 +190,48 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         self._rg_resolution_cache: Dict[str, str] = {}
         self._rg_modified_capability: Dict[str, Optional[str]] = {}
 
+    def _open_local_parent(self, path: str) -> Optional[tuple[int, str]]:
+        """Pin a local POSIX parent before managed-root validation."""
+        if (os.name != "posix" or not os.environ.get("HERMES_WRITE_SAFE_ROOT") or
+                self.env.__class__.__module__ != "tools.environments.local"):
+            return None
+        parent, name = os.path.split(path)
+        if not parent or not name:
+            return None
+        return os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)), name
+
+    @staticmethod
+    def _read_at(parent_fd: int, name: str) -> bytes:
+        fd = os.open(name, os.O_RDONLY, dir_fd=parent_fd)
+        try:
+            chunks = []
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    return b"".join(chunks)
+                chunks.append(chunk)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _write_at(parent_fd: int, name: str, data: bytes) -> None:
+        temp = f".{name}.hermes-{secrets.token_hex(8)}"
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666, dir_fd=parent_fd)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+            os.replace(temp, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except BaseException:
+            try:
+                os.unlink(temp, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
+        finally:
+            os.close(fd)
+
     def _exec(self, command: str, cwd: str = None, timeout: int = None,
               stdin_data: str = None) -> ExecuteResult:
         """Run ``command`` on the backend. cwd: explicit arg → live ``env.cwd`` →
@@ -1261,11 +1303,26 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         """Delete a single file (directories rejected) via the backend's ``python -c``
         so one code path works on local/docker/ssh AND Windows shells (no ``rm``)."""
         path = self._expand_path(path)
+        pinned = self._open_local_parent(path)
         # Delete removes the directory entry (a symlink itself, not its target), so
         # the guards vet the entry as well as the target it resolves to.
         denied = get_write_denied_error(path, verb="Delete", entry=True)
         if denied:
+            if pinned:
+                os.close(pinned[0])
             return WriteResult(error=denied)
+        if pinned:
+            parent_fd, name = pinned
+            try:
+                try:
+                    os.unlink(name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                return WriteResult()
+            except OSError as exc:
+                return WriteResult(error=f"Failed to delete {path}: {exc}")
+            finally:
+                os.close(parent_fd)
         # Path baked in via repr() for shell-independent quoting; no
         # ``unlink(missing_ok=True)`` (a 3.7 remote interpreter lacks it).
         snippet = (
@@ -1300,11 +1357,30 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
     def move_file(self, src: str, dst: str) -> WriteResult:
         src = self._expand_path(src)
         dst = self._expand_path(dst)
+        src_pinned = self._open_local_parent(src)
+        dst_pinned = self._open_local_parent(dst)
         # Entry-level op like delete_file: vet both entries, not just their targets.
         for p in (src, dst):
             denied = get_write_denied_error(p, verb="Move", entry=True)
             if denied:
+                for pinned in (src_pinned, dst_pinned):
+                    if pinned:
+                        os.close(pinned[0])
                 return WriteResult(error=denied)
+        if src_pinned and dst_pinned:
+            src_fd, src_name = src_pinned
+            dst_fd, dst_name = dst_pinned
+            try:
+                os.rename(src_name, dst_name, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
+                return WriteResult()
+            except OSError as exc:
+                return WriteResult(error=f"Failed to move {src} -> {dst}: {exc}")
+            finally:
+                os.close(src_fd)
+                os.close(dst_fd)
+        for pinned in (src_pinned, dst_pinned):
+            if pinned:
+                os.close(pinned[0])
         result = self._exec(f"mv {self._escape_shell_arg(src)} {self._escape_shell_arg(dst)}")
         if result.exit_code != 0:
             return WriteResult(error=f"Failed to move {src} -> {dst}: {result.stdout}")
@@ -1469,16 +1545,43 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         caller already has (skips the read); BOM detection always probes disk.
         """
         path = self._expand_path(path)
+        pinned = self._open_local_parent(path)
         denied = get_write_denied_error(path)
         if denied:
+            if pinned:
+                os.close(pinned[0])
             return WriteResult(error=denied)
         refused = self._reject_unencodable(path, content)
         if refused is not None:
+            if pinned:
+                os.close(pinned[0])
             return refused
         ext = os.path.splitext(path)[1].lower()
         refused = self._fail_closed_syntax_error(path, ext, content)
         if refused is not None:
+            if pinned:
+                os.close(pinned[0])
             return refused
+        if pinned:
+            parent_fd, name = pinned
+            try:
+                try:
+                    previous = self._read_at(parent_fd, name)
+                except FileNotFoundError:
+                    previous = b""
+                previous_text = previous.decode("utf-8", "surrogateescape")
+                if _detect_line_ending(previous_text) == "\r\n":
+                    content = _normalize_line_endings(content, "\r\n")
+                if previous.startswith(_UTF8_BOM.encode("utf-8")) and not _has_bom(content):
+                    content = _UTF8_BOM + content
+                data = content.encode("utf-8", "surrogateescape")
+                self._write_at(parent_fd, name, data)
+                return WriteResult(bytes_written=len(data), dirs_created=True, verified=True,
+                                   _content_sha256=hashlib.sha256(data).hexdigest())
+            except OSError as exc:
+                return WriteResult(error=f"Failed to write file: {exc}")
+            finally:
+                os.close(parent_fd)
 
         # Pre-content is read only for extensions in the UNION of in-process lint and
         # LSP coverage (keeps the hot path fast for binaries).
@@ -1566,41 +1669,83 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         """Replace text in a file using fuzzy matching (``old_string`` must be
         unique unless ``replace_all``). Returns a PatchResult with diff + lint."""
         path = self._expand_path(path)
+        pinned = self._open_local_parent(path)
         denied = get_write_denied_error(path)
         if denied:
+            if pinned:
+                os.close(pinned[0])
             return PatchResult(error=denied)
-        data, failed = self._read_exact_bytes(path)
+        if pinned:
+            try:
+                data, failed = self._read_at(pinned[0], pinned[1]), None
+            except OSError:
+                data, failed = None, None
+        else:
+            data, failed = self._read_exact_bytes(path)
         if data is None:
-            return PatchResult(error=failed.cwd_error or f"Failed to read file: {path}")
-        # Every line the replacement does not touch is written back, so read the exact bytes;
-        # surrogateescape lets write_file restore any byte UTF-8 cannot decode (#79178).
-        # Match and diff on BOM-stripped content (a phantom U+FEFF defeats an exact
-        # first-line match); the raw read becomes write_file's pre_content.
-        raw_content = data.decode("utf-8", "surrogateescape")
-        content, _ = _strip_bom(raw_content)
+            if pinned:
+                os.close(pinned[0])
+            return PatchResult(error=(failed.cwd_error if failed else None) or f"Failed to read file: {path}")
+        try:
+            # Every line the replacement does not touch is written back, so read the exact bytes;
+            # surrogateescape lets write_file restore any byte UTF-8 cannot decode (#79178).
+            # Match and diff on BOM-stripped content (a phantom U+FEFF defeats an exact
+            # first-line match); the raw read becomes write_file's pre_content.
+            raw_content = data.decode("utf-8", "surrogateescape")
+            content, _ = _strip_bom(raw_content)
 
-        from tools.fuzzy_match import fuzzy_find_and_replace
-        new_content, match_count, _strategy, error = fuzzy_find_and_replace(
-            content, old_string, new_string, replace_all)
-        if error or match_count == 0:
-            return self._no_match_result(path, content, old_string, new_string, match_count, error)
-        # Models send bare-LF old/new strings; normalize the substituted region to
-        # the file's ending so CRLF files stay consistent.
-        file_ending = _detect_line_ending(content)
-        if file_ending:
-            new_content = _normalize_line_endings(new_content, file_ending)
-        write_result = self.write_file(path, new_content, pre_content=raw_content)
-        if write_result.error:
-            return PatchResult(error=f"Failed to write changes: {write_result.error}")
-        verify_error = self._verify_patch_persisted(path, new_content)
-        if verify_error is not None:
-            return verify_error
-        lint_result = self._check_lint_delta(path, pre_content=content, post_content=new_content)
-        return PatchResult(
-            success=True, diff=self._unified_diff(content, new_content, path), files_modified=[path],
-            lint=lint_result.to_dict() if lint_result else None,
-            # From the internal write_file call, whose baseline was the pre-patch content.
-            lsp_diagnostics=write_result.lsp_diagnostics)
+            from tools.fuzzy_match import fuzzy_find_and_replace
+            new_content, match_count, _strategy, error = fuzzy_find_and_replace(
+                content, old_string, new_string, replace_all)
+            if error or match_count == 0:
+                return self._no_match_result(
+                    path, content, old_string, new_string, match_count, error)
+            # Models send bare-LF old/new strings; normalize the substituted region to
+            # the file's ending so CRLF files stay consistent.
+            file_ending = _detect_line_ending(content)
+            if file_ending:
+                new_content = _normalize_line_endings(new_content, file_ending)
+            if pinned:
+                output = new_content
+                if _has_bom(raw_content) and not _has_bom(output):
+                    output = _UTF8_BOM + output
+                refused = self._reject_unencodable(path, output)
+                if refused is not None:
+                    return PatchResult(error=refused.error)
+                refused = self._fail_closed_syntax_error(
+                    path, os.path.splitext(path)[1].lower(), output)
+                if refused is not None:
+                    return PatchResult(error=refused.error)
+                try:
+                    self._write_at(pinned[0], pinned[1],
+                                   output.encode("utf-8", "surrogateescape"))
+                except OSError as exc:
+                    return PatchResult(error=f"Failed to write changes: {exc}")
+                write_result = WriteResult(verified=True)
+                on_disk = self._read_at(pinned[0], pinned[1]).decode(
+                    "utf-8", "surrogateescape")
+                if _normalize_line_endings(on_disk, "\n") != _normalize_line_endings(
+                        output, "\n"):
+                    return PatchResult(error=(
+                        f"Post-write verification failed for {path}: on-disk content "
+                        "differs from intended write. The patch did not persist."))
+            else:
+                write_result = self.write_file(path, new_content, pre_content=raw_content)
+                if write_result.error:
+                    return PatchResult(error=f"Failed to write changes: {write_result.error}")
+                verify_error = self._verify_patch_persisted(path, new_content)
+                if verify_error is not None:
+                    return verify_error
+            lint_result = self._check_lint_delta(
+                path, pre_content=content, post_content=new_content)
+            return PatchResult(
+                success=True, diff=self._unified_diff(content, new_content, path),
+                files_modified=[path], lint=lint_result.to_dict() if lint_result else None,
+                # From the internal write_file call, whose baseline was pre-patch content.
+                lsp_diagnostics=write_result.lsp_diagnostics)
+        finally:
+            if pinned:
+                os.close(pinned[0])
 
     def patch_v4a(self, patch_content: str) -> PatchResult:
         """Apply a V4A format patch (``*** Begin Patch`` / ``*** Update File:`` /
