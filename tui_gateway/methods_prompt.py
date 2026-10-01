@@ -744,9 +744,12 @@ def _(rid, params: dict) -> dict:
             # built for exactly this race — see desktop's `runRewindSubmit`) waits
             # for `running` to clear and resubmits with the truncation intact.
             return _err(rid, 4009, "session busy")
+        from agent.daybreak import daybreak_change_needs_own_turn
         busy_response = _handle_busy_submit(
             rid, sid, session, text, busy_transport,
-            queued=bool(params.get("queued")) or daybreak_enabled is not None,
+            # Only a program change waits for its own turn; the same program may steer/redirect.
+            queued=bool(params.get("queued")) or daybreak_change_needs_own_turn(
+                daybreak_enabled, bool(session.get("_running_daybreak"))),
             turn_author=turn_author, display_kind=display_kind, daybreak_enabled=daybreak_enabled)
         if busy_response is not None:
             return busy_response

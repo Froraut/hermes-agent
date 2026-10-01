@@ -7,9 +7,12 @@ leaking into another session.
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Iterator
+
+logger = logging.getLogger(__name__)
 
 
 _daybreak_requested: ContextVar[bool] = ContextVar("hermes_daybreak_requested", default=False)
@@ -80,9 +83,24 @@ def profile_daybreak_default(config: dict | None, *, provider: str, api_mode: st
 
 def resolve_turn_daybreak(explicit: bool | None, config: dict | None, *, provider: str, api_mode: str, model: str,
                           access_token: str = "", base_url: str = "") -> bool | None:
-    """The turn's Daybreak choice: the client's explicit one, else ``True`` when the profile default applies."""
+    """The turn's Daybreak choice: the client's explicit one, else ``True`` when the profile default applies.
+
+    An explicit ``True`` is revalidated against the current model: a choice made for an eligible model
+    must not follow an out-of-band switch (``/model``, another window) to one the catalog does not offer
+    Daybreak on. Aliases that require the program keep it through ``daybreak_turn`` either way."""
+    if explicit is True and provider == "openai-codex" and api_mode == "codex_responses":
+        if not model_offers_daybreak(model, access_token, base_url):
+            logger.info("Daybreak choice dropped: %s does not offer Daybreak on this account", model)
+            return None
+        return True
     if explicit is not None:
         return explicit
     return True if profile_daybreak_default(
         config, provider=provider, api_mode=api_mode, model=model, access_token=access_token, base_url=base_url,
     ) else None
+
+
+def daybreak_change_needs_own_turn(requested: bool | None, running: bool) -> bool:
+    """A mid-turn message with an explicit choice must wait for its own turn only when it asks for a
+    different program than the running turn (Standard <-> Daybreak); the same program may steer."""
+    return requested is not None and bool(requested) != bool(running)

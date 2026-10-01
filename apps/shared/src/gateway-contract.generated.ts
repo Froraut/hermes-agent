@@ -519,6 +519,7 @@ export interface SessionLiveInfo {
   provider?: string
   reasoning_effort?: string
   reasoning_effort_wire?: string
+  daybreak_active?: boolean
   service_tier?: string
   fast?: boolean
   yolo?: boolean
@@ -3228,6 +3229,7 @@ export interface SessionCwdSetResult {
   provider?: string
   reasoning_effort?: string
   reasoning_effort_wire?: string
+  daybreak_active?: boolean
   service_tier?: string
   fast?: boolean
   yolo?: boolean

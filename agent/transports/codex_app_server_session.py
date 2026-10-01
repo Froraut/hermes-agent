@@ -225,8 +225,9 @@ class CodexAppServerSession:
         # A codex thread id persisted by an earlier process for this Hermes session: the first
         # ``ensure_started`` issues ``thread/resume`` for it instead of ``thread/start``.
         self._resume_thread_id = resume_thread_id
-        # ``thread/start.model`` / ``.modelProvider``: select a provider from codex's own
-        # ``[model_providers.<id>]`` table. Only the id travels; codex reads base_url/env_key itself.
+        # ``thread/start.model``: the Hermes-selected slug, for every provider. ``.modelProvider``: a named
+        # custom provider's id in codex's own ``[model_providers.<id>]`` table; only the id travels, codex
+        # reads base_url/env_key itself.
         self._model = (model or "").strip() or None
         self._model_provider = (model_provider or "").strip() or None
         # Hermes' composed system prompt (SOUL.md, memory, channel overrides). Sent ONCE per thread as
@@ -444,12 +445,14 @@ class CodexAppServerSession:
         return projection, aborted
 
     def run_turn(
-        self, user_input: Any, *, turn_timeout: float = 600.0,
+        self, user_input: Any, *, model: Optional[str] = None, turn_timeout: float = 600.0,
         notification_poll_timeout: float = 0.25, post_tool_quiet_timeout: float = 90.0,
         effort: str | None = None,
     ) -> TurnResult:
         """Send a user message and block until turn/completed, bridging approvals and projecting items.
 
+        model: sent on ``turn/start`` (codex applies it to this and later turns), so an in-place ``/model``
+        switch reaches a thread that was started with another model.
         effort: the reasoning level the user explicitly picked in Hermes (``ultra`` included, which codex
         runs as its harness mode). ``None`` omits the field so codex keeps its configured default; the
         model and speed always stay codex's own (#75186).
@@ -468,10 +471,12 @@ class CodexAppServerSession:
                 result.interrupted = True
             else:
                 input_items, result.submitted_user_text = _build_turn_input(user_input)
-                turn_params: dict[str, Any] = {"threadId": self._thread_id, "input": input_items}
+                params: dict[str, Any] = {"threadId": self._thread_id, "input": input_items}
+                if model:
+                    params["model"] = model
                 if effort is not None:
-                    turn_params["effort"] = effort
-                ts = self._request_for(result, "turn/start", turn_params, "turn/start")
+                    params["effort"] = effort
+                ts = self._request_for(result, "turn/start", params, "turn/start")
                 if ts is not None:
                     self._run_started_turn(result, ts, turn_timeout, notification_poll_timeout, post_tool_quiet_timeout)
         self._interrupt_event.clear()

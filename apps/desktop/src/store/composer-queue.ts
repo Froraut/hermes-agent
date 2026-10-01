@@ -143,17 +143,18 @@ const toPersistedEntry = (entry: QueuedPromptEntry): QueuedPromptEntry => {
  *  not a slash command — the same gate `steerDraft` applies to the live draft
  *  (attachments can't ride a redirect; slash commands execute, not steer). */
 export const isSteerableEntry = (
-  entry: Pick<QueuedPromptEntry, 'attachments' | 'text' | 'daybreakEnabled'>
+  entry: Pick<QueuedPromptEntry, 'attachments' | 'text' | 'daybreakEnabled'>,
+  runningDaybreak = false
 ): boolean => {
   const text = entry.text.trim()
 
-  // A redirect inherits the running turn's program; an explicit selection
-  // must wait for its own turn instead.
+  // A redirect inherits the running turn's program: an explicit choice may
+  // steer only a turn that already runs that program; a change waits.
   return (
     Boolean(text) &&
     entry.attachments.length === 0 &&
     !SLASH_COMMAND_RE.test(text) &&
-    entry.daybreakEnabled === undefined
+    (entry.daybreakEnabled === undefined || entry.daybreakEnabled === runningDaybreak)
   )
 }
 

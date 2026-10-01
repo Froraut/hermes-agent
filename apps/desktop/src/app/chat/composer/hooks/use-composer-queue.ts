@@ -25,6 +25,7 @@ import {
   updateQueuedPrompt,
   withQueueDrainClaim
 } from '@/store/composer-queue'
+import { $runningDaybreak } from '@/store/daybreak-running'
 import { notify } from '@/store/notifications'
 import { $sessionsLoading } from '@/store/session'
 
@@ -116,6 +117,7 @@ export function useComposerQueue({
   // not on cross-session queue churn (the plain atom's map ref changes on every
   // write; the keyed array does not).
   const queuedPrompts = useSessionSlice($queuedPromptsBySession, activeQueueSessionKey)
+  const runningDaybreak = Boolean(useStore($runningDaybreak)[activeQueueSessionKey ?? ''])
 
   // Parked = the user explicitly halted this session (Stop/Esc) while prompts
   // were queued. The map is tiny (only halted sessions) so a plain subscribe
@@ -434,7 +436,7 @@ export function useComposerQueue({
 
       const entry = getQueuedPrompts(activeQueueSessionKey).find(e => e.id === id)
 
-      if (!entry || !isSteerableEntry(entry)) {
+      if (!entry || !isSteerableEntry(entry, runningDaybreak)) {
         return false
       }
 
@@ -469,7 +471,7 @@ export function useComposerQueue({
 
       return true
     },
-    [activeQueueSessionKey, busy, onSteer, queueEditRef, t.composer]
+    [activeQueueSessionKey, busy, onSteer, queueEditRef, runningDaybreak, t.composer]
   )
 
   // Double-Enter while busy. The entry usually sits in the queue because the
@@ -485,7 +487,7 @@ export function useComposerQueue({
     async (id: string) => {
       const entry = activeQueueSessionKey ? getQueuedPrompts(activeQueueSessionKey).find(e => e.id === id) : undefined
 
-      if (!busy || !entry || entry.displayKind || entry.displayText || !isSteerableEntry(entry)) {
+      if (!busy || !entry || entry.displayKind || entry.displayText || !isSteerableEntry(entry, runningDaybreak)) {
         return sendQueuedNow(id)
       }
 
@@ -503,7 +505,7 @@ export function useComposerQueue({
         (busyRef.current && getQueuedPrompts(activeQueueSessionKey!).some(e => e.id === id) && sendQueuedNow(id))
       )
     },
-    [activeQueueSessionKey, busy, sendQueuedNow, steerQueuedNow]
+    [activeQueueSessionKey, busy, runningDaybreak, sendQueuedNow, steerQueuedNow]
   )
 
   // Edge-independent auto-drain: send the head whenever the session is idle and

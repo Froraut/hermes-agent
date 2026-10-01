@@ -10,6 +10,7 @@ import {
   getFrozenQueuedTransport,
   getQueuedPrompts,
   isQueueParked,
+  isSteerableEntry,
   migrateQueuedPrompts,
   parkQueuedPrompts,
   promoteQueuedPrompt,
@@ -564,5 +565,17 @@ describe('composer queue terminal payload persistence', () => {
       })
     ).toBe(true)
     expect(getFrozenQueuedTransport(entry!.id)).toBeUndefined()
+  })
+})
+
+describe('isSteerableEntry and the running turn program', () => {
+  const entry = (daybreakEnabled?: boolean) => ({ attachments: [], daybreakEnabled, text: 'follow up' })
+
+  it('lets the same program steer and makes only a Standard <-> Daybreak change wait', () => {
+    expect(isSteerableEntry(entry())).toBe(true)
+    expect(isSteerableEntry(entry(false), false)).toBe(true)
+    expect(isSteerableEntry(entry(true), true)).toBe(true)
+    expect(isSteerableEntry(entry(true), false)).toBe(false)
+    expect(isSteerableEntry(entry(false), true)).toBe(false)
   })
 })

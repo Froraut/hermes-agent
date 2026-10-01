@@ -845,6 +845,7 @@ export interface SessionRuntimeInfo {
   reasoning_effort?: string
   /** What the route actually sends for `reasoning_effort` (empty when unset; equal when verbatim). */
   reasoning_effort_wire?: string
+  daybreak_active?: boolean
   running?: boolean
   service_tier?: string
   skills?: Record<string, string[]> | string[]
