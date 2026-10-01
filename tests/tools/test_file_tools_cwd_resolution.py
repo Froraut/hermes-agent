@@ -237,6 +237,122 @@ class _FakeEnv:
         self.cwd = cwd
 
 
+class _FakeRemoteEnvironment:
+    """Shell-backed remote double: all file I/O must arrive via ``execute``."""
+
+    is_local = False
+    env_type = "docker"
+    _hermes_backend_name = "docker"
+    env = {}
+
+    def __init__(self, cwd: str, cwd_backing: dict[str, Path]):
+        self.cwd = cwd
+        self.cwd_backing = cwd_backing
+        self.calls: list[dict] = []
+
+    def execute(self, command: str, cwd: str | None = None, **kwargs) -> dict:
+        import subprocess
+        from tools.environments.local import _find_bash
+
+        effective_cwd = cwd or self.cwd
+        self.calls.append({"command": command, "cwd": effective_cwd})
+        backing_cwd = self.cwd_backing.get(effective_cwd)
+        if backing_cwd is None:
+            raise AssertionError(f"unexpected remote cwd: {effective_cwd}")
+        is_windows = os.name == "nt"
+        stdin_data = kwargs.get("stdin_data")
+        proc = subprocess.run(
+            [_find_bash(), "-c", command] if is_windows else ["bash", "-c", command],
+            cwd=backing_cwd,
+            input=(stdin_data.encode("utf-8", "surrogateescape")
+                   if is_windows and stdin_data is not None else stdin_data),
+            capture_output=True,
+            text=not is_windows,
+        )
+        output = proc.stdout + proc.stderr
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", "replace")
+        return {"output": output, "returncode": proc.returncode}
+
+
+@pytest.fixture
+def _remote_cwd_split(tmp_path, monkeypatch):
+    """Task cwd A over a shared remote env whose stale live cwd is B."""
+    from tools.file_operations import ShellFileOperations
+
+    task_backing = tmp_path / "task-a"
+    stale_backing = tmp_path / "shared-env-b"
+    task_backing.mkdir()
+    stale_backing.mkdir()
+    task_cwd = "/workspace/task-a"
+    stale_cwd = "/workspace/shared-env-b"
+    env = _FakeRemoteEnvironment(
+        stale_cwd,
+        {task_cwd: task_backing, stale_cwd: stale_backing},
+    )
+    ops = ShellFileOperations(env)
+    task_id = f"remote-cwd-{tmp_path.name}"
+
+    monkeypatch.setattr(terminal_tool, "_session_cwd", {})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
+    terminal_tool.record_session_cwd(task_id, task_cwd)
+    container_key = terminal_tool._resolve_container_task_id(task_id)
+    monkeypatch.setattr(terminal_tool, "_active_environments", {container_key: env})
+    monkeypatch.setattr(ft, "_get_file_ops", lambda task_id="default": ops)
+    return task_id, task_cwd, task_backing, stale_backing, env
+
+
+def _dispatch_json(name: str, args: dict, task_id: str) -> dict:
+    from tools.registry import registry
+
+    result = registry.dispatch(name, args, task_id=task_id)
+    return json.loads(result) if isinstance(result, str) else result
+
+
+def test_remote_read_and_search_execute_in_task_cwd(_remote_cwd_split):
+    """Read/search validation and backend execution must share the task cwd."""
+    task_id, task_cwd, task_backing, stale_backing, env = _remote_cwd_split
+    (task_backing / "target.txt").write_text("REMOTE_TASK_ONLY\n", encoding="utf-8")
+    (stale_backing / "target.txt").write_text("REMOTE_STALE_ONLY\n", encoding="utf-8")
+
+    read_out = _dispatch_json("read_file", {"path": "target.txt"}, task_id)
+    search_out = _dispatch_json(
+        "search_files", {"pattern": "REMOTE_.*_ONLY", "path": "."},
+        task_id)
+
+    assert "REMOTE_TASK_ONLY" in read_out.get("content", ""), read_out
+    assert "REMOTE_STALE_ONLY" not in read_out.get("content", ""), read_out
+    assert "REMOTE_TASK_ONLY" in json.dumps(search_out), search_out
+    assert "REMOTE_STALE_ONLY" not in json.dumps(search_out), search_out
+    assert env.calls and {call["cwd"] for call in env.calls} == {task_cwd}
+
+
+def test_remote_v4a_executes_in_task_cwd(_remote_cwd_split):
+    """V4A must edit the task-resolved file, never the shared env cwd copy."""
+    task_id, task_cwd, task_backing, stale_backing, env = _remote_cwd_split
+    for root in (task_backing, stale_backing):
+        (root / "target.txt").write_text("VALUE=old\n", encoding="utf-8")
+
+    out = _dispatch_json(
+        "patch",
+        {"mode": "patch", "patch": (
+            "*** Begin Patch\n"
+            "*** Update File: target.txt\n"
+            "@@\n"
+            "-VALUE=old\n"
+            "+VALUE=task\n"
+            "*** End Patch\n"
+        )},
+        task_id,
+    )
+
+    assert not out.get("error"), out
+    assert out.get("resolved_path") == f"{task_cwd}/target.txt"
+    assert (task_backing / "target.txt").read_text(encoding="utf-8-sig") == "VALUE=task\n"
+    assert (stale_backing / "target.txt").read_text(encoding="utf-8-sig") == "VALUE=old\n"
+    assert env.calls and {call["cwd"] for call in env.calls} == {task_cwd}
+
+
 def test_unregistered_session_never_inherits_another_sessions_record(
     _two_worktree_sessions, monkeypatch
 ):
