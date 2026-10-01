@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 from threading import Event
@@ -1362,3 +1363,129 @@ def test_on_unload_exception_does_not_block_other_teardown():
     # Reverse acquisition order, exception isolated.
     assert order == ["last", "boom", "first"]
     assert "boom_probe" not in manager._ownership_ledger
+
+
+def test_ctx_registrations_and_stream_workers_are_owner_scoped_across_reload(tmp_path):
+    """A→B→A keeps workers isolated, and BaseException teardown cannot strand A's generation."""
+    from agent import plugin_stream_hooks
+    from hermes_constants import (
+        get_hermes_home,
+        hermes_home_key,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+    from hermes_cli import plugins as plugins_mod
+    from hermes_cli.plugins import PluginContext, PluginManifest
+
+    def in_home(home, callback):
+        token = set_hermes_home_override(home)
+        try:
+            return callback()
+        finally:
+            reset_hermes_home_override(token)
+
+    def worker_for(callback):
+        with plugin_stream_hooks._dispatcher_lock:
+            return next(
+                dispatcher.thread
+                for dispatcher in plugin_stream_hooks._dispatchers.values()
+                if dispatcher.callback is callback
+            )
+
+    for index, error_type in enumerate((asyncio.CancelledError, SystemExit)):
+        home_a, home_b = tmp_path / f"a-{index}", tmp_path / f"b-{index}"
+        home_a.mkdir()
+        home_b.mkdir()
+        manager_a = in_home(home_a, plugins_mod.get_plugin_manager)
+        manager_b = in_home(home_b, plugins_mod.get_plugin_manager)
+        manager_a._discovered = manager_b._discovered = True
+        key_a, key_b = f"owner-a-{index}", f"owner-b-{index}"
+        manifest_a = PluginManifest(name=key_a, key=key_a)
+        manifest_b = PluginManifest(name=key_b, key=key_b)
+        ctx_a = PluginContext(manifest_a, manager_a)
+        ctx_b = PluginContext(manifest_b, manager_b)
+        seen: list[tuple[str, str, str]] = []
+        entered, release = Event(), Event()
+
+        def hook_a(**payload):
+            phase = payload["phase"]
+            seen.append(("a-old", phase, hermes_home_key(get_hermes_home())))
+            if phase == "hold":
+                entered.set()
+                assert release.wait(timeout=2)
+
+        def hook_b(**payload):
+            seen.append(("b", payload["phase"], hermes_home_key(get_hermes_home())))
+
+        ctx_a.register_hook("on_stream_end", hook_a)
+        ctx_a.register_platform_handler("telegram", lambda _native, _adapter: seen.append(("a-factory", "", "")))
+        ctx_a.subscribe(f"{key_a}:tick", lambda **payload: seen.append(("a-event", payload["phase"], "")))
+
+        def fail_teardown():
+            raise error_type("teardown probe")
+
+        ctx_a.on_unload(fail_teardown)
+        ctx_b.register_hook("on_stream_end", hook_b)
+        ctx_b.register_platform_handler("telegram", lambda _native, _adapter: seen.append(("b-factory", "", "")))
+        ctx_b.subscribe(f"{key_b}:tick", lambda **payload: seen.append(("b-event", payload["phase"], "")))
+
+        assert in_home(home_a, lambda: plugin_stream_hooks.enqueue_plugin_stream_hook(
+            "on_stream_end", phase="a-first"))
+        assert in_home(home_b, lambda: plugin_stream_hooks.enqueue_plugin_stream_hook(
+            "on_stream_end", phase="b-first"))
+        b_worker = worker_for(hook_b)
+        assert in_home(home_a, lambda: plugin_stream_hooks.enqueue_plugin_stream_hook(
+            "on_stream_end", phase="hold"))
+        assert entered.wait(timeout=1)
+        assert in_home(home_a, lambda: plugin_stream_hooks.enqueue_plugin_stream_hook(
+            "on_stream_end", phase="stale"))
+        assert in_home(home_a, lambda: ctx_a.emit("tick", {"phase": "before"})) == 1
+        assert manager_a._wait_for_event_dispatch(timeout=1)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            unloading = pool.submit(manager_a.unload, key_a)
+            try:
+                assert unloading.result(timeout=1) is True
+            finally:
+                release.set()
+
+        assert b_worker is not None and b_worker.is_alive()
+        assert manager_a.get_platform_handler_factories("telegram") == []
+        assert in_home(home_a, lambda: ctx_a.emit("tick", {"phase": "after"})) == 0
+        assert "stale" not in [phase for owner, phase, _home in seen if owner == "a-old"]
+        assert key_a not in manager_a._ownership_ledger
+
+        ctx_a2 = PluginContext(manifest_a, manager_a)
+
+        def hook_a2(**payload):
+            seen.append(("a-new", payload["phase"], hermes_home_key(get_hermes_home())))
+
+        ctx_a2.register_hook("on_stream_end", hook_a2)
+        ctx_a2.register_platform_handler("telegram", lambda _native, _adapter: None)
+        ctx_a2.subscribe(f"{key_a}:tick", lambda **payload: seen.append(("a2-event", payload["phase"], "")))
+        assert in_home(home_a, lambda: plugin_stream_hooks.enqueue_plugin_stream_hook(
+            "on_stream_end", phase="a-second"))
+        assert in_home(home_b, lambda: plugin_stream_hooks.enqueue_plugin_stream_hook(
+            "on_stream_end", phase="b-second"))
+        assert in_home(home_a, lambda: plugin_stream_hooks.enqueue_plugin_stream_hook(
+            "on_stream_end", phase="a-third"))
+        assert in_home(home_b, lambda: ctx_b.emit("tick", {"phase": "survived"})) == 1
+        assert manager_b._wait_for_event_dispatch(timeout=1)
+        assert in_home(home_a, lambda: ctx_a2.emit("tick", {"phase": "fresh"})) == 1
+        assert manager_a._wait_for_event_dispatch(timeout=1)
+
+        deadline = monotonic() + 1
+        while ({("a-new", "a-second"), ("a-new", "a-third"), ("b", "b-second")}
+               - {(owner, phase) for owner, phase, _home in seen}) and monotonic() < deadline:
+            sleep(0.01)
+        assert b_worker.is_alive()
+        assert [phase for owner, phase, _home in seen if owner == "a-new"] == ["a-second", "a-third"]
+        assert [phase for owner, phase, _home in seen if owner == "b"] == ["b-first", "b-second"]
+        assert all(
+            home == hermes_home_key(home_a if owner == "a-new" else home_b)
+            for owner, _phase, home in seen if owner in {"a-new", "b"}
+        )
+
+        manager_a.unload()
+        manager_b.unload()
+        plugin_stream_hooks.shutdown_plugin_stream_hook_dispatcher()

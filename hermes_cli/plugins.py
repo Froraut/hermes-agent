@@ -855,7 +855,7 @@ class PluginContext:
         logger.debug("Plugin %s registered Slack action handler: %s", self.manifest.name, action_id)
         return handle
 
-    def register_platform_handler(self, platform: str, factory: Callable) -> None:
+    def register_platform_handler(self, platform: str, factory: Callable) -> PluginRegistration:
         """Register ``factory(native, adapter)``, invoked at ``connect()`` before/as the core handlers
         register (``adapter`` read-only). ``native``: telegram PTB ``Application``, discord
         ``commands.Bot``, slack ``AsyncApp``, matrix client, teams ``App``, dingtalk
@@ -868,15 +868,23 @@ class PluginContext:
         key = (platform or "").strip().lower()
         if not key:
             raise self._refuse("a platform handler factory with an empty platform name")
-        self._manager._platform_handler_factories.setdefault(key, []).append((factory, self.manifest.name))
+        entry = (factory, self.manifest.name)
+        handlers = self._manager._platform_handler_factories
+        handlers.setdefault(key, []).append(entry)
+
+        def release() -> None:
+            self._manager._remove_callback(handlers, key, entry)
+
+        handle = self._track("platform_handler", key, release)
         logger.debug("Plugin %s registered %s handler factory: %s", self.manifest.name, key,
                      getattr(factory, "__name__", repr(factory)))
+        return handle
 
-    def register_telegram_handler(self, factory: Callable) -> None:
+    def register_telegram_handler(self, factory: Callable) -> PluginRegistration:
         """``register_platform_handler("telegram", factory)``. PTB dispatches only the FIRST matching
         handler per group and core registers a catch-all ``CallbackQueryHandler`` — always scope with
         ``pattern=`` or you swallow the core button flows."""
-        self.register_platform_handler("telegram", factory)
+        return self.register_platform_handler("telegram", factory)
 
     @_serialized_replacement
     def register_auxiliary_task(
@@ -991,7 +999,14 @@ class PluginContext:
             logger.warning("Plugin '%s' registered unknown %s '%s' (valid: %s)", self.manifest.name, kind,
                            key, ", ".join(sorted(valid)))
         mapping.setdefault(key, []).append(callback)
-        handle = self._track(kind, key, lambda: self._manager._remove_callback(mapping, key, callback))
+
+        def release() -> None:
+            self._manager._remove_callback(mapping, key, callback)
+            if kind == "hook":
+                from agent.plugin_stream_hooks import release_plugin_stream_hook_dispatcher
+                release_plugin_stream_hook_dispatcher(self._manager.scope_key, key, callback)
+
+        handle = self._track(kind, key, release)
         logger.debug("Plugin %s registered %s: %s", self.manifest.name, kind, key)
         return handle
 
@@ -1043,13 +1058,19 @@ class PluginContext:
             raise TypeError(f"Plugin '{plugin_key}' emit() payload must be a dict or None")
         return self._manager._dispatch_event(f"{plugin_key}:{event}", payload or {})
 
-    def subscribe(self, event: str, callback: Callable) -> None:
+    def subscribe(self, event: str, callback: Callable) -> PluginRegistration:
         """Subscribe to a fully-qualified ``<plugin_key>:<event>`` name (unrestricted — only
         emitting is namespace-gated). Owner-tagged so unload removes zombie callbacks."""
         if not event or not isinstance(event, str):
             raise ValueError(f"Plugin '{self.manifest.name}' subscribe() requires a non-empty event name")
-        self._manager._subscribe_event(self.plugin_id, event, callback)
+        subscription = self._manager._subscribe_event(self.plugin_id, event, callback)
+
+        def release() -> None:
+            self._manager._remove_event_subscription(event, subscription)
+
+        handle = self._track("event_subscription", event, release)
         logger.debug("Plugin %s subscribed to event: %s", self.manifest.name, event)
+        return handle
 
     @_serialized_replacement
     def register_skill(
@@ -1787,6 +1808,27 @@ def get_plugin_manager() -> PluginManager:
     return manager
 
 
+def finalize_plugin_manager(home: Union[str, Path]) -> bool:
+    """Remove and finalize the cached manager for one resolved profile home."""
+    global _plugin_manager
+    key = Path(home).expanduser()
+    try:
+        key = key.resolve()
+    except Exception:
+        pass
+    with _plugin_managers_lock:
+        manager = _plugin_managers_by_home.pop(key, None)
+        if manager is None and _plugin_manager is not None and Path(_plugin_manager.scope_key) == key:
+            manager = _plugin_manager
+        if manager is None:
+            return False
+        if _plugin_manager is manager:
+            _plugin_manager = None
+    _clear_plugin_submodules(manager)
+    manager.finalize()
+    return True
+
+
 def _reset_plugin_managers_for_tests() -> None:
     """Test-only: drop every cached manager and its submodules for a fully clean slate."""
     global _plugin_manager, _published_gateway_message_injector, _published_tui_message_injector
@@ -1797,7 +1839,7 @@ def _reset_plugin_managers_for_tests() -> None:
         for manager in managers:
             _clear_plugin_submodules(manager)
             try:
-                manager.unload()
+                manager.finalize()
             except Exception:
                 logger.debug("test plugin-manager unload failed", exc_info=True)
         _plugin_managers_by_home.clear()

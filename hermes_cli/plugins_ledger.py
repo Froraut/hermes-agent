@@ -4,6 +4,7 @@ reload / targeted unload unwind registries in reverse order. Mixed into :class:`
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +61,14 @@ class PluginRegistration:
 
 
 class PluginLedgerMixin:
+    _discovery_lock: Any
+    home_path: Path
+    _plugin_loaded_listeners: List[Callable]
+    _gateway_message_injector: Any
+    _tui_message_injector: Any
+    _stop_event_dispatcher: Callable[[], None]
+    _reset_event_dispatch: Callable[[], None]
+
     def _track_registration(
         self, manifest: PluginManifest, kind: str, key: str, release: Callable[[], None], *,
         persistent: bool = False,
@@ -127,13 +136,14 @@ class PluginLedgerMixin:
         del values[index]
         return True
 
-    def _remove_callback(self, mapping: Dict[str, List[Callable]], key: str, callback: Callable) -> None:
+    def _remove_callback(self, mapping: Dict[str, List[Any]], key: str, callback: Any) -> bool:
         callbacks = mapping.get(key)
         if callbacks is None:
-            return
-        self._remove_identity(callbacks, callback)
+            return False
+        removed = self._remove_identity(callbacks, callback)
         if not callbacks:
             mapping.pop(key, None)
+        return removed
 
     def _restore_mapping(self, mapping: Dict[str, Any], key: str, current: Any, previous: Optional[Any]) -> bool:
         """Restore a manager-local mapping only when *current* is still present."""
@@ -206,7 +216,7 @@ class PluginLedgerMixin:
         for registration in reversed(registrations):
             try:
                 registration.dispose()
-            except Exception as exc:  # pragma: no cover - defensive cleanup
+            except (Exception, SystemExit, asyncio.CancelledError) as exc:  # pragma: no cover - defensive cleanup
                 logger.warning(
                     "Failed to unload plugin registration %s/%s: %s", registration.plugin_key,
                     registration.key, exc, exc_info=_PLUGINS_DEBUG,
@@ -223,6 +233,16 @@ class PluginLedgerMixin:
         """Unload registrations while excluding discovery/deferred loading."""
         with self._discovery_lock, _plugin_home_scope(self.home_path):
             return self._unload_scoped(plugin)
+
+    def finalize(self) -> bool:
+        """Retire this profile manager and its host workers under its immutable home scope."""
+        with self._discovery_lock, _plugin_home_scope(self.home_path):
+            found = self._unload_scoped()
+            self._plugin_loaded_listeners.clear()
+            self._gateway_message_injector = None
+            self._tui_message_injector = None
+            self._stop_event_dispatcher()
+            return found
 
     def _unload_scoped(self, plugin: Union[str, PluginManifest, LoadedPlugin, None] = None) -> bool:
         """Unload one plugin (or all when ``plugin=None``, as force rediscovery does). Every ledger registration
@@ -300,4 +320,5 @@ class PluginLedgerMixin:
             self._hook_abandoned.clear()
             self._hook_timeout_suppressed_until.clear()
         self._hook_failures_reported.clear()
+        self._reset_event_dispatch()
         self._discovered = False
