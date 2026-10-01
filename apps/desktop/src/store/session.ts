@@ -660,11 +660,9 @@ export function mergeSessionPage(
   // root so a mid-turn refresh can't drop a touchSessionActivity bump.
   const prevByLineage = new Map(previous.map(session => [lineageIdentity(session), session]))
 
-
   const merged = incoming
     .filter(session => !session.is_internal_child)
     .map(session => {
-
       const prev = prevById.get(identity(session)) ?? prevByLineage.get(lineageIdentity(session))
       // User-send stamps last_active before the DB flushes the user row
       // (last_active = MAX(messages.timestamp)). Keep the fresher of the two.
@@ -1730,6 +1728,12 @@ export const setCurrentReasoningEffortWire = (next: string) => {
 export const $defaultReasoningEffort = atom('')
 
 export const setDefaultReasoningEffort = (next: string) => updateAtom($defaultReasoningEffort, next)
+
+// The profile's `agent.daybreak`, mirrored from config: what a conversation
+// without an explicit Daybreak choice shows (the gateway applies it itself).
+export const $defaultDaybreak = atom(false)
+
+export const setDefaultDaybreak = (enabled: boolean) => $defaultDaybreak.set(enabled)
 
 export const setCurrentServiceTier = (next: Updater<string>) => {
   updateAtom($currentServiceTier, next)

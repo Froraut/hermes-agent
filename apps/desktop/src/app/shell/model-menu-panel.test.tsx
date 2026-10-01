@@ -13,6 +13,7 @@ import {
   $currentModel,
   $currentProvider,
   $currentServiceTier,
+  $defaultDaybreak,
   $selectedStoredSessionId,
   setCurrentModelSource
 } from '@/store/session'
@@ -65,6 +66,7 @@ afterEach(() => {
   cleanup()
   $daybreakSelections.set({})
   $daybreakModelChoices.set({})
+  $defaultDaybreak.set(false)
   $selectedStoredSessionId.set(null)
   vi.clearAllMocks()
 })
@@ -225,6 +227,42 @@ describe('ModelMenuPanel current selection', () => {
 
     fireEvent.click(luna)
     await vi.waitFor(() => expect(daybreakSelectionFor(null)).toBe(true))
+    $modelPresets.set({})
+  })
+
+  it('shows the profile Daybreak default until the conversation makes its own choice', async () => {
+    $activeSessionId.set(null)
+    $currentProvider.set('openai-codex')
+    $currentModel.set('gpt-6-sol')
+    $defaultDaybreak.set(true)
+    getGlobalModelOptions.mockResolvedValue({
+      providers: [
+        {
+          name: 'ChatGPT or Codex Subscription',
+          slug: 'openai-codex',
+          models: ['gpt-6-sol', 'gpt-6-astra'],
+          capabilities: {
+            'gpt-6-sol': { daybreak: true, fast: true, reasoning: true },
+            'gpt-6-astra': { daybreak: false, fast: true, reasoning: true }
+          }
+        }
+      ]
+    })
+    renderPanel()
+    const sol = await screen.findByRole('menuitem', { name: /GPT-6-sol/ })
+    fireEvent.pointerMove(sol, { pointerType: 'mouse' })
+    const daybreak = await screen.findByRole('switch', { name: 'Daybreak' })
+    // No explicit choice yet: the switch shows the default and nothing is pinned for the turn.
+    expect(daybreak.getAttribute('aria-checked')).toBe('true')
+    expect(daybreakSelectionFor(null)).toBeUndefined()
+
+    fireEvent.click(daybreak)
+    await vi.waitFor(() => expect(daybreakSelectionFor(null)).toBe(false))
+    expect(screen.getByRole('switch', { name: 'Daybreak' }).getAttribute('aria-checked')).toBe('false')
+
+    // An ineligible model drops the explicit choice instead of pinning it off.
+    fireEvent.click(await screen.findByRole('menuitem', { name: /GPT-6-astra/ }))
+    await vi.waitFor(() => expect(daybreakSelectionFor(null)).toBeUndefined())
     $modelPresets.set({})
   })
 

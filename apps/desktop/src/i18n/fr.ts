@@ -2107,6 +2107,10 @@ export const frOverrides = {
       defaultsLabel: 'Par défaut',
       reasoning: 'Raisonnement',
       reasoningOff: 'Désactivé',
+      speed: 'Vitesse',
+      speedStandard: 'Standard',
+      daybreakHint:
+        "Demander Daybreak pour les modèles d'abonnement ChatGPT éligibles, sauf choix contraire dans un chat",
       defaultsFailed: "Échec de l'enregistrement des modèles par défaut",
       loadFailed: 'Impossible de charger les modèles',
       restartRequired:

@@ -12,6 +12,7 @@ import { currentPickerSelection } from '@/lib/model-status-label'
 import {
   $daybreakModelChoices,
   $daybreakSelections,
+  clearDaybreakSelection,
   daybreakModelChoiceFor,
   daybreakOnlyModel,
   daybreakSelectionFor,
@@ -27,7 +28,7 @@ import {
   modelPresetServiceTier,
   setModelPreset
 } from '@/store/model-presets'
-import { $defaultReasoningEffort, markComposerSelectionManual } from '@/store/session'
+import { $defaultDaybreak, $defaultReasoningEffort, markComposerSelectionManual } from '@/store/session'
 
 import type { ModelMenuController } from './model-catalog-menu'
 
@@ -79,6 +80,7 @@ export function useModelMenuController({
   const storedSessionId = useStore(view.$storedId)
   useStore($daybreakSelections)
   useStore($daybreakModelChoices)
+  const defaultDaybreak = useStore($defaultDaybreak)
   const currentFastMode = useStore(view.$fast)
   const currentServiceTier = useStore(view.$serviceTier ?? UNKNOWN_SERVICE_TIER)
   const currentModel = useStore(view.$model)
@@ -181,7 +183,7 @@ export function useModelMenuController({
 
       return {
         required: daybreakOnlyModel(row.model),
-        checked: daybreakOnlyModel(row.model) || (remembered ?? selected ?? false)
+        checked: daybreakOnlyModel(row.model) || (remembered ?? selected ?? defaultDaybreak)
       }
     },
     setDaybreak: (enabled, row) => {
@@ -194,9 +196,19 @@ export function useModelMenuController({
       }
     },
     applyDaybreak: (row, supported) => {
-      const remembered = supported
-        ? daybreakModelChoiceFor(storedSessionId, modelPresetKey(row.provider, row.model), activeSessionId)
-        : false
+      // An unsupported model drops the explicit choice; the profile default is
+      // only ever applied to models the account catalog marks eligible.
+      if (!supported) {
+        clearDaybreakSelection(storedSessionId, activeSessionId)
+
+        return
+      }
+
+      const remembered = daybreakModelChoiceFor(
+        storedSessionId,
+        modelPresetKey(row.provider, row.model),
+        activeSessionId
+      )
 
       if (remembered !== undefined) {
         setDaybreakSelection(storedSessionId, remembered, activeSessionId)

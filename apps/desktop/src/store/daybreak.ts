@@ -3,8 +3,9 @@ import { atom } from 'nanostores'
 import { $activeGatewayProfile, resolveNewChatOwnerRoute } from '@/store/profile'
 import { $connection, $sessions, resolveComposerSessionKey } from '@/store/session'
 
-// Daybreak is a choice for a conversation, not a credential or a global model
-// setting. Keep it in memory so another profile or app launch starts off.
+// Daybreak is a choice for a conversation, not a credential. Explicit choices
+// stay in memory; without one a conversation follows the profile default
+// (`agent.daybreak`), which the gateway applies to eligible models itself.
 function draftKey(): string {
   const owner = resolveNewChatOwnerRoute()
   const profile = owner?.profile ?? $activeGatewayProfile.get()
@@ -43,6 +44,23 @@ export function setDaybreakSelection(
   runtimeId?: null | string
 ): void {
   $daybreakSelections.set({ ...$daybreakSelections.get(), [daybreakKeyFor(storedSessionId, runtimeId)]: enabled })
+}
+
+/** Drop the conversation's explicit choice so it follows the profile default again. */
+export function clearDaybreakSelection(storedSessionId: null | string, runtimeId?: null | string): void {
+  const selections = $daybreakSelections.get()
+  const key = daybreakKeyFor(storedSessionId, runtimeId)
+
+  if (key in selections || (runtimeId && runtimeId in selections)) {
+    const next = { ...selections }
+    delete next[key]
+
+    if (runtimeId) {
+      delete next[runtimeId]
+    }
+
+    $daybreakSelections.set(next)
+  }
 }
 
 export function daybreakModelChoiceFor(

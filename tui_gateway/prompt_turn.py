@@ -799,8 +799,13 @@ def _invoke_agent(
         "session.title", sid, {"session_id": _k, "title": t})
     _usage_stop, _usage_thread = _start_usage_ticker(sid, agent)
     try:
-        from agent.daybreak import daybreak_turn
+        from agent.daybreak import daybreak_turn, resolve_turn_daybreak
         from agent.notification_presentation import notification_turn, event_presentation_muted
+        daybreak_enabled = resolve_turn_daybreak(
+            daybreak_enabled, _load_cfg() if daybreak_enabled is None else None,
+            provider=agent.provider, api_mode=agent.api_mode, model=getattr(agent, "model", ""),
+            access_token=getattr(agent, "api_key", "") or "", base_url=getattr(agent, "base_url", "") or "",
+        )
         with daybreak_turn(
             daybreak_enabled, provider=agent.provider, api_mode=agent.api_mode, model=getattr(agent, "model", "")
         ), notification_turn(

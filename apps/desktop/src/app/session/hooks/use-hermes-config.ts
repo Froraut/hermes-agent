@@ -14,6 +14,7 @@ import {
   setCurrentPersonality,
   setCurrentReasoningEffort,
   setCurrentServiceTier,
+  setDefaultDaybreak,
   setDefaultReasoningEffort,
   setIntroPersonality
 } from '@/store/session'
@@ -112,6 +113,13 @@ export function useHermesConfig({ activeSessionIdRef }: HermesConfigOptions) {
         }
 
         setDefaultReasoningEffort(reasoning)
+        setDefaultDaybreak(
+          ['1', 'on', 'true', 'yes'].includes(
+            String(config.agent?.daybreak ?? '')
+              .trim()
+              .toLowerCase()
+          )
+        )
 
         const shouldSeedComposer =
           !activeSessionIdRef.current &&

@@ -2095,6 +2095,10 @@ export const esOverrides = {
       defaultsLabel: 'Valores predeterminados',
       reasoning: 'Razonamiento',
       reasoningOff: 'Desactivado',
+      speed: 'Velocidad',
+      speedStandard: 'Estándar',
+      daybreakHint:
+        'Solicitar Daybreak en los modelos de suscripción de ChatGPT aptos, salvo que un chat elija otra cosa',
       defaultsFailed: 'No se pudieron guardar los valores predeterminados del modelo',
       loadFailed: 'No se pudieron cargar los modelos',
       restartRequired:

@@ -472,6 +472,7 @@ export interface WebhookEnableResponse {
 
 export interface HermesConfig {
   agent?: {
+    daybreak?: boolean | string
     reasoning_effort?: string
     personalities?: Record<string, unknown>
     service_tier?: string

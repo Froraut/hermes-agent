@@ -1560,6 +1560,9 @@ export interface Translations {
       defaultsLabel: string
       reasoning: string
       reasoningOff: string
+      speed: string
+      speedStandard: string
+      daybreakHint: string
       defaultsFailed: string
       loadFailed: string
       restartRequired: string

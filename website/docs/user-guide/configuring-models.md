@@ -55,13 +55,15 @@ The toggle does not grant access. Hermes sends the model selected in its picker 
 
 Daybreak aliases and `gpt-5.6-cyber` require their matching access program even when no explicit choice is sent. Desktop shows the switch on and locked for those models. For other models, switching it off leaves the access-program choice to OpenAI's default behavior.
 
+To request it by default, turn on **Daybreak** under **Settings → Model → Main model** (shown when the main model is eligible), or set `agent.daybreak: true` in `config.yaml`. The default applies to Desktop and TUI turns on models whose account catalog advertises Daybreak, only when the conversation has not made its own choice; ineligible models, the Codex app-server runtime and API-key routes never receive it.
+
 The choice is captured when you send or queue a message. Changing the switch later applies to later messages. A queued message keeps its captured choice even across an app restart; entries with an explicit choice run as their own turn, since redirecting a running turn would inherit that turn's program. Direct mid-turn steering also follows the running turn's program.
 
 Daybreak is not offered on the optional Codex app-server runtime (`/codex-runtime codex_app_server`): that runtime keeps Codex's own model and speed settings from `~/.codex/config.toml`, so Hermes does not send its model or access-program choices there.
 
 ### Subscription speed and extended context
 
-Speed is separate from reasoning effort and Daybreak access. On supported subscription models, **Fast** requests Priority; **Ultrafast** requests Astra's Ultrafast tier. Selecting one clears the other. The chosen tier is remembered per model and carried into a new chat. Daybreak aliases do not offer accelerated speed controls; a legacy setting can be cleared with **Use standard speed**. An accepted request does not guarantee that OpenAI served the requested tier.
+Speed is separate from reasoning effort and Daybreak access. On supported subscription models, **Fast** requests Priority; **Ultrafast** requests Astra's Ultrafast tier. Selecting one clears the other. The chosen tier is remembered per model and carried into a new chat. The profile default lives under **Settings → Model → Main model → Speed** (`agent.service_tier`: `normal`, `fast` or `ultrafast`); Ultrafast is listed only for models that offer it. Daybreak aliases do not offer accelerated speed controls; a legacy setting can be cleared with **Use standard speed**. An accepted request does not guarantee that OpenAI served the requested tier.
 
 Hermes creates the **GPT-6.1 Sol-900k** choice from an eligible discovered GPT-6.1 Sol model. The `-900k` suffix is a local context choice, removed from the model ID sent to OpenAI. Hermes limits its budget to the account catalog's maximum, and Codex may report a smaller usable context after its own reserve. Use **Refresh models** if a new model is absent. A failed discovery uses short-lived compatibility hints instead of caching them as a successful account catalog.
 
