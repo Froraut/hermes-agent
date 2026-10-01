@@ -2172,11 +2172,43 @@ def _scrub_export_secrets(staged: Path) -> None:
         path.write_text(redacted, encoding="utf-8")
 
 
+def _validate_export_sources(profile_dir: Path) -> None:
+    """Refuse archive sources that can name data outside ``profile_dir``."""
+    if profile_dir.is_symlink():
+        raise ValueError(f"Profile root escapes through a symlink: {profile_dir}")
+    root = profile_dir.resolve(strict=True)
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in (*dirnames, *filenames):
+            path = Path(directory) / name
+            try:
+                metadata = path.lstat()
+            except OSError as exc:
+                raise ValueError(f"Cannot safely inspect export source: {path}") from exc
+            if stat.S_ISLNK(metadata.st_mode):
+                try:
+                    path.resolve(strict=True).relative_to(root)
+                except (OSError, ValueError) as exc:
+                    raise ValueError(f"Export source escapes profile root: {path}") from exc
+            elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink > 1:
+                raise ValueError(f"Export source may escape profile root through a hardlink: {path}")
+
+
+def _publish_import(source: Path, destination: Path) -> None:
+    """Atomically publish a same-filesystem staged profile without replacing a raced target."""
+    if destination.exists() or destination.is_symlink():
+        raise _profile_exists_error(destination.name)
+    try:
+        os.rename(source, destination)
+    except FileExistsError as exc:
+        raise _profile_exists_error(destination.name) from exc
+
+
 def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, str]] = None) -> Path:
     """Export a profile to a tar.gz archive; credential files are excluded and staged text is
     force-redacted first. Returns the output file path."""
     import tempfile
     canon, profile_dir = _existing_profile_dir(name)
+    _validate_export_sources(profile_dir)
     # Archive base name without extension (.tar.gz appended by the writer).
     base = str(Path(output_path)).removesuffix(".tar.gz").removesuffix(".tgz")
 
@@ -2230,8 +2262,11 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
     profile_dir = get_profile_dir(canon)
     if profile_dir.exists():
         raise _profile_exists_error(canon)
-    _get_profiles_root().mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="hermes_profile_import_") as tmpdir:
+    profiles_root = _get_profiles_root()
+    profiles_root.mkdir(parents=True, exist_ok=True)
+    # Stage beside the destination so publication is one same-filesystem rename even when the
+    # process-wide temporary directory is on another device.
+    with tempfile.TemporaryDirectory(prefix=f".{canon}.import-", dir=profiles_root) as tmpdir:
         staging_root = Path(tmpdir)
         safe_extract_targz(archive, staging_root)
         extracted = staging_root / archive_root
@@ -2250,7 +2285,7 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
                 else:
                     child.unlink()
         drop_profile_role(final_source)
-        shutil.move(str(final_source), str(profile_dir))
+        _publish_import(final_source, profile_dir)
     return profile_dir
 
 
