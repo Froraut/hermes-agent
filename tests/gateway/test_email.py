@@ -661,6 +661,16 @@ class TestFetchNewMessages(unittest.TestCase):
 class TestPollLoop(unittest.TestCase):
     """Test the async polling loop."""
 
+    def setUp(self):
+        self._prev_allow_all = os.environ.get("EMAIL_ALLOW_ALL_USERS")
+        os.environ["EMAIL_ALLOW_ALL_USERS"] = "true"
+
+    def tearDown(self):
+        if self._prev_allow_all is None:
+            os.environ.pop("EMAIL_ALLOW_ALL_USERS", None)
+        else:
+            os.environ["EMAIL_ALLOW_ALL_USERS"] = self._prev_allow_all
+
     def _make_adapter(self):
         from gateway.config import PlatformConfig
         with patch.dict(os.environ, {
@@ -706,6 +716,83 @@ class TestPollLoop(unittest.TestCase):
 
         self.assertEqual(len(dispatched), 1)
         self.assertEqual(dispatched[0]["subject"], "Inbox Test")
+
+    def test_rejected_sender_is_not_full_fetched_before_authorization(self):
+        """A header-only, bounded preflight rejects a forged lower auth result
+        before IMAP returns the MIME body or an attachment is decoded."""
+        import asyncio
+        from plugins.platforms.email.adapter import _MAX_PREAUTH_HEADER_BYTES
+
+        adapter = self._make_adapter()
+        adapter._authserv_id = "mx.trusted.test"
+        dispatched, fetch_specs = [], []
+
+        async def capture(msg_data):
+            dispatched.append(msg_data)
+
+        adapter._dispatch_message = capture
+        forged_headers = (
+            b"From: Owner <owner@example.com>\r\n"
+            b"Subject: forged lower result\r\n"
+            b"Message-ID: <forged@example.com>\r\n"
+            b"Authentication-Results: edge.receiver.test; dmarc=fail header.from=example.com\r\n"
+            b"Authentication-Results: mx.trusted.test; dmarc=pass header.from=example.com\r\n"
+            b"Content-Type: multipart/mixed; boundary=x\r\n\r\n"
+        )
+        trusted_headers = (
+            b"From: Owner <owner@example.com>\r\n"
+            b"Subject: trusted result\r\n"
+            b"Message-ID: <trusted@example.com>\r\n"
+            b"Authentication-Results: mx.trusted.test; dmarc=pass header.from=example.com\r\n"
+            b"Content-Type: text/plain\r\n\r\n"
+        )
+        oversized_headers = (
+            b"From: Owner <owner@example.com>\r\nAuthentication-Results: mx.trusted.test; "
+            + b"x" * _MAX_PREAUTH_HEADER_BYTES
+        )
+        headers = {b"9": forged_headers, b"10": trusted_headers, b"11": oversized_headers}
+        full_messages = {
+            b"9": forged_headers + (
+                b"--x\r\nContent-Disposition: attachment; filename=payload.bin\r\n\r\n"
+                + b"x" * 200_000 + b"\r\n--x--\r\n"
+            ),
+            b"10": trusted_headers + b"authorized body",
+            b"11": oversized_headers + b"unauthorized body",
+        }
+        mock_imap = MagicMock()
+
+        def uid_handler(command, *args):
+            if command == "search":
+                return ("OK", [b"9 10 11"])
+            if command == "fetch":
+                uid, spec = args
+                fetch_specs.append((uid, spec))
+                payload = headers[uid] if "BODY.PEEK[HEADER.FIELDS" in spec else full_messages[uid]
+                return ("OK", [(uid, payload)])
+            if command == "store":
+                return ("OK", [b""])
+            return ("NO", [])
+
+        mock_imap.uid.side_effect = uid_handler
+        with patch.dict(os.environ, {
+            "EMAIL_ALLOWED_USERS": "owner@example.com",
+            "EMAIL_ALLOW_ALL_USERS": "",
+            "GATEWAY_ALLOWED_USERS": "",
+            "GATEWAY_ALLOW_ALL_USERS": "",
+        }, clear=False), patch("imaplib.IMAP4_SSL", return_value=mock_imap), patch(
+            "plugins.platforms.email.adapter._extract_attachments", return_value=[],
+        ) as extract_attachments:
+            asyncio.run(adapter._check_inbox())
+
+        self.assertEqual([message["message_id"] for message in dispatched], ["<trusted@example.com>"])
+        self.assertNotIn((b"9", "(RFC822)"), fetch_specs)
+        self.assertNotIn((b"11", "(RFC822)"), fetch_specs)
+        self.assertIn((b"10", "(RFC822)"), fetch_specs)
+        header_specs = [spec for _, spec in fetch_specs if "BODY.PEEK[HEADER.FIELDS" in spec]
+        self.assertEqual(len(header_specs), 3)
+        self.assertTrue(all(f"<0.{_MAX_PREAUTH_HEADER_BYTES + 1}>" in spec for spec in header_specs))
+        extract_attachments.assert_called_once()
+        self.assertTrue({b"9", b"10", b"11"}.issubset(adapter._seen_uids))
 
     def test_check_inbox_notifies_fatal_error_on_fetch_failure(self):
         """A failed IMAP check must surface through the fatal-error hook so
@@ -1283,21 +1370,30 @@ class TestSenderAuthentication(unittest.TestCase):
         self.assertFalse(ok, reason)
 
 
-    def test_injected_header_below_trusted_does_not_authenticate(self):
-        """An attacker-injected Authentication-Results sorts BELOW the receiving
-        server's. With authserv-id pinning, only the trusted (first) header is
-        consulted, so a forged 'dmarc=pass' lower in the stack is ignored."""
+    def test_only_topmost_exact_authserv_id_is_trusted(self):
+        """Never search below the authoritative field or relax an authserv-id pin."""
+        forged_lower = "mx.ourserver.com; dmarc=pass header.from=example.com"
+        for topmost in (
+            "mx.ourserver.com; dmarc=fail header.from=example.com",
+            "edge.receiver.test; dmarc=fail header.from=example.com",
+            "child.mx.ourserver.com; dmarc=fail header.from=example.com",
+            "(mx.ourserver.com) edge.receiver.test; dmarc=fail header.from=example.com",
+        ):
+            with self.subTest(topmost=topmost):
+                ok, reason = self._verify(
+                    "admin@example.com", [topmost, forged_lower],
+                    authserv_id="mx.ourserver.com",
+                )
+                self.assertFalse(ok, reason)
+
+        # Matching remains case-insensitive and accepts RFC 8601 CFWS comments,
+        # including a semicolon inside a nested comment.
         ok, reason = self._verify(
             "admin@example.com",
-            [
-                # Trusted: stamped by our server, real verdict = fail
-                "mx.ourserver.com; dmarc=fail header.from=example.com",
-                # Forged by attacker, claims pass
-                "mx.ourserver.com; dmarc=pass header.from=example.com",
-            ],
+            ["MX.OURSERVER.COM (receiver (a;b)); dmarc=pass header.from=example.com"],
             authserv_id="mx.ourserver.com",
         )
-        self.assertFalse(ok, reason)
+        self.assertTrue(ok, reason)
 
 
 if __name__ == "__main__":
