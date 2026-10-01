@@ -1036,9 +1036,7 @@ function ModelFamilyRow({
   const metaTags = [
     showProvider ? provider.name : null,
     tag || null,
-    fastControl.kind !== 'none' &&
-    fastControl.on &&
-    !(fastControl.kind === 'param' && fastControl.canEnable === false)
+    fastControl.kind !== 'none' && fastControl.on && !(fastControl.kind === 'param' && fastControl.canEnable === false)
       ? effTier === 'ultrafast'
         ? t.shell.modelOptions.ultrafast
         : copy.fast

@@ -37,7 +37,9 @@ export interface QueuedPromptEntry {
 /** Whether a queued entry can ride a mid-turn redirect: text-only, non-empty,
  *  not a slash command — the same gate `steerDraft` applies to the live draft
  *  (attachments can't ride a redirect; slash commands execute, not steer). */
-export const isSteerableEntry = (entry: Pick<QueuedPromptEntry, 'attachments' | 'text' | 'daybreakEnabled'>): boolean => {
+export const isSteerableEntry = (
+  entry: Pick<QueuedPromptEntry, 'attachments' | 'text' | 'daybreakEnabled'>
+): boolean => {
   const text = entry.text.trim()
 
   // A redirect inherits the running turn's program; an explicit selection

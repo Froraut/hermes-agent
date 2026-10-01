@@ -170,9 +170,12 @@ describe('useBackgroundQueueDrain', () => {
 
     render(<Harness runtimeMap={runtimeMap} submitText={submitText} />)
 
-    await waitFor(() => expect(submitText).toHaveBeenCalledWith(
-      'queued review', expect.objectContaining({ daybreakEnabled: true, fromQueue: true })
-    ))
+    await waitFor(() =>
+      expect(submitText).toHaveBeenCalledWith(
+        'queued review',
+        expect.objectContaining({ daybreakEnabled: true, fromQueue: true })
+      )
+    )
   })
 
   it('leaves the selected session queue to the mounted ChatBar drainer', async () => {

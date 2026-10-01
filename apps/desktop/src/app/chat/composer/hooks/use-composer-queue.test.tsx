@@ -149,9 +149,12 @@ describe('useComposerQueue park integration', () => {
     expect(onSteer).not.toHaveBeenCalled()
 
     hook.rerender({ busy: false })
-    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(
-      'review with Daybreak', expect.objectContaining({ daybreakEnabled: true, fromQueue: true })
-    ))
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(
+        'review with Daybreak',
+        expect.objectContaining({ daybreakEnabled: true, fromQueue: true })
+      )
+    )
   })
 
   it('holds a parked queue at the idle settle (the Stop edge)', async () => {
