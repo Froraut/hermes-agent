@@ -1078,7 +1078,30 @@ CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, start
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
+
+-- Task identity guards (#119003). Hermes mints ids only via _new_task_id()
+-- ("t_" + lowercase hex) and never rewrites one. A writer that breaks either
+-- rule (a foreign trigger, a script, any process) now aborts its statement --
+-- and everything that statement did -- instead of silently swapping the board
+-- for a ghost row. Self-contained on purpose: a trigger naming another table is
+-- rewritten by the task_events/task_runs rebuild's RENAME and then dangles.
+CREATE TRIGGER IF NOT EXISTS kanban_guard_task_id_insert BEFORE INSERT ON tasks
+WHEN typeof(NEW.id) != 'text' OR NEW.id NOT GLOB 't_[0-9a-f]*'
+     OR substr(NEW.id, 3) GLOB '*[^0-9a-f]*'
+BEGIN
+    SELECT RAISE(ABORT, 'kanban: refusing malformed task id (Hermes task ids are t_<hex>; see #119003)');
+END;
+
+CREATE TRIGGER IF NOT EXISTS kanban_guard_task_id_update BEFORE UPDATE OF id ON tasks
+WHEN NEW.id IS NOT OLD.id
+BEGIN
+    SELECT RAISE(ABORT, 'kanban: task ids are immutable (see #119003)');
+END;
 """
+
+# Triggers SCHEMA_SQL owns; any other trigger in a board runs inside every
+# writer's transaction without Hermes knowing (see _warn_foreign_triggers).
+KANBAN_SCHEMA_TRIGGERS = frozenset({"kanban_guard_task_id_insert", "kanban_guard_task_id_update"})
 
 
 # --- ID generation ---
