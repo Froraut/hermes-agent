@@ -849,7 +849,7 @@ class TestDuckTypedWriteFileCompat:
 
         class ExplodingOps(_DictFileOps):
             def write_file(self, path, content, pre_content=None):
-                calls.append(path)
+                calls.append((path, content))
                 raise TypeError("bug inside a pre_content-capable impl")
 
         ops, err = parse_v4a_patch(self.PATCH)
@@ -858,7 +858,10 @@ class TestDuckTypedWriteFileCompat:
         result = apply_v4a_operations(ops, fo)
         assert result.success is False
         assert "bug inside" in result.error
-        assert calls == ["f.py"]  # not silently retried with 2 args
+        # One apply attempt, never retried with the new content; the only other write is the
+        # rollback restoring the snapshot, and its failure is reported instead of raised.
+        assert len(calls) == 2 and calls[0][0] == "f.py" and calls[1] == ("f.py", "x = 1\n")
+        assert "rollback was incomplete" in result.error
 
 
 class TestMoveThenUpdateSameFile:

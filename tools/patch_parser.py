@@ -310,8 +310,12 @@ def apply_v4a_operations(operations: List[PatchOperation], file_ops: Any) -> Pat
     def _rollback() -> List[str]:
         rollback_errors = []
         for path, snapshot in snapshots.items():
-            result = (file_ops.delete_file(path) if snapshot.error and getattr(snapshot, "not_found", False)
-                      else file_ops.write_file(path, snapshot.content))
+            try:
+                result = (file_ops.delete_file(path) if snapshot.error and getattr(snapshot, "not_found", False)
+                          else file_ops.write_file(path, snapshot.content))
+            except Exception as e:  # a raising backend must not abort restoring the other paths
+                rollback_errors.append(f"{path}: {e}")
+                continue
             if result.error:
                 rollback_errors.append(f"{path}: {result.error}")
         return rollback_errors
