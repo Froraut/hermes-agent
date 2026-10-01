@@ -12,7 +12,12 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from tools.tool_backend_helpers import selection_error, selection_exists
-from tools.url_safety import has_url_userinfo, normalize_url_for_request, sensitive_query_param_name
+from tools.url_safety import (
+    has_url_userinfo,
+    normalize_url_for_request,
+    sensitive_fragment_param_name,
+    sensitive_query_param_name,
+)
 from tools.web_tools_rescue import _rescue_eligible, _rescue_extract
 
 logger = logging.getLogger("tools.web_tools")
@@ -106,8 +111,13 @@ def _validate_extract_urls(urls: List[Any]):
                 "userinfo or use a local browser session when authenticated "
                 "access is explicitly required."
             )
-        if sensitive_query_param_name(_url) is not None or any(
-            _PREFIX_RE.search(c) for c in (_url, unquote(_url), normalized_url, unquote(normalized_url))
+        if (
+            sensitive_query_param_name(_url) is not None
+            or sensitive_fragment_param_name(_url) is not None
+            or any(
+                _PREFIX_RE.search(c)
+                for c in (_url, unquote(_url), normalized_url, unquote(normalized_url))
+            )
         ):
             return _refuse_all(
                 "Blocked: URL contains what appears to be an API key or token. "
