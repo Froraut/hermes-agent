@@ -18,12 +18,7 @@ import { chunkByLines, SyntaxHighlighter } from '@/components/chat/shiki-highlig
 import { TranscriptVideo } from '@/components/chat/transcript-video'
 import { ZoomableImage } from '@/components/chat/zoomable-image'
 import { ErrorBoundary } from '@/components/error-boundary'
-import {
-  getApiRequestConnection,
-  getApiRequestProfile,
-  type ResolvedOwner,
-  resolveOwnerNow
-} from '@/hermes'
+import { getApiRequestConnection, getApiRequestProfile, type ResolvedOwner, resolveOwnerNow } from '@/hermes'
 import { useMediaImage } from '@/hooks/use-media-image'
 import { detectArtifact } from '@/lib/artifact-detect'
 import { renderMediaTags } from '@/lib/chat-messages/parts'
@@ -165,10 +160,7 @@ function MediaAttachment({ path }: { path: string }) {
   const scope = useComposerScope()
   const connectionId = scope.connectionId || getApiRequestConnection()
   const profile = scope.profile || getApiRequestProfile()
-  const owner = useMemo(
-    () => resolveOwnerNow({ connectionId, profile }),
-    [connectionId, profile]
-  )
+  const owner = useMemo(() => resolveOwnerNow({ connectionId, profile }), [connectionId, profile])
 
   return mediaKind(path) === 'image' ? (
     <MarkdownImage alt={mediaName(path)} src={path} />

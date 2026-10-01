@@ -207,7 +207,7 @@ describe('resolveMediaPlaybackSrc', () => {
   })
 
   it('pins A media delivery and synthesis leases through an A→B→A switch with colliding profile names', async () => {
-    const api = vi.fn(async () => ({ ok: true }))
+    const api = vi.fn(async (_request: unknown) => ({ ok: true }))
     const ownerA = { connectionId: 'gateway-a', profile: 'shared' }
     const ownerB = { connectionId: 'gateway-b', profile: 'shared' }
 
@@ -234,11 +234,14 @@ describe('resolveMediaPlaybackSrc', () => {
     expect(first).toBe('hermes-media://remote/%2Ftmp%2Freply.mp3?connectionId=gateway-a&profile=shared')
     expect(again).toBe(first)
 
-    const leaseCalls = api.mock.calls.map(([request]) => request as {
-      body: { active: boolean; lease: string }
-      connectionId?: string
-      profile?: string
-    })
+    const leaseCalls = api.mock.calls.map(
+      ([request]) =>
+        request as {
+          body: { active: boolean; lease: string }
+          connectionId?: string
+          profile?: string
+        }
+    )
     expect(leaseCalls.map(({ body, connectionId, profile }) => [connectionId, profile, body.active])).toEqual([
       ['gateway-a', 'shared', true],
       ['gateway-b', 'shared', true],

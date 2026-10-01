@@ -60,9 +60,7 @@ describe('useVoiceLiveConversation — owner-routed session', () => {
     const submitA = vi.fn()
     const submitB = vi.fn()
     const wrapper = ({ children }: { children: ReactNode }) => (
-      <ComposerScopeProvider value={{ ...MAIN_COMPOSER_SCOPE, ...owner }}>
-        {children}
-      </ComposerScopeProvider>
+      <ComposerScopeProvider value={{ ...MAIN_COMPOSER_SCOPE, ...owner }}>{children}</ComposerScopeProvider>
     )
 
     const hook = renderHook(

@@ -430,6 +430,7 @@ export function useComposerVoice({
   // first spoken reply doesn't start with dead air); ending it releases the
   // lease, and the backend unloads resident local models once no surface holds
   // one. Fire-and-forget — the toggle never waits on or fails from this.
+  // eslint-disable-next-line no-restricted-syntax -- releases the conversation lease owner, not a store mirror.
   useEffect(() => {
     const owner = conversationOwnerRef.current
 
@@ -460,6 +461,7 @@ export function useComposerVoice({
   // preference is already set).
   const autoSpeakReplies = useStore($autoSpeakReplies)
 
+  // eslint-disable-next-line no-restricted-syntax -- owner bookkeeping for the read-aloud lease, not a store mirror.
   useEffect(() => {
     if (autoSpeakReplies) {
       const owner =

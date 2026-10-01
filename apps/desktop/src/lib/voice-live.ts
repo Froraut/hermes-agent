@@ -1,11 +1,4 @@
-import {
-  hermesApiAs,
-  type OwnerScope,
-  ownerScoped,
-  profileScoped,
-  type ResolvedOwner,
-  resolveOwnerNow
-} from '@/api/client'
+import { hermesApiAs, profileScoped, type ResolvedOwner, resolveOwnerNow } from '@/api/client'
 import { hermesApi } from '@/hermes'
 
 /**
@@ -342,7 +335,9 @@ export class VoiceLiveSession {
       body: { history, sdp },
       method: 'POST',
       path: '/api/audio/voice-live/session',
-      timeoutMs: 45_000
+      timeoutMs: 45_000,
+      // An ownerless chat keeps the active scope's ordinary lane, as the bare profileScoped() did.
+      ...(this.owner ? {} : { priority: undefined })
     })
 
     if (!response?.ok || !response.transport?.sdp) {
