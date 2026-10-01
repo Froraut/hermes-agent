@@ -35,7 +35,6 @@ from tests.fakes.fake_llm_provider import FakeLLMServer, Text, ToolCall
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX absolute-path spellings and process groups")
 
-_ISSUE_STORE = "#119997 pending id is used as a path: ../ or absolute ids reach files outside pending/<subsystem>/"
 _ISSUE_DELETE = "#120528 skill_manage delete skips the pin/essential guard for a category/name spelling"
 
 # scenario -> (slash command, where the victim lives). "home" victims are <HERMES_HOME>/auth.json spelled
@@ -55,22 +54,10 @@ DELETES: dict[str, tuple[str, str]] = {  # scenario -> (name given to skill_mana
 }
 
 
-def _store_signature(command: str, where: str) -> str:
-    """The traversal reaching its victim: deleted/rewritten (reject, approve) or its content shown (diff)."""
-    if where == "home":
-        spelled, victim = re.escape("../../auth"), "auth.json"
-    else:
-        spelled, victim = r"/[^']+/outside/victim", "victim.json"
-    return (rf"^/{command} '{spelled}': "
-            rf"(?:{re.escape(victim)} was deleted or rewritten|the command output carries the victim's content)")
-
-
 # scenario -> (pattern, "#issue symptom"), gated with ``known_gate(..., raises=H.BoundaryBreach)``
 KNOWN: dict[str, tuple[str, str]] = {
-    **{n: (_store_signature(*TRAVERSALS[n]), _ISSUE_STORE) for n in TRAVERSALS},
-    **{n: (rf"^skill_manage delete {re.escape(repr(name))} removed skills/{re.escape(rel)}: \{{'success': True",
-           _ISSUE_DELETE) for n, (name, rel) in DELETES.items()},
-}
+    n: (rf"^skill_manage delete {re.escape(repr(name))} removed skills/{re.escape(rel)}: \{{'success': True",
+        _ISSUE_DELETE) for n, (name, rel) in DELETES.items()}
 
 _STORE_CONFIG = "memory:\n  memory_enabled: true\n  write_approval: true\nskills:\n  write_approval: true\n"
 _SKILL = "---\nname: {name}\ndescription: {desc}\n---\n\n# {name}\n\n{body}\n"

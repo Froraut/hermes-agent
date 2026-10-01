@@ -61,12 +61,21 @@ def _normalize_enabled(value: Any) -> bool:
 
 # --- Pending store (file-backed) ---
 
-def _pending_path(subsystem: str, pending_id: str) -> Path:
-    return get_hermes_home() / "pending" / subsystem / f"{pending_id}.json"
+def _pending_dir(subsystem: str) -> Path:
+    return get_hermes_home() / "pending" / subsystem
+
+
+def _pending_path(subsystem: str, pending_id: str) -> Optional[Path]:
+    """The record file for ``pending_id``, or None unless it lands directly in the pending dir.
+    Ids arrive from users (`/memory reject <id>`, `/skills approve <id>`): '../../auth' or an
+    absolute path must never reach the unlink / json-load / replay below."""
+    d = _pending_dir(subsystem)
+    path = d / f"{pending_id}.json"
+    return path if pending_id and path.parent == d else None
 
 
 def _pending_files(subsystem: str) -> list:
-    d = _pending_path(subsystem, "").parent
+    d = _pending_dir(subsystem)
     return list(d.glob("*.json")) if d.exists() else []
 
 
@@ -106,7 +115,7 @@ def list_pending(subsystem: str) -> List[Dict[str, Any]]:
 def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
     """Return a single pending record by id, or None."""
     path = _pending_path(subsystem, pending_id)
-    if not path.exists():
+    if path is None or not path.exists():
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -119,7 +128,7 @@ def discard_pending(subsystem: str, pending_id: str) -> bool:
     """Delete a pending record. Returns True if it existed."""
     try:
         path = _pending_path(subsystem, pending_id)
-        if path.exists():
+        if path is not None and path.exists():
             path.unlink()
             return True
     except Exception as e:  # pragma: no cover
@@ -129,7 +138,7 @@ def discard_pending(subsystem: str, pending_id: str) -> bool:
 
 def pending_count(subsystem: str) -> int:
     """Cheap count of pending records (for notification badges)."""
-    d = _pending_path(subsystem, "").parent
+    d = _pending_dir(subsystem)
     if not d.exists():
         return 0
     with suppress(Exception):

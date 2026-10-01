@@ -38,11 +38,29 @@ def test_list_pending_skips_non_dict_record(hermes_home):
     from tools import write_approval as wa
     wa.stage_write("memory", {"action": "add", "target": "user", "content": "ok"},
                    summary="ok", origin="foreground")
-    pending_dir = wa._pending_path("memory", "").parent
+    pending_dir = wa._pending_dir("memory")
     (pending_dir / "bad.json").write_text('"not a record"', encoding="utf-8")
     records = wa.list_pending("memory")
     assert len(records) == 1 and records[0]["payload"]["content"] == "ok"
     assert wa.get_pending("memory", "bad") is None
+
+def test_pending_ids_never_reach_json_outside_the_pending_dir(hermes_home, tmp_path):
+    """Ids come from users (/memory reject <id>, also via the gateway): a traversal or absolute id
+    must neither delete nor load (approve/diff replay it) a JSON file outside pending/<subsystem>/."""
+    from hermes_cli.write_approval_commands import handle_pending_subcommand
+    from tools import write_approval as wa
+    wa.stage_write(wa.MEMORY, {"action": "add", "target": "user", "content": "ok"},
+                   summary="ok", origin="foreground")  # pending/memory/ now exists
+    auth = os.path.join(hermes_home, "auth.json")
+    outside = tmp_path / "package.json"
+    for path in (auth, outside):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"id": "x", "payload": {"action": "add", "content": "injected"}}')
+    for pid in ("../../auth", str(outside.with_suffix(""))):
+        assert wa.get_pending(wa.MEMORY, pid) is None
+        handle_pending_subcommand(wa.MEMORY, ["reject", pid])
+    assert os.path.exists(auth) and outside.exists()
+    assert len(wa.list_pending(wa.MEMORY)) == 1
 
 def test_normalize_enabled_coerces_values():
     from tools import write_approval as wa
