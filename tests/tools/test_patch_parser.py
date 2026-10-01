@@ -435,6 +435,88 @@ class TestValidationPhase:
         assert result.success is False
         assert "hunk 2" in result.error.lower()
 
+    def test_context_hint_places_a_hunk_whose_block_repeats(self):
+        """Picking one of several matches is the @@ hint's job: apply searches a window around it.
+        Validation runs first and must accept every hunk apply would place — the same hunk in the
+        same file cannot be both valid and invalid depending on which phase looks at it."""
+        body = "    value = compute()\n    return value\n"
+        filler = "".join(f"# filler line {i:02d}\n" for i in range(40))  # > the window's 500-char lead
+        content = f"def first():\n{body}\n{filler}\ndef second():\n{body}"
+        patch = """\
+*** Begin Patch
+*** Update File: m.py
+@@ def second(): @@
+-    return value
++    return value + 1
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+        written = {}
+
+        class FakeFileOps:
+            def read_file_raw(self, path):
+                return SimpleNamespace(content=written.get(path, content), error=None)
+
+            def write_file(self, path, new, pre_content=None):
+                written[path] = new
+                return SimpleNamespace(error=None)
+
+        result = apply_v4a_operations(ops, FakeFileOps())
+        assert result.success is True, result.error
+        first, second = written["m.py"].split("def second():")
+        assert "return value + 1" in second and "return value + 1" not in first
+
+    def test_ambiguous_hunk_error_offers_a_remedy_patch_mode_accepts(self):
+        """An ambiguous hunk was found, not missing, and replace_all is a replace-mode flag patch
+        mode ignores — the error must say which, and not steer the model to a flag it cannot use."""
+        patch = """\
+*** Begin Patch
+*** Update File: a.py
+-x = 0
++x = 1
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            def read_file_raw(self, path):
+                return SimpleNamespace(content="a = 1\nx = 0\nb = 2\nx = 0\n", error=None)
+
+        result = apply_v4a_operations(ops, FakeFileOps())
+        assert result.success is False
+        assert "ambiguous" in result.error and "not found" not in result.error, result.error
+        assert "replace_all" not in result.error, result.error
+
+    def test_repeated_context_hint_does_not_pick_a_block(self):
+        """A hint that occurs twice identifies neither of two identical blocks; windowing on its
+        first occurrence silently edited the first block. The hunk is ambiguous and nothing is
+        written, as for an addition-only hunk whose hint repeats."""
+        filler = "".join(f"# filler line {i:03d}\n" for i in range(150))  # > the 2000-char window
+        content = f"# MARK\nold = 0\n{filler}# MARK\nold = 0\n"
+        patch = """\
+*** Begin Patch
+*** Update File: m.py
+@@ MARK @@
+-old = 0
++old = 1
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+        written = {}
+
+        class FakeFileOps:
+            def read_file_raw(self, path):
+                return SimpleNamespace(content=content, error=None)
+
+            def write_file(self, path, new, pre_content=None):
+                written[path] = new
+                return SimpleNamespace(error=None)
+
+        result = apply_v4a_operations(ops, FakeFileOps())
+        assert result.success is False, written
+        assert "ambiguous" in result.error, result.error
+        assert written == {}
+
     def test_add_onto_existing_file_fails_and_preserves_contents(self):
         """An Add targeting a path that already exists must fail validation and
         leave the original bytes untouched (no silent overwrite)."""
