@@ -4,6 +4,7 @@ import base64
 import os
 import pytest
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -552,6 +553,22 @@ class TestAtomicWriteNewFilePermissions:
         assert result.error is None, f"write failed: {result.error}"
         assert dest.read_text() == "#!/bin/sh\necho updated\n"
         assert dest.stat().st_mode & 0o777 == 0o755
+
+    @pytest.mark.skipif(not hasattr(os, "setxattr"), reason="extended attributes unavailable")
+    def test_overwrite_preserves_existing_extended_attributes(self, tmp_path):
+        ops = ShellFileOperations(make_real_subprocess_env(str(tmp_path)))
+        dest = tmp_path / "existing.txt"
+        dest.write_text("original\n", encoding="utf-8")
+        attribute = "user.hermes-test" if sys.platform != "darwin" else "hermes-test"
+        try:
+            getattr(os, "setxattr")(dest, attribute, b"keep-me")
+        except OSError as exc:
+            pytest.skip(f"filesystem does not support extended attributes: {exc}")
+
+        result = ops.write_file(str(dest), "updated\n")
+
+        assert result.error is None, f"write failed: {result.error}"
+        assert getattr(os, "getxattr")(dest, attribute) == b"keep-me"
 
 
 class TestAtomicWriteThroughSymlink:

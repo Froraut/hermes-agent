@@ -538,8 +538,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
 
         Symlink targets are resolved first (replacing the link would orphan the
         target) and the temp dir recomputed from the RESOLVED target. Existing
-        target: mode copied via ``stat`` (GNU ``-c%a`` / BSD ``-f%Lp``) + ``chmod``
-        (``chmod --reference`` is GNU-only). New target: ``chmod "=rw"`` AFTER cat
+        target: metadata cloned with native ``cp`` (GNU ``--preserve=all`` / portable
+        ``-p``), with a mode-only fallback. New target: ``chmod "=rw"`` AFTER cat
         gives umask-default perms instead of mktemp's 0600 — not ``$(umask)``
         arithmetic (zsh parses leading-zero constants as decimal), quoted so zsh
         doesn't =word-expand. ``trap ... EXIT`` removes the temp on every failure.
@@ -576,8 +576,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             '[ -n "$tmp" ] || { echo "atomic write: could not create temp file" >&2; exit 1; }; '
             "trap 'rm -f \\\"$tmp\\\"' EXIT; "
             'if [ -e "$t" ]; then '
+            'if ! cp --preserve=all "$t" "$tmp" 2>/dev/null && '
+            '   ! cp -p "$t" "$tmp" 2>/dev/null; then '
             'm="$(stat -c%a "$t" 2>/dev/null || stat -f%Lp "$t" 2>/dev/null || true)"; '
-            '[ -n "$m" ] && chmod "$m" "$tmp" 2>/dev/null || true; '
+            '[ -n "$m" ] && chmod "$m" "$tmp" 2>/dev/null || true; fi; '
             "fi; "
             'cat > "$tmp"; '
             # new file: umask-default perms instead of mktemp's 0600 (#70856). Runs AFTER cat so a
