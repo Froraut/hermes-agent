@@ -73,13 +73,11 @@ describe('NodeContextMenu', () => {
       label: target.label,
       ok: true
     })
-    hermesMocks.editLearningNode
-      .mockResolvedValueOnce({ message: 'saved', ok: true })
-      .mockReturnValueOnce(
-        new Promise(resolve => {
-          resolveEdit = resolve
-        })
-      )
+    hermesMocks.editLearningNode.mockResolvedValueOnce({ message: 'saved', ok: true }).mockReturnValueOnce(
+      new Promise(resolve => {
+        resolveEdit = resolve
+      })
+    )
 
     render(<NodeContextMenu onClose={vi.fn()} onNodeRemoved={vi.fn()} target={target} />)
 

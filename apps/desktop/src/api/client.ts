@@ -285,11 +285,7 @@ export function hermesApi<T>(request: HermesApiRequest): Promise<T> {
 //   - ApiRequestScopeToken → the ambient route captured earlier. It pins the
 //     same owner without upgrading background work to foreground priority.
 export type ProfileScope =
-  | undefined
-  | null
-  | string
-  | ApiRequestScopeToken
-  | { connectionId?: null | string; profile?: null | string }
+  undefined | null | string | ApiRequestScopeToken | { connectionId?: null | string; profile?: null | string }
 
 export function capabilityScoped(scope?: ProfileScope): {
   connectionId?: string

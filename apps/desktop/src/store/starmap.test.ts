@@ -3,13 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setApiRequestConnection, setApiRequestProfile } from '@/hermes'
 import type { StarmapGraph } from '@/types/hermes'
 
-import {
-  $starmapGraph,
-  $starmapLoading,
-  evictStarmapNode,
-  loadStarmapGraph,
-  resetStarmapGraph
-} from './starmap'
+import { $starmapGraph, $starmapLoading, evictStarmapNode, loadStarmapGraph, resetStarmapGraph } from './starmap'
 
 interface Deferred<T> {
   promise: Promise<T>
