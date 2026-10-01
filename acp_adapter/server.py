@@ -256,6 +256,12 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         self.session_manager = session_manager or SessionManager()
         self._conn: Optional[acp.Client] = None
 
+    @staticmethod
+    def _mcp_session_scope(state: SessionState) -> str:
+        """Stable registry owner for one ACP session, distinct even within one profile."""
+        from tools.registry import registry
+        return os.path.join(registry.current_scope_key(), ".acp-sessions", state.session_id)
+
     # ---- Connection lifecycle -----------------------------------------------
 
     def on_connect(self, conn: acp.Client) -> None:
@@ -433,6 +439,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         try:
             from agent.runtime_cwd import set_session_cwd
             from tools.mcp_tool_discovery import register_mcp_servers
+            from tools.registry import reset_registry_scope, set_registry_scope
 
             configs = {s.name: _mcp_server_config(s) for s in mcp_servers}
 
@@ -440,7 +447,11 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                 # new_session/load_session run outside the per-turn cwd pin; the session's logical cwd is
                 # the default stdio child cwd (tools/mcp_tool_transport.py::_run_stdio), so pin it here.
                 set_session_cwd(state.cwd)
-                register_mcp_servers(configs)
+                token = set_registry_scope(self._mcp_session_scope(state))
+                try:
+                    register_mcp_servers(configs)
+                finally:
+                    reset_registry_scope(token)
 
             await asyncio.to_thread(_register_pinned)  # to_thread already runs in a copied context
         except Exception:
@@ -450,15 +461,20 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             from model_tools import get_tool_definitions
             from agent.memory_manager import inject_memory_provider_tools
 
+            from tools.registry import reset_registry_scope, set_registry_scope
             agent = state.agent
-            agent.enabled_toolsets = _expand_acp_enabled_toolsets(
-                getattr(agent, "enabled_toolsets", None),
-                mcp_server_names=[s.name for s in mcp_servers],
-            )
-            agent.tools = get_tool_definitions(
-                enabled_toolsets=agent.enabled_toolsets,
-                disabled_toolsets=getattr(agent, "disabled_toolsets", None), quiet_mode=True,
-            )
+            token = set_registry_scope(self._mcp_session_scope(state))
+            try:
+                agent.enabled_toolsets = _expand_acp_enabled_toolsets(
+                    getattr(agent, "enabled_toolsets", None),
+                    mcp_server_names=[s.name for s in mcp_servers],
+                )
+                agent.tools = get_tool_definitions(
+                    enabled_toolsets=agent.enabled_toolsets,
+                    disabled_toolsets=getattr(agent, "disabled_toolsets", None), quiet_mode=True,
+                )
+            finally:
+                reset_registry_scope(token)
             agent.valid_tool_names = {tool["function"]["name"] for tool in agent.tools or []}
             inject_memory_provider_tools(agent)
             if callable(invalidate := getattr(agent, "_invalidate_system_prompt", None)):
@@ -790,7 +806,14 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                 token = set_edit_approval_requester(edit_approval_requester)
                 return lambda: reset_edit_approval_requester(token)
 
+            def _mcp_registry() -> Callable[[], None]:
+                from tools.registry import reset_registry_scope, set_registry_scope
+
+                token = set_registry_scope(self._mcp_session_scope(state))
+                return lambda: reset_registry_scope(token)
+
             _bind_guarded(stack, "session context", _session_context)
+            _bind_guarded(stack, "MCP registry", _mcp_registry)
             if approval_cb:
                 _bind_guarded(stack, "approval callback", _approval)
             if edit_approval_requester:

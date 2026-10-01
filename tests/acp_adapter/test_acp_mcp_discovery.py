@@ -59,6 +59,34 @@ def _mod(name: str, **attrs) -> ModuleType:
     return module
 
 
+def test_acp_same_name_mcp_tools_are_isolated_by_session_scope():
+    """Two ACP sessions may advertise the same MCP name without first-writer wins."""
+    from tools.registry import ToolRegistry, reset_registry_scope, set_registry_scope
+
+    registry = ToolRegistry()
+    states = [SimpleNamespace(session_id="session-a"), SimpleNamespace(session_id="session-b")]
+    scopes = [HermesACPAgent._mcp_session_scope(state) for state in states]  # type: ignore[arg-type]
+    assert scopes[0] != scopes[1]
+
+    schema = {"description": "session tool", "parameters": {"type": "object", "properties": {}}}
+    handlers = [lambda _args: "a", lambda _args: "b"]
+    for scope, handler in zip(scopes, handlers):
+        registry.register(
+            name="mcp_shared_echo", toolset="mcp-shared", schema=schema,
+            handler=handler, scope=scope,
+        )
+
+    for scope, handler in zip(scopes, handlers):
+        token = set_registry_scope(scope)
+        try:
+            entry = registry.get_entry("mcp_shared_echo")
+            assert entry is not None and entry.handler is handler
+            definitions = registry.get_definitions({"mcp_shared_echo"}, quiet=True)
+            assert [item["function"]["name"] for item in definitions] == ["mcp_shared_echo"]
+        finally:
+            reset_registry_scope(token)
+
+
 @pytest.fixture(autouse=True)
 def _reset_mcp_startup_state():
     """Ensure each test starts with a clean discovery thread state."""
