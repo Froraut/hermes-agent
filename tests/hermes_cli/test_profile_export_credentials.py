@@ -55,6 +55,40 @@ class TestCredentialExclusion:
         assert not any("auth.json" in n for n in names), "auth.json must NOT be in export"
         assert not any(".env" in n for n in names), ".env must NOT be in export"
 
+    def test_named_profile_export_recursively_excludes_credential_artifacts(self, tmp_path, monkeypatch):
+        """Nested credential stores and their backup artifacts must never enter exports."""
+        profiles_root = tmp_path / "profiles"
+        profile_dir = profiles_root / "nested"
+        profile_dir.mkdir(parents=True)
+
+        ordinary = {
+            "config.yaml": "model: gpt-4\n",
+            "skills/demo/SKILL.md": "# Useful skill\n",
+            "memories/notes/backup-plan.md": "Keep this user-facing backup plan.\n",
+        }
+        excluded = {
+            "skills/demo/private/credentials/provider.json": "secret",
+            "workspace/project/.secrets/token.txt": "secret",
+            "memories/archive/auth.json.bak": "secret",
+            "knowledge/migrations/credentials.tar.gz": "secret",
+            "plugins/example/oauth.sqlite3": "secret",
+            "scripts/debug/tokens.log": "secret",
+        }
+        for relpath, content in ordinary.items() | excluded.items():
+            path = profile_dir / relpath
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+
+        _patch_named_profile(monkeypatch, profiles_root, profile_dir)
+        result = export_profile("nested", str(tmp_path / "nested.tar.gz"))
+
+        with tarfile.open(result, "r:gz") as tf:
+            names = set(tf.getnames())
+
+        archived = {name.removeprefix("nested/") for name in names}
+        assert set(ordinary) <= archived
+        assert not (set(excluded) & archived)
+
 
 class TestExportSecretScrub:
 

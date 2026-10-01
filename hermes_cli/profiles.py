@@ -2116,6 +2116,7 @@ def _default_export_ignore(root_dir: Path):
     def _ignore(directory: str, contents: list) -> set:
         # Universal exclusions (any depth) plus npm lockfiles that can appear at root.
         ignored = _non_exportable_entries(directory, contents)
+        ignored.update(_export_credential_entries(contents))
         ignored.update({"package.json", "package-lock.json"} & set(contents))
         if Path(directory) == root_dir:
             ignored.update(entry for entry in contents if entry not in _DEFAULT_EXPORT_INCLUDE_ROOT)
@@ -2124,9 +2125,32 @@ def _default_export_ignore(root_dir: Path):
     return _ignore
 
 
-# Credential files dropped from named-profile exports. ``bot-desktop`` is the screen's runtime state:
-# its persistent Chromium profile (Cookies, Login Data — the bot's live web sessions), Xauthority, sockets.
-_EXPORT_CREDENTIAL_FILES = frozenset({"auth.json", ".env", "bot-desktop"})
+# Credential files and containers dropped from exports at any depth. ``bot-desktop`` is the
+# screen's runtime state: its Chromium profile (Cookies, Login Data), Xauthority, and sockets.
+_EXPORT_CREDENTIAL_FILES = frozenset({
+    "auth.json", ".env", "bot-desktop", "credentials", ".credentials", "secrets", ".secrets",
+})
+_EXPORT_CREDENTIAL_ARTIFACT_SUFFIXES = (
+    ".bak", ".backup", ".old", ".orig", ".save", ".zip", ".tar", ".tar.gz", ".tgz",
+    ".db", ".sqlite", ".sqlite3", ".log", ".jsonl",
+)
+_EXPORT_CREDENTIAL_ARTIFACT_STEMS = (
+    "auth", "credential", "credentials", "oauth", "secret", "secrets", "token", "tokens",
+)
+
+
+def _export_credential_entries(contents: list) -> set:
+    """Credential containers and backup/opaque artifacts, matched by basename at every depth."""
+    ignored = set(_EXPORT_CREDENTIAL_FILES & set(contents))
+    for entry in contents:
+        lower = entry.lower()
+        if lower.startswith(("auth.json.", ".env.")) or any(
+            lower == f"{stem}{suffix}"
+            for stem in _EXPORT_CREDENTIAL_ARTIFACT_STEMS
+            for suffix in _EXPORT_CREDENTIAL_ARTIFACT_SUFFIXES
+        ):
+            ignored.add(entry)
+    return ignored
 
 # Text/config suffixes secret-scrubbed on export; binary DBs, images etc. are left alone.
 _EXPORT_REDACT_SUFFIXES = frozenset({
@@ -2185,7 +2209,7 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
     # credential exclusion for named profiles.
     def _ignore_credentials(directory: str, contents: list) -> set:
         ignored = _non_exportable_entries(directory, contents)
-        ignored.update(_EXPORT_CREDENTIAL_FILES & set(contents))
+        ignored.update(_export_credential_entries(contents))
         if Path(directory) == profile_dir:
             ignored |= PM_RUNTIME_ROOT_DIRS & set(contents)
         return ignored
