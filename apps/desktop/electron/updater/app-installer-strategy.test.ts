@@ -57,6 +57,15 @@ function makeDeps(over: Partial<AppInstallerStrategyDeps> = {}): StrategyFixture
 }
 
 describe('AppInstallerStrategy.apply', () => {
+  it('does not register relaunch, tear down, or quit when the checker reports no update', async () => {
+    const { deps, calls } = makeDeps({
+      run: async () => ({ code: 0, stdout: '{"available":false}' })
+    })
+
+    expect(await new AppInstallerStrategy(deps).apply()).toEqual({ ok: true, mechanism: 'app-installer' })
+    expect(calls).toEqual([])
+  })
+
   it('fails open: a marker-write failure never blocks the update', async () => {
     const progress: string[] = []
 
