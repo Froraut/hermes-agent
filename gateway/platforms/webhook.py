@@ -22,7 +22,10 @@ import subprocess
 import time
 from collections import deque
 from contextlib import nullcontext, suppress
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
+
+from utils import atomic_json_write
 
 try:
     from aiohttp import web
@@ -59,6 +62,7 @@ DEFAULT_HOST = None
 DEFAULT_PORT = 8644
 _INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
 _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
+_RUNTIME_STATE_FILENAME = "webhook_runtime.json"
 _RATE_WINDOW_SECONDS = 60.0
 # Hosts that only serve same-machine connections; anything else is a public bind.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "ip6-localhost", "ip6-loopback"})
@@ -186,6 +190,7 @@ class WebhookAdapter(BasePlatformAdapter):
         self._seen_deliveries: Dict[str, float] = {}
         self._idempotency_ttl: int = 3600  # 1 hour
         self._seen_deliveries_next_prune_at: float = 0.0
+        self._load_runtime_state()
         self._rate_counts: Dict[str, Deque[float]] = {}  # per-route hit timestamps in a fixed window
         self._rate_limit: int = int(extra.get("rate_limit", 30))  # per minute
         self._max_body_bytes: int = int(extra.get("max_body_bytes", 1_048_576))  # 1MB
@@ -301,6 +306,47 @@ class WebhookAdapter(BasePlatformAdapter):
             self._seen_deliveries.pop(k, None)
         self._seen_deliveries_next_prune_at = now + min(60.0, max(1.0, self._idempotency_ttl / 10))
 
+    @staticmethod
+    def _runtime_state_path() -> Path:
+        from hermes_constants import get_hermes_home
+        return get_hermes_home() / "state" / _RUNTIME_STATE_FILENAME
+
+    def _load_runtime_state(self) -> None:
+        """Restore accepted delivery IDs and reply envelopes before serving requests."""
+        try:
+            raw = json.loads(self._runtime_state_path().read_text(encoding="utf-8-sig"))
+        except (FileNotFoundError, ValueError, OSError):
+            return
+        if not isinstance(raw, dict):
+            return
+        now = time.time()
+        seen = raw.get("seen", {})
+        if isinstance(seen, dict):
+            self._seen_deliveries = {
+                str(key): float(at) for key, at in seen.items()
+                if isinstance(at, (int, float)) and now - float(at) < self._idempotency_ttl
+            }
+        envelopes = raw.get("envelopes", {})
+        if isinstance(envelopes, dict):
+            for key, record in envelopes.items():
+                if not isinstance(record, dict) or not isinstance(record.get("delivery"), dict):
+                    continue
+                created = record.get("created")
+                if not isinstance(created, (int, float)) or now - float(created) >= self._idempotency_ttl:
+                    continue
+                chat_id = str(key)
+                self._delivery_info[chat_id] = record["delivery"]
+                self._delivery_info_created[chat_id] = float(created)
+                self._delivery_info_order.append((float(created), chat_id))
+
+    def _persist_runtime_state(self) -> None:
+        """Atomically checkpoint admission and egress routing before work is dispatched."""
+        envelopes = {
+            key: {"created": self._delivery_info_created[key], "delivery": delivery}
+            for key, delivery in self._delivery_info.items() if key in self._delivery_info_created
+        }
+        atomic_json_write(self._runtime_state_path(), {"seen": self._seen_deliveries, "envelopes": envelopes})
+
     def _record_rate_limit_hit(self, route_name: str, now: float) -> bool:
         """Return True if route is still within limit after recording this hit."""
         if not isinstance(window := self._rate_counts.get(route_name), deque):
@@ -322,6 +368,7 @@ class WebhookAdapter(BasePlatformAdapter):
         self._seen_deliveries[delivery_id] = now
         if len(self._seen_deliveries) > max(self._rate_limit * 2, 128):
             self._prune_seen_deliveries(now)
+        self._persist_runtime_state()
         return True
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
@@ -660,6 +707,7 @@ class WebhookAdapter(BasePlatformAdapter):
         self._delivery_info_created[session_chat_id] = now
         self._delivery_info_order.append((now, session_chat_id))
         self._prune_delivery_info(now)
+        self._persist_runtime_state()
         source = self.build_source(chat_id=session_chat_id, chat_name=f"webhook/{route_name}", chat_type="webhook",
                                    user_id=f"webhook:{route_name}", user_name=route_name)
         if profile and isinstance(profile, str):
