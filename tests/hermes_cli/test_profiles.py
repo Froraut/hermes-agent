@@ -1009,6 +1009,29 @@ class TestWrapperScript:
         assert content.startswith("#!/bin/sh")
         assert "exec /opt/hermes/bin/hermes -p mybot" in content
 
+    @pytest.mark.platforms("posix")
+    @pytest.mark.parametrize("bin_dir", ["/opt/my tools/bin", "/home/o'brien/.local/bin"])
+    def test_wrapper_for_a_quoted_hermes_path_is_still_ours(self, profile_env, monkeypatch, bin_dir):
+        """An install path that shlex must quote still yields a wrapper Hermes recognizes as its own:
+        listed as the profile's alias and removed on delete/rename."""
+        monkeypatch.setattr("hermes_cli.profiles.shutil.which", lambda name: f"{bin_dir}/hermes")
+        wrapper = create_wrapper_script("qiaobusi", target="steve")
+
+        assert profiles.build_alias_map() == {"steve": "qiaobusi"}
+        assert remove_wrapper_script("qiaobusi") is True
+        assert not wrapper.exists()
+
+    @pytest.mark.platforms("posix")
+    def test_doctor_reports_an_orphan_wrapper_with_a_quoted_hermes_path(self, profile_env, monkeypatch, capsys):
+        from hermes_cli.doctor_state import _check_profiles
+        monkeypatch.setattr("hermes_cli.profiles.shutil.which", lambda name: "/opt/my tools/bin/hermes")
+        create_profile("steve", no_alias=True)
+        create_wrapper_script("gone")  # its profile does not exist
+
+        _check_profiles(False)
+
+        assert "Orphan alias: gone → profile 'gone' no longer exists" in capsys.readouterr().out
+
 
     @pytest.mark.platforms("windows")
     def test_remove_finds_bat_on_windows(self, profile_env):
