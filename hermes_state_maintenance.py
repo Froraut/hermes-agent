@@ -79,12 +79,12 @@ _PRUNE_FILTER_NAMES = frozenset(name for name, _, _ in _PRUNE_FILTERS) | {"archi
 _CONTINUATION_EDGE_SQL = "p.end_reason = 'compression'\n" + _non_continuation_child_sql("c.", "p.id")
 
 
-def _continued_ancestors_sql(candidates_where: str) -> str:
-    """Compression ancestors of every row *candidates_where* (alias ``s``) does not select."""
+def _continued_ancestors_sql(child_filter: str) -> str:
+    """Compression ancestors of rows matching *child_filter* (alias ``c``)."""
     return ("WITH RECURSIVE kept(id) AS ("
             " SELECT p.id FROM sessions c JOIN sessions p ON p.id = c.parent_session_id"
             f" WHERE {_CONTINUATION_EDGE_SQL}"
-            f" AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = c.id AND {candidates_where})"
+            f" AND ({child_filter})"
             " UNION"
             " SELECT p.id FROM kept k JOIN sessions c ON c.id = k.id JOIN sessions p ON p.id = c.parent_session_id"
             f" WHERE {_CONTINUATION_EDGE_SQL}"
@@ -241,7 +241,8 @@ class SessionMaintenanceMixin:
             return where, params
         # A compressed-away segment ages with its conversation, not on its own: while any later
         # segment stays, deleting it would cut the start off a chat that is still in use.
-        return f"{where} AND s.id NOT IN ({_continued_ancestors_sql(where)})", [*params, *params]
+        child_filter = f"NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = c.id AND {where})"
+        return f"{where} AND s.id NOT IN ({_continued_ancestors_sql(child_filter)})", [*params, *params]
 
     def list_prune_candidates(self, older_than_days: Optional[float] = None, source: str = None, *,
                               whole_lineages: bool = False, **filters) -> List[Dict[str, Any]]:
@@ -306,15 +307,24 @@ class SessionMaintenanceMixin:
         Children outside the window are orphaned (parent NULLed), not cascade-deleted.  With
         *sessions_dir*, transcript files are removed outside the DB transaction.
         ``exclude_active_write_guards`` (automatic maintenance) skips rows under a live turn lease
-        or compression lock while expired/dead holders are reclaimed and fenced.  A compression
-        ancestor is deleted only together with every continuation after it (``whole_lineages``)."""
+        or compression lock, plus their compression ancestors, while expired/dead holders are reclaimed
+        and fenced.  A compression ancestor is deleted only together with every continuation after it
+        (``whole_lineages``)."""
         where, where_params = self._prune_where(older_than_days, source, filters, whole_lineages=True)
         removed_ids: list[str] = []
         def _do(conn):
             cursor = conn.execute(f"SELECT s.id FROM sessions s WHERE {where}", where_params)
             session_ids = {row["id"] for row in cursor.fetchall()}
             if exclude_active_write_guards:
-                session_ids -= self._guarded_ids(conn, session_ids)
+                guarded_ids = self._guarded_ids(conn, session_ids)
+                session_ids -= guarded_ids
+                # Guard filtering changes the candidate set after its SQL lineage closure. Re-close it:
+                # every continuation ancestor of a protected row must stay with that row.
+                for chunk in _id_chunks(guarded_ids):
+                    ph = _placeholders(chunk)
+                    ancestors = conn.execute(
+                        _continued_ancestors_sql(f"c.id IN ({ph})"), chunk).fetchall()
+                    session_ids.difference_update(row["id"] for row in ancestors)
             if not session_ids:
                 return 0
             # Batched: a cron-heavy store prunes tens of thousands of ids in one call.
