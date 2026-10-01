@@ -780,6 +780,39 @@ class TestDownloadMedia:
             assert fh.read() == b"\xff\xd8\xff\xe0jpegdata"
 
     @pytest.mark.asyncio
+    async def test_media_redirect_does_not_forward_bearer_cross_origin(self, tmp_path):
+        from gateway.platforms import whatsapp_cloud as wac
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            async def get(self, url, *, headers):
+                self.calls.append((url, dict(headers)))
+                if len(self.calls) == 1:
+                    return MagicMock(status_code=200, json=MagicMock(return_value={
+                        "url": "https://lookaside.fbsbx.com/whatsapp_business/attachments/1",
+                        "mime_type": "image/jpeg",
+                    }))
+                if len(self.calls) == 2:
+                    return MagicMock(
+                        status_code=302,
+                        headers={"location": "https://scontent.example.fbcdn.net/media/1"},
+                    )
+                return MagicMock(status_code=200, content=b"jpeg")
+
+        adapter = _make_adapter(access_token="secret-token")
+        client = FakeClient()
+        adapter._http_client = client  # type: ignore[assignment]
+
+        with _patch.object(wac, "_INBOUND_MEDIA_CACHE", tmp_path):
+            local_path, mime = await adapter._download_media_to_cache("media_xyz")
+
+        assert local_path is not None and mime == "image/jpeg"
+        assert client.calls[1][1]["Authorization"] == "Bearer secret-token"
+        assert "Authorization" not in client.calls[2][1]
+
+    @pytest.mark.asyncio
     async def test_metadata_failure_returns_none(self):
         adapter = _make_adapter()
         adapter._http_client = MagicMock()
