@@ -22,8 +22,56 @@ Checkpoint project state has no live in-memory owner and is rekeyed locally afte
 from __future__ import annotations
 
 import contextlib
+import json
+import re
 import sys
 from pathlib import Path
+
+
+_DURABLE_REFERENCE_FILES = (
+    "cron/jobs.json",
+    "config.yaml",
+)
+
+
+def migrate_profile_durable_references(old_dir: Path, new_dir: Path) -> bool:
+    """Rekey durable profile names and absolute homes left inside a moved profile.
+
+    The directory rename carries files but not values embedded in cron targets, plugin state,
+    routes, wrappers, or aliases.  Keep the inventory here rather than growing one-off rename
+    hooks. JSON plugin state is included because installed plugins may persist profile routing.
+    Atomic rewrites and exact token replacement make retries harmless.
+    """
+    from utils import atomic_write_text
+
+    old_name, new_name = old_dir.name, new_dir.name
+    candidates = [new_dir / rel for rel in _DURABLE_REFERENCE_FILES]
+    root_config = new_dir.parent.parent / "config.yaml"
+    candidates.append(root_config)
+    plugins = new_dir / "plugins"
+    if plugins.is_dir():
+        candidates.extend(plugins.rglob("*.json"))
+    ok = True
+    for path in dict.fromkeys(candidates):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+            migrated = text.replace(str(old_dir), str(new_dir))
+            migrated = migrated.replace(f"agent:{old_name}:", f"agent:{new_name}:")
+            migrated = migrated.replace(f"bot-chat:{old_name}", f"bot-chat:{new_name}")
+            migrated = re.sub(
+                rf"(?<![A-Za-z0-9_-]){re.escape(old_name)}(?![A-Za-z0-9_-])",
+                new_name, migrated)
+            if migrated != text:
+                # Parse JSON before replacing the durable copy; malformed plugin state is retained.
+                if path.suffix == ".json":
+                    json.loads(migrated)
+                atomic_write_text(path, migrated)
+        except Exception as exc:
+            ok = False
+            print(f"⚠ Profile reference migration failed for {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
+    return ok
 
 
 def migrate_profile_identity(old_name: str, new_name: str) -> bool:
@@ -190,6 +238,9 @@ def _migrate_profile_identity(old_canon: str, new_canon: str, live_mux: bool) ->
     project identity is always durable-only. Never fatal to the rename, which has already happened
     by this point.
     """
+    from hermes_cli.profiles import get_profile_dir
+    references_migrated = migrate_profile_durable_references(
+        get_profile_dir(old_canon), get_profile_dir(new_canon))
     checkpoint_migrated = _migrate_checkpoint_identity(old_canon, new_canon)
 
     if live_mux:
@@ -202,7 +253,7 @@ def _migrate_profile_identity(old_canon: str, new_canon: str, live_mux: bool) ->
             reason = f"{type(exc).__name__}: {exc}"
         else:
             if isinstance(answer, dict) and answer.get("ok") is True:
-                return checkpoint_migrated
+                return checkpoint_migrated and references_migrated
             reason = _control_answer_failure(answer)
             if answer is None and _gateway_accepts_profile_identity_verb(root):
                 reason += (" — the gateway is running but does not implement "
@@ -214,11 +265,10 @@ def _migrate_profile_identity(old_canon: str, new_canon: str, live_mux: bool) ->
             file=sys.stderr)
         return False
 
-    from hermes_cli.profiles import get_profile_dir
     from hermes_state_registry import acquire, release_or_close
     from hermes_constants import get_default_hermes_root
     root = get_default_hermes_root()
-    migrated = checkpoint_migrated
+    migrated = checkpoint_migrated and references_migrated
     for db_path in (root / "state.db", get_profile_dir(new_canon) / "state.db"):
         if not db_path.exists():
             continue
