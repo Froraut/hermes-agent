@@ -69,43 +69,6 @@ def _make_codex_agent(**kwargs):
 
 
 class TestRunConversationCodexPath:
-    @pytest.mark.parametrize("config,expected", [
-        ({"enabled": True, "effort": "ultra"}, "ultra"),
-        ({"enabled": False}, "none"),
-        (None, None),
-    ])
-    def test_selected_effort_reaches_native_codex_runtime(self, monkeypatch, config, expected):
-        """The Hermes reasoning pick reaches turn/start (Ultra unclamped); the model stays codex's."""
-        seen = {}
-
-        def fake_run_turn(self, user_input, **kwargs):
-            seen.update(kwargs)
-            return TurnResult(final_text="done", projected_messages=[{"role": "assistant", "content": "done"}])
-
-        monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
-        monkeypatch.setattr(CodexAppServerSession, "ensure_started", lambda self: "thread-stub-1")
-        agent = _make_codex_agent(model="gpt-6-sol", reasoning_config=config)
-        agent._reasoning_pick_explicit = True  # a session pin (/reasoning, the Desktop menu)
-        with patch.object(agent, "_spawn_background_review", return_value=None):
-            agent.run_conversation("review")
-        assert seen["effort"] == expected
-        assert agent.reasoning_config == config
-
-    def test_profile_default_effort_stays_codexs_own(self, monkeypatch):
-        """No explicit pick: the effective (profile default) reasoning is not forwarded (#75186)."""
-        seen = {}
-
-        def fake_run_turn(self, user_input, **kwargs):
-            seen.update(kwargs)
-            return TurnResult(final_text="done", projected_messages=[{"role": "assistant", "content": "done"}])
-
-        monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
-        monkeypatch.setattr(CodexAppServerSession, "ensure_started", lambda self: "thread-stub-1")
-        agent = _make_codex_agent(model="gpt-6-sol", reasoning_config={"enabled": True, "effort": "high"})
-        with patch.object(agent, "_spawn_background_review", return_value=None):
-            agent.run_conversation("review")
-        assert seen["effort"] is None
-
     def test_run_conversation_returns_codex_shape(self, fake_session):
         agent = _make_codex_agent()
         # No background review fork during tests

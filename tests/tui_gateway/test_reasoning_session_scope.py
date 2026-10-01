@@ -23,8 +23,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
-
 import tui_gateway.server as server
 from tui_gateway.server import _session_info
 
@@ -64,41 +62,6 @@ class TestSessionInfoReasoningEffort:
         # Verbatim levels report themselves, so clients only annotate a real clamp.
         assert _session_info(_agent({"enabled": True, "effort": "high"}))["reasoning_effort_wire"] == "high"
         assert _session_info(_agent({"enabled": False}))["reasoning_effort_wire"] == ""
-
-    @pytest.mark.parametrize("api_mode,expected", [("codex_app_server", "ultra"), ("codex_responses", "max")])
-    def test_ultra_display_follows_the_selected_runtime(self, api_mode, expected) -> None:
-        agent = _agent({"enabled": True, "effort": "ultra"})
-        agent.provider, agent.model, agent.api_mode = "openai-codex", "gpt-6-sol", api_mode
-        info = _session_info(agent)
-        assert info["reasoning_effort"] == "ultra"
-        assert info["reasoning_effort_wire"] == expected
-
-    def test_ultra_display_preserves_isolated_compute_host_metadata(self) -> None:
-        info = _session_info(None, {
-            "_compute_host_active": True,
-            "_metadata_mirror": {
-                "provider": "openai-codex", "model": "gpt-6-sol",
-                "reasoning_effort": "ultra", "reasoning_effort_wire": "ultra",
-            },
-        })
-        assert info["reasoning_effort"] == info["reasoning_effort_wire"] == "ultra"
-
-    def test_ultra_pending_choice_wins_over_stale_compute_host_snapshot(self) -> None:
-        session = {
-            "_compute_host_active": True,
-            "create_reasoning_override": {"enabled": True, "effort": "ultra"},
-            "_metadata_mirror": {
-                "provider": "openai-codex", "model": "gpt-6-sol",
-                "reasoning_effort": "high", "reasoning_effort_wire": "high",
-            },
-        }
-        pending = _session_info(None, session)
-        assert pending["reasoning_effort"] == "ultra"
-        assert pending["reasoning_effort_wire"] == ""
-
-        session["_metadata_mirror"].update(reasoning_effort="ultra", reasoning_effort_wire="ultra")
-        confirmed = _session_info(None, session)
-        assert confirmed["reasoning_effort"] == confirmed["reasoning_effort_wire"] == "ultra"
 
 
 class TestConfigSetReasoningSessionScope:
@@ -148,3 +111,4 @@ class TestLoadReasoningConfigYamlBoolean:
             server, "_load_cfg", return_value={"agent": {"reasoning_effort": "false"}}
         ):
             assert server._load_reasoning_config() == {"enabled": False}
+

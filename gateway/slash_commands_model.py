@@ -757,8 +757,6 @@ class GatewayModelCommandsMixin:
         _route = (
             _session_route.get("provider") or _model_cfg.get("provider"),
             _session_model or _model_cfg.get("default") or _model_cfg.get("model"),
-            _model_cfg.get("openai_runtime")
-            if (_session_route.get("provider") or _model_cfg.get("provider")) in {"openai", "openai-codex"} else None,
         )
         if rc is None:
             level, current_effort = t("gateway.reasoning.level_default"), "medium"

@@ -67,14 +67,6 @@ Speed is separate from reasoning effort and Daybreak access. On supported subscr
 
 Hermes creates the **GPT-6.1 Sol-900k** choice from an eligible discovered GPT-6.1 Sol model. The `-900k` suffix is a local context choice, removed from the model ID sent to OpenAI. Hermes limits its budget to the account catalog's maximum, and Codex may report a smaller usable context after its own reserve. Use **Refresh models** if a new model is absent. A failed discovery uses short-lived compatibility hints instead of caching them as a successful account catalog.
 
-### Ultra with OpenAI / ChatGPT subscription models
-
-Codex **Ultra** is a native harness mode: it combines model reasoning with the additional orchestration behavior supported by the selected model and account. Codex resolves the model-facing effort itself, typically to `max`. Sending `ultra` directly to a Responses inference endpoint does not activate that harness mode.
-
-To use native Ultra in Hermes, enable `/codex-runtime on`, start a new chat as directed by the command, and choose **Ultra** in the reasoning menu or use `/reasoning ultra`. Hermes sends the reasoning level you picked as `turn/start.effort`; later explicit choices such as `high` or `none` are forwarded on subsequent turns, and an unset effort keeps Codex's configured default. The runtime otherwise keeps Codex's own login and configuration: the model and speed come from `~/.codex/config.toml`, not from Hermes' picker.
-
-The Desktop status shows **Ultra** for a native Codex turn. On the direct ChatGPT OAuth Responses route, **Ultra→Max** reports the inference-level conversion; use the native runtime for Codex's additional Ultra behavior. Model/account eligibility remains controlled by Codex. See [OpenAI's subagent and reasoning guidance](https://learn.chatgpt.com/docs/agent-configuration/subagents).
-
 ### Mid-session switches and context warnings
 
 When you switch models **inside an active session** (Herm TUI model picker, `hermes` CLI, or `/model` on Telegram/Discord), Hermes estimates whether your **next message** will run **preflight context compression** against the new model's window. If the session is already near or above that model's compression threshold (see [Context Compression](./configuration.md#context-compression)), the switch reply includes a warning — the same `warning_message` path used for expensive-model notices. The switch still applies immediately; compression runs on the **first user message after the switch**, before the model answers.

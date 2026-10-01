@@ -2566,12 +2566,7 @@ class CLICommandsMixin:
         from cli import CLI_CONFIG, _parse_reasoning_config
         from agent.reasoning_effort import effort_display_label
         raw = _command_arg(cmd)
-        from hermes_cli.codex_runtime_switch import get_current_runtime
-        _route = (
-            getattr(self, "provider", None), getattr(self, "model", None),
-            getattr(getattr(self, "agent", None), "api_mode", None)
-            or (get_current_runtime(CLI_CONFIG) if getattr(self, "provider", None) in {"openai", "openai-codex"} else None),
-        )
+        _route = (getattr(self, "provider", None), getattr(self, "model", None))
         if not raw:  # show current state
             rc = self.reasoning_config
             level = (_gt("reasoning.level_default") if rc is None else _gt("reasoning.level_disabled")
@@ -2603,7 +2598,6 @@ class CLICommandsMixin:
                        _dim_line(_t("reasoning.valid_levels")), _dim_line(_t("reasoning.valid_display")),
                        _dim_line(_t("reasoning.valid_scope")))
         self.reasoning_config = parsed
-        self._reasoning_pick_explicit = True  # forwarded to Codex app-server turns; defaults are not
         _retire_agent(self)  # Force agent re-init with new reasoning config
         saved = explicit_global and _save("agent.reasoning_effort", arg)
         if saved:

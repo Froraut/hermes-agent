@@ -544,16 +544,6 @@ def _codex_model_provider(agent) -> str | None:
     return codex_model_provider_id(str(getattr(agent, "requested_provider", "") or ""))
 
 
-def _explicit_codex_effort(agent) -> str | None:
-    """The reasoning level the user explicitly picked for this session, else ``None``. The effective
-    ``reasoning_config`` also carries profile defaults; those stay Codex's own setting (#75186)."""
-    if not getattr(agent, "_reasoning_pick_explicit", False):
-        return None
-    from agent.reasoning_effort import requested_effort
-    reasoning = getattr(agent, "reasoning_config", None)
-    return "none" if isinstance(reasoning, dict) and reasoning.get("enabled") is False else requested_effort(reasoning)
-
-
 def _codex_wire_model(agent, model_provider: str | None) -> str | None:
     """The slug codex should run. ``-900k`` picker variants are Hermes-side aliases the backend rejects
     ("not supported when using Codex with a ChatGPT account"); codex applies the catalog's extended window
@@ -703,12 +693,9 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
     _ensure_codex_session(agent, messages)
     try:
         _start_codex_thread(agent)
-        # Only an explicit Hermes reasoning pick travels (``ultra`` is codex's native harness mode);
-        # a profile default stays Codex's configured effort (#75186).
         turn = agent._codex_session.run_turn(
             user_input=user_message,
-            model=_codex_wire_model(agent, getattr(agent, "_codex_session_model_provider", None)),
-            effort=_explicit_codex_effort(agent))
+            model=_codex_wire_model(agent, getattr(agent, "_codex_session_model_provider", None)))
     except Exception as exc:
         logger.exception("codex app-server turn failed")
         _close_codex_session(agent)

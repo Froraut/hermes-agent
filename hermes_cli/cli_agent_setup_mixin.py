@@ -717,9 +717,6 @@ class CLIAgentSetupMixin:
             # patch_stdout's StdoutProxy (#2262), holding lines while a response box streams so a
             # subagent/background completion notice never splits the reply mid-paragraph.
             self.agent._print_fn = self._agent_status_print
-            # --reasoning or /reasoning is an explicit pick; a config default is not (Codex app-server).
-            self.agent._reasoning_pick_explicit = bool(
-                getattr(self, "_explicit_reasoning_config", None) is not None or getattr(self, "_reasoning_pick_explicit", False))
             # Hydrate credits notices at session OPEN (parity with the TUI) so a depletion
             # warning shows before the first message. Idempotent + fail-open in the helper.
             try:

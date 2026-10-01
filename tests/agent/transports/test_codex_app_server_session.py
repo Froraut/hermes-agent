@@ -274,23 +274,6 @@ class TestLifecycle:
 # ---- turn loop ----
 
 class TestRunTurn:
-    def test_explicit_effort_reaches_turn_start_and_codex_keeps_model_and_speed(self):
-        """Ultra is codex's native harness mode: an explicit pick (ultra, a later high, an explicit
-        none) rides turn/start; an unset one leaves codex's default. Model and speed are never sent,
-        so the thread keeps codex's own configuration (#75186)."""
-        client = FakeClient()
-        session = make_session(client)
-        for effort in (None, "ultra", "high", "none"):
-            client.queue_notification(
-                "turn/completed", threadId="t",
-                turn={"id": "tu1", "status": "completed", "error": None},
-            )
-            assert session.run_turn("review", turn_timeout=2, effort=effort).error is None
-        turns = [params for method, params in client.requests if method == "turn/start"]
-        assert "effort" not in turns[0]
-        assert [turn["effort"] for turn in turns[1:]] == ["ultra", "high", "none"]
-        assert all(set(turn) <= {"threadId", "input", "effort"} for turn in turns)
-
     def test_simple_text_turn_returns_final_message(self):
         client = FakeClient()
         client.queue_notification("turn/started", threadId="t", turn={"id": "tu1"})
