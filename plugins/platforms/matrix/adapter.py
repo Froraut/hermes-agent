@@ -954,7 +954,7 @@ class MatrixAdapter(BasePlatformAdapter):
             return
         event_ids: Set[str] = set()
         try:
-            with path.open("r", encoding="utf-8") as ledger:
+            with path.open("r", encoding="utf-8-sig") as ledger:
                 for line in ledger:
                     event_id = json.loads(line)
                     if isinstance(event_id, str) and event_id:

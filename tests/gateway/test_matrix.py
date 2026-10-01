@@ -2934,8 +2934,8 @@ class TestMatrixDispatchSyncIsolation:
         client.handle_sync = MagicMock(return_value=[_boom(), _ok()])
         adapter._client = client
 
-        with caplog.at_level(logging.WARNING):
-            # Must not raise despite the failing handler.
+        # The failure surfaces after every sibling settles, so the caller keeps the sync cursor.
+        with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError, match="handler boom"):
             await adapter._dispatch_sync({"next_batch": "s1"})
 
         assert ran["ok"] is True  # the sibling handler still ran
