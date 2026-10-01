@@ -835,12 +835,21 @@ class TestHeadTailTruncation(unittest.TestCase):
             def get_temp_dir(self):
                 return "/tmp"
 
-            def execute(self, command, cwd=None, timeout=None):
+            def execute(self, command, cwd=None, timeout=None, stdin_data=None):
                 self.commands.append((command, cwd, timeout))
                 if "command -v python3" in command:
                     return {"output": "OK\n", "returncode": 0}
                 if "python3 script.py" in command:
                     return {"output": "HEAD\n" + ("x" * 80_000) + "\nTAIL\n", "returncode": 0}
+                if stdin_data is not None and "base64 -d >" in command:
+                    import base64
+                    import shlex
+                    from pathlib import Path
+
+                    target = Path(shlex.split(command)[-1])
+                    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    target.write_bytes(base64.b64decode(stdin_data))
+                    target.chmod(0o600)
                 return {"output": "", "returncode": 0}
 
         fake_thread = MagicMock()
@@ -867,6 +876,86 @@ class TestHeadTailTruncation(unittest.TestCase):
             body = f.read()
         self.assertIn("HEAD", body)
         self.assertIn("TAIL", body)
+
+    @pytest.mark.platforms("posix")
+    def test_remote_diagnostic_artifact_stays_private_in_backend_until_owner_cleanup(self):
+        """A remote diagnostic spill is created inside (and read through) that backend.
+
+        It must not return a controller-host cache path or retain the artifact after its
+        owning session is cleared.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from tools.approval import clear_session
+        from tools.approval_context import reset_current_session_key, set_current_session_key
+        from tools.environments.local import LocalEnvironment
+        from tools.file_operations import ShellFileOperations
+
+        owner = "remote-artifact-owner"
+        # local.py caches the install shim from the developer process before the
+        # hermetic test home is installed; this backend fixture must not probe it.
+        hermes_bin = patch("tools.environments.local._HERMES_BIN_DIR", None)
+        hermes_bin.start()
+        self.addCleanup(hermes_bin.stop)
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            backend_temp = root_path / "backend-temp"
+            backend_temp.mkdir()
+            env = LocalEnvironment(
+                cwd=str(root_path), timeout=30,
+                env={"TERMINAL_TEMP_DIR": str(backend_temp)},
+            )
+            code = (
+                "import sys\n"
+                "print('DIAGNOSTIC-BEGIN', file=sys.stderr)\n"
+                "print('\\n'.join('diagnostic-%04d-%s' % (i, 'z' * 32) "
+                "for i in range(2200)), file=sys.stderr)\n"
+                "print('DIAGNOSTIC-END', file=sys.stderr)\n"
+                "raise RuntimeError('diagnostic overflow marker')\n"
+            )
+            token = set_current_session_key(owner)
+            try:
+                with patch(
+                    "tools.code_execution_tool._load_config",
+                    return_value={"timeout": 30, "max_tool_calls": 5},
+                ), patch(
+                    "tools.code_execution_tool._get_or_create_env",
+                    return_value=(env, "ssh"),
+                ):
+                    with patch(
+                        "tools.code_kernel_remote.execute_in_remote_kernel",
+                        return_value=None,
+                    ):
+                        result = json.loads(_execute_remote(code, "remote-task", ["read_file"]))
+                    kernel_result = json.loads(_execute_remote(
+                        "print('\\n'.join('remote-kernel-%04d-%s' % (i, 'k' * 32) "
+                        "for i in range(2200)))\nprint('REMOTE-KERNEL-END')",
+                        "remote-task", ["read_file"],
+                    ))
+            finally:
+                reset_current_session_key(token)
+
+            self.assertEqual(result["status"], "error", result)
+            artifact = Path(result["stdout_spill_path"])
+            self.assertTrue(artifact.is_relative_to(backend_temp), artifact)
+            self.assertNotIn(owner, str(artifact))
+            self.assertEqual(artifact.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(artifact.parent.stat().st_mode & 0o777, 0o700)
+            page = ShellFileOperations(env).read_file(str(artifact), offset=1100, limit=3)
+            self.assertIn("diagnostic-1099", page.content)
+
+            self.assertEqual(kernel_result["status"], "success", kernel_result)
+            kernel_artifact = Path(kernel_result["stdout_spill_path"])
+            self.assertTrue(kernel_artifact.is_relative_to(backend_temp), kernel_artifact)
+            kernel_page = ShellFileOperations(env).read_file(
+                str(kernel_artifact), offset=2200, limit=2
+            )
+            self.assertIn("REMOTE-KERNEL-END", kernel_page.content)
+
+            clear_session(owner)
+            self.assertFalse(artifact.exists())
+            self.assertFalse(kernel_artifact.exists())
 
 
 class TestRpcTokenAuthorization(unittest.TestCase):
