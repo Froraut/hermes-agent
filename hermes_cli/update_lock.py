@@ -12,7 +12,9 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -305,10 +307,45 @@ class UpdateLock:
     never deleted from under its new owner.
     """
 
-    def __init__(self, *, path: Path | None = None) -> None:
+    def __init__(
+        self, *, path: Path | None = None,
+        refresh_interval_seconds: float = UPDATE_MARKER_MAX_AGE_SECONDS / 4,
+    ) -> None:
         self.path = path or update_marker_path()
         self.acquired = False
         self.holder: UpdateHolder | None = None
+        self._fingerprint = uuid.uuid4().hex
+        self._refresh_interval_seconds = refresh_interval_seconds
+        self._stop_refresh = threading.Event()
+        self._refresh_thread: threading.Thread | None = None
+
+    def _payload(self) -> str:
+        return f"{os.getpid()}\n{int(time.time())}\n{self._fingerprint}\n"
+
+    def _still_owns(self) -> bool:
+        try:
+            lines = self.path.read_text(encoding="utf-8-sig").splitlines()
+        except OSError:
+            return False
+        return len(lines) >= 3 and lines[0].strip() == str(os.getpid()) and lines[2].strip() == self._fingerprint
+
+    def _refresh_loop(self) -> None:
+        while not self._stop_refresh.wait(self._refresh_interval_seconds):
+            if not self._still_owns():
+                return
+            try:
+                # Preserve the owner fingerprint while renewing the lease timestamp.
+                self.path.write_text(self._payload(), encoding="utf-8")
+            except OSError as exc:
+                logger.debug("Could not refresh update marker %s: %s", self.path, exc)
+                return
+
+    def _start_refresh(self) -> None:
+        self._stop_refresh.clear()
+        self._refresh_thread = threading.Thread(
+            target=self._refresh_loop, name="hermes-update-lease", daemon=True,
+        )
+        self._refresh_thread.start()
 
     def acquire(self) -> bool:
         """Claim the lock. Returns False (and sets ``holder``) if it's taken.
@@ -328,15 +365,44 @@ class UpdateLock:
                 return True
             self.holder = existing
             return False
+        if existing is not None:
+            # PID reuse can leave a prior run's claim naming us. It cannot belong to
+            # another live process, so remove it before the atomic fresh claim.
+            with suppress(OSError):
+                self.path.unlink()
+        claim_path = self.path.with_name(f".{self.path.name}.{self._fingerprint}.claim")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(f"{os.getpid()}\n{int(time.time())}\n", encoding="utf-8")
+            fd = os.open(claim_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as marker:
+                    marker.write(self._payload())
+                    marker.flush()
+                    os.fsync(marker.fileno())
+                # link() publishes a complete claim iff the marker does not exist. Unlike
+                # check-then-write, two contenders cannot both win or expose partial bytes.
+                os.link(claim_path, self.path)
+            finally:
+                with suppress(OSError):
+                    claim_path.unlink()
+        except FileExistsError:
+            if not self.path.parent.is_dir():
+                logger.debug("Could not create update marker directory %s", self.path.parent)
+                return True
+            existing = read_live_update(path=self.path)
+            if existing is None:
+                return self.acquire()
+            if existing.pid == _handoff_pid() or _is_ancestor_pid(existing.pid):
+                return True
+            self.holder = existing
+            return False
         except OSError as exc:
             # Best-effort, like the Rust guard: an unwritable marker must not block the
             # update itself (worse than the race it prevents). Degrade to pre-lock behavior.
             logger.debug("Could not write update marker %s: %s", self.path, exc)
             return True
         self.acquired = True
+        self._start_refresh()
         return True
 
     def release(self) -> None:
@@ -344,11 +410,11 @@ class UpdateLock:
         if not self.acquired:
             return
         self.acquired = False
-        try:
-            owner = int(self.path.read_text(encoding="utf-8-sig").splitlines()[0].strip())
-        except (OSError, IndexError, ValueError):
-            return
-        if owner != os.getpid():
+        self._stop_refresh.set()
+        if self._refresh_thread is not None:
+            self._refresh_thread.join(timeout=max(1.0, self._refresh_interval_seconds + 0.1))
+            self._refresh_thread = None
+        if not self._still_owns():
             return  # a handoff partner took ownership — still a live update
         with suppress(OSError):
             self.path.unlink()

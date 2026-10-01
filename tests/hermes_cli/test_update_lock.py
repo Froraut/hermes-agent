@@ -82,7 +82,46 @@ def test_acquire_writes_pid_and_start_time(marker):
         "the Electron gate probes this pid for liveness"
     )
     assert int(lines[1]) == pytest.approx(time.time(), abs=5)
-    assert len(lines) == 2, "wire format is exactly pid + started_at"
+    assert len(lines) == 3, "wire format is pid + renewable timestamp + owner fingerprint"
+    assert lines[2], "the fingerprint prevents a former owner releasing a successor's claim"
+
+
+def test_atomic_claim_has_one_winner_and_renews_its_lease(marker, tmp_path):
+    """Simultaneous contenders have one owner, whose lease stays fresh during long work."""
+    barrier = tmp_path / "go"
+    code = """
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from hermes_cli.update_lock import UpdateLock
+marker, barrier = Path(sys.argv[2]), Path(sys.argv[3])
+while not barrier.exists(): time.sleep(.001)
+lock = UpdateLock(path=marker, refresh_interval_seconds=.05)
+won = lock.acquire()
+if won:
+    first = int(marker.read_text().splitlines()[1])
+    time.sleep(1.2)
+    renewed = int(marker.read_text().splitlines()[1])
+    print(f'won:{first}:{renewed}', flush=True)
+    lock.release()
+else:
+    print('lost', flush=True)
+"""
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", code, str(REPO_ROOT), str(marker), str(barrier)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        for _ in range(2)
+    ]
+    barrier.touch()
+    outputs = [proc.communicate(timeout=10) for proc in procs]
+
+    winners = [out.strip() for out, _ in outputs if out.startswith("won:")]
+    assert len(winners) == 1, outputs
+    assert [out.strip() for out, _ in outputs].count("lost") == 1, outputs
+    _, first, renewed = winners[0].split(":")
+    assert int(renewed) > int(first), "the owner must renew before the stale ceiling"
 
 
 def test_second_acquire_is_refused_while_the_first_is_live(marker, other_pid):
