@@ -126,3 +126,18 @@ def test_limit_hit_keeps_drained_matches_when_group_kill_is_refused(tree, ops_fa
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(PermissionError(1, "Operation not permitted")))
     result = ops.search(pattern="needle", path=str(tree), limit=2)
     assert not result.error and len(result.matches) == 2, result.to_dict()
+
+
+def test_group_kill_survives_rg_pid_lookup_failing_mid_exit(tree, ops_factory, monkeypatch):
+    """The post-drain kill races rg's own exit: once rg is exiting, macOS answers ``getpgid()``
+    with ESRCH before ``poll()`` can reap it. That must not surface as ``[Errno 3] No such
+    process`` (discarding the drained output), and rg's group must still be torn down."""
+    import os
+    import time
+
+    ops = ops_factory(tree, [])
+    monkeypatch.setattr(os, "getpgid", lambda pid: (_ for _ in ()).throw(ProcessLookupError(3, "No such process")))
+    started = time.monotonic()
+    result = ops._run_rg_native(["sh", "-c", "'echo first; echo second; exec sleep 30'"], 1, timeout=20)
+    assert result.exit_code == 0 and result.stdout == "first\n", result
+    assert time.monotonic() - started < 10  # the group was killed, not waited out
