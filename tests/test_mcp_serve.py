@@ -1174,7 +1174,7 @@ class TestEventBridgePollE2E:
         # Bridge has never seen this db state (mtime differs) and has an
         # empty cached index — exactly the state after a new conversation's
         # first write.
-        bridge._state_db_mtime = 0.0
+        bridge._state_db_signature = ()
         assert bridge._cached_sessions_index == {}
 
         bridge._poll_once(DB())
@@ -1271,3 +1271,37 @@ class TestEventBridgePollE2E:
         assert len(events) == 1
         assert events[0]["session_key"] == "agent:main:telegram:dm:fresh"
         assert events[0]["content"] == "hello after baseline"
+
+    def test_wal_commit_is_delivered_without_a_checkpoint(self, monkeypatch):
+        """A message committed through the real (WAL-mode) SessionDB is delivered on
+        the next tick: the commit lands in state.db-wal, while state.db itself only
+        changes at a checkpoint (every 50 writes, or on close)."""
+        from pathlib import Path
+
+        import hermes_state
+        import mcp_serve
+        from hermes_state_registry import acquire, release_or_close
+
+        db_path = Path(hermes_state._default_db_path())
+        monkeypatch.setattr(mcp_serve, "_hermes_home", lambda: db_path.parent)
+        db = acquire(db_path)
+        try:
+            db.create_session("sid-wal", "telegram")
+            db.record_gateway_session_peer(
+                "sid-wal", source="telegram", session_key="agent:main:telegram:dm:wal", chat_id="wal")
+            db.append_message("sid-wal", "user", "history")
+            # A quiet chat: the last WAL write was a while ago, so the tick below does not
+            # depend on the filesystem's mtime granularity.
+            wal = db_path.with_name("state.db-wal")
+            past = wal.stat().st_mtime_ns - 10_000_000_000
+            os.utime(wal, ns=(past, past))
+
+            bridge = mcp_serve.EventBridge()
+            bridge._establish_baseline()
+            db.append_message("sid-wal", "assistant", "live reply")
+            bridge._poll_once(db)
+        finally:
+            release_or_close(db)
+
+        events = bridge.poll_events(after_cursor=0)["events"]
+        assert [e["content"] for e in events] == ["live reply"]
