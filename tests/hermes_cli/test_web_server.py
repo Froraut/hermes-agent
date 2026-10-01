@@ -3634,8 +3634,10 @@ class TestModelInfoEndpoint:
             from starlette.testclient import TestClient
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
-        from hermes_cli.web_server import app
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
         self.client = TestClient(app)
+        # Model metadata is session-gated like the rest of the dashboard API.
+        self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
 
     def test_model_info_with_dict_config(self, monkeypatch):
