@@ -331,42 +331,55 @@ def _apply_model_switch(
     records_composer_override = (
         pin_session_override and isinstance(session, dict) and not one_turn
         and not persist_global and session.get("follow_profile_config"))
-    had_composer_profile = "composer_override_profile" in session
-    previous_composer_profile = session.get("composer_override_profile")
+    rollback_keys = ("model_override", "create_reasoning_override", "one_turn_model_restore",
+                     "composer_override_profile")
+    missing = object()
+    session_snapshot = {
+        key: copy.deepcopy(session[key]) if key in session else missing for key in rollback_keys
+    }
     if records_composer_override:
         profile_model, profile_provider = _config_model_target()
         session["composer_override_profile"] = {
             "model": profile_model, "provider": profile_provider}
+    runtime_snapshot = _snapshot_agent_model_runtime(agent) if agent else None
     try:
         if agent:
             # Provenance must exist before this transaction persists the switched runtime.
             _commit_agent_switch(sid, session, agent, result, current_model, restore_snapshot)
-    except Exception:
-        if records_composer_override:
-            if had_composer_profile:
-                session["composer_override_profile"] = previous_composer_profile
-            else:
-                session.pop("composer_override_profile", None)
-        raise
-    # PER-SESSION override so a rebuild of THIS session (/new, resume) re-derives the model.
-    # Deliberately NOT written to process-global env (HERMES_MODEL & co.): the desktop hosts
-    # every same-profile session in one process, so os.environ would leak the switch to all.
-    if pin_session_override and isinstance(session, dict) and not one_turn:
-        session["model_override"] = {
-            "model": result.new_model, "provider": result.target_provider,
-            "base_url": result.base_url, "api_key": result.api_key, "api_mode": result.api_mode}
-    if persist_global:
-        from hermes_cli.model_switch import persist_model_selection
-        persist_model_selection(result)
-    if reasoning_effort:
-        _apply_switch_reasoning(sid, session, agent, reasoning_effort, persist_global=persist_global, one_turn=one_turn)
-    if count_switch:
-        from hermes_cli.observability.shared_metrics_events import record_model_switch
+        # PER-SESSION override so a rebuild of THIS session (/new, resume) re-derives the model.
+        # Deliberately NOT written to process-global env (HERMES_MODEL & co.): the desktop hosts
+        # every same-profile session in one process, so os.environ would leak the switch to all.
+        if pin_session_override and isinstance(session, dict) and not one_turn:
+            session["model_override"] = {
+                "model": result.new_model, "provider": result.target_provider,
+                "base_url": result.base_url, "api_key": result.api_key, "api_mode": result.api_mode}
+        if persist_global:
+            from hermes_cli.model_switch import persist_model_selection
+            persist_model_selection(result)
+        if reasoning_effort:
+            _apply_switch_reasoning(
+                sid, session, agent, reasoning_effort,
+                persist_global=persist_global, one_turn=one_turn)
+        if count_switch:
+            from hermes_cli.observability.shared_metrics_events import record_model_switch
 
-        record_model_switch(
-            from_provider=_switch_away_provider(agent, explicit_provider, current_provider),
-            to_provider=result.target_provider, surface=_session_source(session), from_model=current_model,
-            session_id=getattr(agent, "session_id", None))
+            record_model_switch(
+                from_provider=_switch_away_provider(agent, explicit_provider, current_provider),
+                to_provider=result.target_provider, surface=_session_source(session), from_model=current_model,
+                session_id=getattr(agent, "session_id", None))
+    except Exception:
+        for key, value in session_snapshot.items():
+            if value is missing:
+                session.pop(key, None)
+            else:
+                session[key] = value
+        if agent:
+            _restore_agent_model_runtime(agent, runtime_snapshot)
+            # The failed transaction may already have written the switched runtime to state.db.
+            # Best effort restores that durable row without hiding the original failure.
+            with contextlib.suppress(Exception):
+                _persist_live_session_runtime(session)
+        raise
     return {
         "value": result.new_model, "warning": result.warning_message or "",
         "confirm_required": False,

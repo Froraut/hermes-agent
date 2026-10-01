@@ -62,3 +62,44 @@ def test_reasoning_flag_with_global_writes_config_and_drops_the_pin(_quiet_switc
 
     with pytest.raises(ValueError):
         server._apply_model_switch("sid", {"agent": _Agent()}, "new/model --reasoning turbo")
+
+
+def test_persistence_failure_rolls_back_live_runtime_and_session_overrides(_quiet_switch, monkeypatch):
+    class MutatingAgent(_Agent):
+        def switch_model(self, **kw):
+            self.model = kw["new_model"]
+            self.provider = kw["new_provider"]
+            self.base_url = kw["base_url"]
+            self.api_key = kw["api_key"]
+            self.api_mode = kw["api_mode"]
+            self.reasoning_config = {"enabled": False}
+
+    agent = MutatingAgent()
+    original_override = {"model": "old-pin", "provider": "nous"}
+    original_reasoning = {"enabled": True, "effort": "low"}
+    session = {
+        "agent": agent,
+        "model_override": original_override.copy(),
+        "create_reasoning_override": original_reasoning.copy(),
+    }
+    calls = 0
+
+    def fail_first_persist(_session):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("state db unavailable")
+
+    monkeypatch.setattr(server, "_persist_live_session_runtime", fail_first_persist)
+
+    with pytest.raises(OSError, match="state db unavailable"):
+        server._apply_model_switch(
+            "sid", session, "new/model --provider nous --reasoning high --session")
+
+    assert (agent.model, agent.provider, agent.base_url, agent.api_key, agent.api_mode) == (
+        "old", "nous", "", "", "")
+    assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+    assert session["model_override"] == original_override
+    assert session["create_reasoning_override"] == original_reasoning
+    assert "one_turn_model_restore" not in session
+    assert calls == 2  # failed switched-runtime write, then restored-runtime write
