@@ -1582,10 +1582,8 @@ class SessionSessionsMixin:
 
     @staticmethod
     def _remove_session_files(sessions_dir: Optional[Path], session_id: str) -> None:
-        """Remove ``<id>.json``/``.jsonl``, the legacy ``session_<id>.json`` snapshot, and gateway
-        ``request_dump_<id>_*.json``; OSError is swallowed so a filesystem hiccup never blocks a
-        DB operation. Every historical writer name is swept because a "deleted" session's snapshot
-        can carry plaintext secrets (#20334, #60207)."""
+        """Remove transcript/recovery files owned by *session_id*; filesystem and malformed archive
+        errors are swallowed so cleanup never blocks the DB operation."""
         if sessions_dir is None:
             return
         targets = [sessions_dir / f"{session_id}{suffix}" for suffix in (".json", ".jsonl")]
@@ -1594,6 +1592,16 @@ class SessionSessionsMixin:
             # glob.escape: a session id carrying ``[`` / ``?`` / ``*`` is a PATTERN otherwise, so the
             # dump sweep either matches nothing or matches another session's files.
             targets.extend(sessions_dir.glob(f"request_dump_{glob.escape(session_id)}_*.json"))
+        except OSError:
+            pass
+        try:
+            for archive in (sessions_dir.parent / "pending_messages").glob("pending-*.json"):
+                try:
+                    payload = json.loads(archive.read_text(encoding="utf-8"))
+                    if isinstance(payload, dict) and payload.get("session_id") == session_id:
+                        targets.append(archive)
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    pass
         except OSError:
             pass
         for p in targets:
