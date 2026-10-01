@@ -757,7 +757,7 @@ class SessionSearchMixin:
                     return conn.execute(
                         f"SELECT * FROM messages "
                         f"WHERE session_id = ? AND id {op} ?{role_clause} "
-                        f"AND length(content) > 0 "
+                        f"AND length(content) > 0 AND (active = 1 OR compacted = 1) "
                         f"ORDER BY id {order} LIMIT ?",
                         (session_id, boundary_id, *role_params, bookend),
                     ).fetchall()

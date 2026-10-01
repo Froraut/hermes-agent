@@ -89,3 +89,52 @@ class TestSessionIsolation:
         # All bookend messages should have session_id = s1 (or session_id col)
         for m in view["bookend_start"] + view["bookend_end"]:
             assert m.get("session_id") == "s1"
+
+
+class TestVisibility:
+    """Windows and bookends show exactly the rows search can hit: turns removed by /undo and
+    superseded compaction duplicates (active=0, compacted=0) are not part of the session."""
+
+    def test_undone_turns_never_reach_window_or_bookends(self, db):
+        db.create_session("s1", source="cli")
+
+        def turn(text):
+            user_id = db.append_message("s1", role="user", content=f"ask {text}")
+            db.append_message("s1", role="assistant", content=f"reply {text}")
+            return user_id
+
+        def undone(text):
+            turn(text)
+            db.rewind_user_turn("s1", -1)
+
+        turn("goal")
+        undone("retracted early")
+        for i in range(4):
+            turn(f"filler {i}")
+        undone("retracted before anchor")
+        anchor = turn("zebra")
+        undone("retracted after anchor")
+        for i in range(4):
+            turn(f"tail {i}")
+        undone("retracted late")
+        turn("resolution")
+
+        live = [m["id"] for m in db.get_messages("s1")]
+        at = live.index(anchor)
+        view = db.get_anchored_view("s1", anchor, window=2, bookend=3)
+        assert [m["id"] for m in view["window"]] == live[at - 2:at + 3]
+        assert (view["messages_before"], view["messages_after"]) == (2, 2)
+        assert [m["id"] for m in view["bookend_start"]] == live[:3]
+        assert [m["id"] for m in view["bookend_end"]] == live[-3:]
+
+    def test_compaction_carried_tail_appears_once(self, db):
+        db.create_session("s1", source="cli")
+        for i in range(1, 5):
+            db.append_message("s1", role="user", content=f"question {i}")
+            db.append_message("s1", role="assistant", content=f"answer {i}")
+        tail = db.get_messages("s1")[-2:]
+        db.archive_and_compact("s1", [{"role": "user", "content": "[summary]"}, *tail], tail_count=2)
+
+        history = db.get_messages("s1", include_compacted=True)
+        view = db.get_messages_around("s1", history[0]["id"], window=len(history))
+        assert [m["content"] for m in view["window"]] == [m["content"] for m in history]
