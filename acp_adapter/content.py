@@ -233,6 +233,23 @@ def _extract_text(prompt: list[PromptBlock]) -> str:
     return "\n".join(str(block.text) for block in prompt if hasattr(block, "text"))
 
 
+def _prompt_display_text(prompt: list[PromptBlock]) -> str:
+    """The prompt's typed text, or a label naming its attachments when it has none; stands in
+    for the prompt wherever only text is kept (the persisted user message, the queue echo)."""
+    text = _extract_text(prompt).strip()
+    if text:
+        return text
+    names = []
+    for block in prompt:
+        if isinstance(block, ImageContentBlock):
+            names.append("image")
+        elif isinstance(block, ResourceContentBlock):
+            names.append(_resource_display_name(block.uri, name=block.name, title=block.title))
+        elif isinstance(block, EmbeddedResourceContentBlock):
+            names.append(_resource_display_name(_attr(block.resource, "uri") or ""))
+    return f"[Attachment: {', '.join(names)}]" if names else ""
+
+
 def _image_block_to_openai_part(block: ImageContentBlock) -> dict[str, Any] | None:
     """Convert an ACP image content block to OpenAI-style multimodal content."""
     data, uri = _attr(block, "data"), _attr(block, "uri")
