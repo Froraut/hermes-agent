@@ -84,7 +84,7 @@ def _interactive_payload(
                         "field": "messages",
                         "value": {
                             "messaging_product": "whatsapp",
-                            "metadata": {"display_phone_number": "15559990000"},
+                            "metadata": {"display_phone_number": "15559990000", "phone_number_id": "test-phone-scope"},
                             "contacts": [
                                 {"wa_id": sender, "profile": {"name": "Synthetic User"}}
                             ],
@@ -125,7 +125,7 @@ def _text_payload(*, wamid: str) -> dict:
                         "field": "messages",
                         "value": {
                             "messaging_product": "whatsapp",
-                            "metadata": {"display_phone_number": "15559990000"},
+                            "metadata": {"display_phone_number": "15559990000", "phone_number_id": "test-phone-scope"},
                             "contacts": [
                                 {"wa_id": _USER, "profile": {"name": "Synthetic User"}}
                             ],
