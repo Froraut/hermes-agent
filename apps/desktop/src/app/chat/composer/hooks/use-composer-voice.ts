@@ -96,6 +96,11 @@ export function useComposerVoice({
   // Engine selection is latched at conversation START (a Settings change
   // applies to the next conversation, never mid-call).
   const [liveEngineActive, setLiveEngineActive] = useState(false)
+  // Barge-in can retain a submit callback from a render where the interrupted
+  // turn was still busy. Read the current gate when its transcript arrives so
+  // that stale closure does not silently drop the next voice turn.
+  const busyRef = useRef(busy)
+  busyRef.current = busy
   const ownsWakeIndicatorRef = useRef(false)
   const conversationOwnerRef = useRef<ResolvedOwner | null>(null)
   const readAloudOwnerRef = useRef<ResolvedOwner | null>(null)
@@ -169,7 +174,7 @@ export function useComposerVoice({
   }
 
   const submitVoiceTurn = async (text: string) => {
-    if (busy) {
+    if (busyRef.current) {
       return
     }
 
