@@ -297,7 +297,7 @@ tts:
   providers:
     voxcpm:
       type: command
-      command: "voxcpm --ref ~/voice.wav --text-file {input_path} --out {output_path}"
+      command: "voxcpm --ref /absolute/path/to/voice.wav --text-file {input_path} --out {output_path}"
       output_format: mp3
       timeout: 180
       voice_compatible: true       # try to deliver as a Telegram voice bubble
@@ -314,22 +314,22 @@ tts:
       output_format: wav
 ```
 
-**How commands run:** the command template is tokenized and executed **without a shell** — like the `HERMES_LOCAL_STT_COMMAND` STT path. Quoted values group into single arguments, but shell operators (`|`, `>`, `<`, `&&`, `;`) and `$VAR`/`%VAR%` expansion are **not** interpreted: they reach the program as literal arguments. Engines that read stdin (e.g. `piper ... < file`) need a small wrapper script that performs the redirect itself.
+**How commands run:** Hermes tokenizes the template, substitutes placeholders directly into their argv elements, and executes the result **without a shell** — like the `HERMES_LOCAL_STT_COMMAND` STT path. Quoted template values group into single arguments; spaces, quotes, backslashes, and shell metacharacters inside placeholder values remain data in that argument. Shell operators (`|`, `>`, `<`, `&&`, `;`), `$VAR`/`%VAR%`, and `~` expansion are **not** interpreted. Use absolute paths, and use a small wrapper executable for engines that require redirection or pipelines. On Windows, command providers reject `.cmd` and `.bat` executables because Windows can only run them by re-entering `cmd.exe`; configure an `.exe` or a direct interpreter command such as `python C:\path\to\wrapper.py` instead.
 
 **Supported `output_format` values:** `mp3` (default), `wav`, `ogg`, `flac`, `m4a`, `aac`, `amr`, `opus`. Your command must actually produce that format (e.g. via `ffmpeg`); Hermes only validates the declared value and names the output file accordingly. An unknown value falls back to `mp3`. The chosen format is also exposed to the command as the `{format}` placeholder.
 
-**Subprocess environment:** command providers (TTS and STT) run with Hermes secrets scrubbed from the child environment — gateway bot tokens, LLM provider API keys, and internal relay credentials are removed; `PATH`, `HOME`, locale, and other normal variables are kept. If your command template needs its own API key from the environment (e.g. a `curl` one-liner), list the variable names under `env_passthrough` in the provider config:
+**Subprocess environment:** command providers (TTS and STT) run with Hermes secrets scrubbed from the child environment — gateway bot tokens, LLM provider API keys, and internal relay credentials are removed; `PATH`, `HOME`, locale, and other normal variables are kept. If your command reads its own API key from the environment, list the variable names under `env_passthrough` in the provider config:
 
 ```yaml
 tts:
   providers:
     mycloud:
       type: command
-      command: 'curl -s -H "Authorization: Bearer $MYCLOUD_API_KEY" ... -o {output_path}'
+      command: "python /absolute/path/mycloud_tts.py {input_path} {output_path}"
       env_passthrough: [MYCLOUD_API_KEY]
 ```
 
-The `$MYCLOUD_API_KEY` above is expanded by `curl` itself when built with libcurl, **not** by a shell — no shell runs, so unexpanded `$VAR` tokens would otherwise be passed through literally.
+`env_passthrough` only makes the named value available in the child environment; the child program must read it itself. Writing `$MYCLOUD_API_KEY` or `%MYCLOUD_API_KEY%` in the template passes that text literally.
 
 
 #### Example: Doubao (Chinese seed-tts-2.0)
@@ -361,7 +361,7 @@ Credentials come from your shell environment (`VOLCENGINE_APP_ID` / `VOLCENGINE_
 
 #### Placeholders
 
-Your command template can reference these placeholders. Hermes substitutes them at render time and shell-quotes each value for the surrounding context (bare / single-quoted / double-quoted), so paths with spaces and other shell-sensitive characters are safe.
+Your command template can reference these placeholders. Hermes tokenizes the template first and then substitutes each value directly into its argv element, so paths with spaces and other shell-sensitive characters stay in one argument.
 
 | Placeholder      | Meaning                                              |
 |------------------|------------------------------------------------------|
@@ -396,7 +396,7 @@ Use `{{` and `}}` for literal braces.
 
 #### Security
 
-Command-type providers run whatever command you configure, with your user's permissions. The template is tokenized and executed without a shell (see [How commands run](#how-commands-run)), placeholder values are quoted for their argument position, and the configured timeout is enforced — but the command template itself is trusted local input; treat it the same way you would a shell script on your PATH.
+Command-type providers run whatever command you configure, with your user's permissions. The template is tokenized and executed without a shell (see [How commands run](#how-commands-run)), placeholder values remain single argv elements, and the configured timeout is enforced — but the command template itself is trusted local input; treat it the same way you would an executable on your PATH.
 
 ### Python plugin providers
 

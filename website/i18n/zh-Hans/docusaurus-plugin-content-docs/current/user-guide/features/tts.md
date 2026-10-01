@@ -223,7 +223,7 @@ tts:
   providers:
     voxcpm:
       type: command
-      command: "voxcpm --ref ~/voice.wav --text-file {input_path} --out {output_path}"
+      command: "voxcpm --ref /absolute/path/to/voice.wav --text-file {input_path} --out {output_path}"
       output_format: mp3
       timeout: 180
       voice_compatible: true       # try to deliver as a Telegram voice bubble
@@ -240,7 +240,7 @@ tts:
       output_format: wav
 ```
 
-**命令的执行方式：**命令模板会被分词后**不经 shell** 直接执行——与 `HERMES_LOCAL_STT_COMMAND` STT 路径相同。引号内的值会合并为单个参数，但 shell 操作符（`|`、`>`、`<`、`&&`、`;`）和 `$VAR`/`%VAR%` 变量展开**不会**被解释：它们会作为字面参数传递给程序。需要读取 stdin 的引擎（例如 `piper ... < file`）需要一个小包装脚本来自行完成重定向。
+**命令的执行方式：**Hermes 先对模板分词，再把占位符直接替换到对应的 argv 元素中，并且**不经 shell** 执行——与 `HERMES_LOCAL_STT_COMMAND` STT 路径相同。占位符值中的空格、引号、反斜杠和 shell 元字符始终作为同一个参数中的数据。shell 操作符（`|`、`>`、`<`、`&&`、`;`）、`$VAR`/`%VAR%` 和 `~` 展开都**不会**被解释；请使用绝对路径，需要重定向或管道时请使用包装可执行文件。在 Windows 上，命令提供商会拒绝 `.cmd` 和 `.bat`，因为系统只能通过重新进入 `cmd.exe` 来运行它们；请改用 `.exe` 或显式解释器命令（例如 `python C:\path\to\wrapper.py`）。
 
 #### 示例：Doubao（中文 seed-tts-2.0）
 
@@ -271,7 +271,7 @@ tts:
 
 #### 占位符
 
-你的命令模板可以引用以下占位符。Hermes 在渲染时会替换它们，并根据上下文（裸值 / 单引号 / 双引号）对每个值进行 shell 转义，因此包含空格和其他 shell 敏感字符的路径是安全的。
+你的命令模板可以引用以下占位符。Hermes 先对模板分词，再把每个值直接替换到对应的 argv 元素中，因此包含空格和其他 shell 敏感字符的路径仍是单个参数。
 
 | 占位符 | 含义 |
 |------------------|------------------------------------------------------|
