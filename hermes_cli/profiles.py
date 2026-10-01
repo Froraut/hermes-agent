@@ -2128,6 +2128,32 @@ def _default_export_ignore(root_dir: Path):
 # its persistent Chromium profile (Cookies, Login Data — the bot's live web sessions), Xauthority, sockets.
 _EXPORT_CREDENTIAL_FILES = frozenset({"auth.json", ".env", "bot-desktop"})
 
+
+# Credential stores the file tools never reach but an archive would, as their owners lay them out.
+# ``platforms/`` is the adapters' runtime root (never in the default-profile allow-list): pairing
+# approvals (``gateway/pairing.py::_default_pairing_dir``), the WhatsApp session, the Matrix E2EE
+# store; the pre-``platforms/`` legacy locations are still read when populated (``get_hermes_dir``).
+_EXPORT_CREDENTIAL_STORES = (
+    "platforms", "pairing", "whatsapp/session", "matrix/store",
+    # Chromium user-data dirs holding Cookies / Login Data: the ``hermes browser connect`` CDP
+    # profile (``browser_connect.chrome_debug_data_dir``), the live CDP profiles and Browser Use
+    # CLI dir that ``hermes_cli/backup.py`` keeps out of archives.
+    "chrome-debug", "browser-profiles", "browser_profiles",
+    # Byte-exact config.yaml copies whose timestamp suffix escapes the redact pass (inline keys ship
+    # verbatim), and the 1Password bootstrap token.
+    "backups", ".op.env",
+)
+
+
+def _export_credential_root_paths() -> frozenset[str]:
+    """Profile-root-relative POSIX paths of credential stores a named-profile export drops: all the
+    file tools read-deny as credentials (``agent.file_safety``) plus ``_EXPORT_CREDENTIAL_STORES``.
+    Root-scoped: a skill's own ``backups/`` is user data."""
+    from agent.file_safety import _CREDENTIAL_FILE_NAMES, _READ_DENIED_DIRS
+    return frozenset({*(Path(name).as_posix() for name in _CREDENTIAL_FILE_NAMES),
+                      *(subdir for subdir, *_ in _READ_DENIED_DIRS),
+                      *_EXPORT_CREDENTIAL_STORES})
+
 # Text/config suffixes secret-scrubbed on export; binary DBs, images etc. are left alone.
 _EXPORT_REDACT_SUFFIXES = frozenset({
     ".md", ".txt", ".yaml", ".yml", ".json", ".jsonl", ".toml", ".ini", ".cfg", ".conf", ".py", ".sh",
@@ -2183,9 +2209,13 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
     # The default profile IS ~/.hermes (dir name ".hermes"), so both paths stage a filtered
     # copy under a temp dir named after the canonical id: root allow-list for default,
     # credential exclusion for named profiles.
+    credential_root_paths = _export_credential_root_paths()
+
     def _ignore_credentials(directory: str, contents: list) -> set:
         ignored = _non_exportable_entries(directory, contents)
         ignored.update(_EXPORT_CREDENTIAL_FILES & set(contents))
+        rel = Path(directory).relative_to(profile_dir)
+        ignored.update(entry for entry in contents if (rel / entry).as_posix() in credential_root_paths)
         if Path(directory) == profile_dir:
             ignored |= PM_RUNTIME_ROOT_DIRS & set(contents)
         return ignored
