@@ -2,7 +2,8 @@
 
 ``is_safe_callback_url`` used to trust the hostname text. Integer and hex IPv4
 literals, and names that resolve to a metadata address, were allowed. The POST
-also followed redirects, so a public URL could bounce onto those targets.
+also followed redirects, so a public URL could bounce onto those targets. The
+guarded opener must dial directly and keep credentials on their original origin.
 """
 
 import socket
@@ -25,15 +26,32 @@ def test_integer_and_hex_ipv4_literals_are_internal(monkeypatch):
     assert security.is_safe_callback_url("http://8.8.8.8/hook") is True
 
 
-def test_dns_name_that_resolves_to_metadata_is_blocked(monkeypatch):
+def test_dns_answers_classify_embedded_ipv4_before_connect(monkeypatch):
     monkeypatch.setenv("A2A_BEARER_TOKEN", "tok")
 
+    answers = {
+        "metadata.invalid": "169.254.169.254",
+        "cgnat.invalid": "100.64.0.1",
+        "mapped-cgnat.invalid": "::ffff:100.64.0.1",
+        "translated-loopback.invalid": "::ffff:0:127.0.0.1",
+        "translated-public.invalid": "::ffff:0:8.8.8.8",
+    }
+
     def fake_getaddrinfo(host, port, *args, **kwargs):
-        assert host == "metadata.invalid"
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 0))]
+        ip = answers[host]
+        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        sockaddr = (ip, port or 0, 0, 0) if family == socket.AF_INET6 else (ip, port or 0)
+        return [(family, socket.SOCK_STREAM, 6, "", sockaddr)]
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-    assert security.is_safe_callback_url("http://metadata.invalid/latest/meta-data/") is False
+    for host in (
+        "metadata.invalid",
+        "cgnat.invalid",
+        "mapped-cgnat.invalid",
+        "translated-loopback.invalid",
+    ):
+        assert security.is_safe_callback_url(f"http://{host}/hook") is False
+    assert security.is_safe_callback_url("http://translated-public.invalid/hook") is True
 
 
 def _addrinfo(ip, port):
@@ -79,12 +97,20 @@ def test_second_lookup_cannot_rebind_the_socket(monkeypatch):
         server.server_close()
 
 
-def test_connect_dials_the_address_it_just_checked(monkeypatch):
+def test_connect_dials_checked_origin_even_with_environment_proxy(monkeypatch):
     monkeypatch.setenv("A2A_BEARER_TOKEN", "tok")
+    for name in (
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("http_proxy", "http://proxy.example:3128")
 
     def fake_getaddrinfo(host, port, *args, **kwargs):
-        assert host == "public.example"
-        return _addrinfo("8.8.8.8", port)
+        return _addrinfo({
+            "public.example": "8.8.8.8",
+            "proxy.example": "9.9.9.9",
+        }[host], port)
 
     seen = []
 
@@ -109,3 +135,28 @@ def test_redirect_onto_metadata_is_refused(monkeypatch):
     with pytest.raises(urllib.error.HTTPError):
         handler.redirect_request(
             req, None, 302, "Found", {}, "http://169.254.169.254/latest/meta-data/")
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, port, *args, **kwargs: _addrinfo("8.8.8.8", port),
+    )
+    signed = urllib.request.Request(
+        "https://example.com/cb",
+        data=b"{}",
+        headers={"Authorization": "Bearer callback-token", "X-A2A-Signature": "digest"},
+        method="POST",
+    )
+    redirected = handler.redirect_request(
+        signed, None, 302, "Found", {}, "https://other.example/cb",
+    )
+    assert redirected is not None
+    forwarded = {name.lower() for name, _value in redirected.header_items()}
+    assert forwarded.isdisjoint({"authorization", "x-a2a-signature"})
+
+    same_origin = handler.redirect_request(
+        signed, None, 302, "Found", {}, "https://example.com/next",
+    )
+    assert same_origin is not None
+    retained = {name.lower() for name, _value in same_origin.header_items()}
+    assert {"authorization", "x-a2a-signature"} <= retained

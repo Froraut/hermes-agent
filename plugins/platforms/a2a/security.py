@@ -186,15 +186,18 @@ def _literal_ip(hostname: str):
         return None
 
 
+_IPV4_TRANSLATED = ipaddress.ip_network("::ffff:0:0:0/96")
+
+
 def _ip_allowed(ip, *, localhost_mode: bool) -> bool:
-    mapped = getattr(ip, "ipv4_mapped", None)
-    if mapped is not None:
-        ip = mapped
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif ip in _IPV4_TRANSLATED:
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
     if ip.is_loopback:
         return bool(localhost_mode)
-    if ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
-        return False
-    return True
+    return bool(ip.is_global and not ip.is_multicast)
 
 
 def is_safe_callback_url(url: str, *, localhost_mode: Optional[bool] = None) -> bool:
@@ -332,9 +335,31 @@ def callback_opener(*, localhost_mode: bool) -> urllib.request.OpenerDirector:
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             if not is_safe_callback_url(newurl, localhost_mode=localhost_mode):
                 raise urllib.error.HTTPError(newurl, code, "unsafe redirect", headers, fp)
-            return super().redirect_request(req, fp, code, msg, headers, newurl)
+            redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+            if redirected is None:
+                return None
+            defaults = {"http": 80, "https": 443}
+
+            def origin(url):
+                parsed = urllib.parse.urlparse(url)
+                scheme = parsed.scheme.lower()
+                return (
+                    scheme,
+                    (parsed.hostname or "").lower().rstrip("."),
+                    parsed.port if parsed.port is not None else defaults.get(scheme),
+                )
+
+            target = urllib.parse.urljoin(req.full_url, newurl)
+            if origin(target) != origin(req.full_url):
+                for name, _value in list(redirected.header_items()):
+                    if name.lower() not in {"accept", "user-agent"}:
+                        redirected.remove_header(name)
+            return redirected
 
     return urllib.request.build_opener(
+        # A proxy would resolve and connect to the callback itself, bypassing
+        # the address validated and pinned by _dial_checked.
+        urllib.request.ProxyHandler({}),
         _PinnedHTTPHandler(localhost_mode),
         _PinnedHTTPSHandler(localhost_mode),
         _RecheckRedirect,
