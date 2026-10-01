@@ -354,6 +354,7 @@ def _refresh_minimax_oauth_state(
     force: bool = False,
     source_path: Optional[Path] = None,
     set_active: bool = False,
+    require_persisted: bool = False,
 ) -> Dict[str, Any]:
     """Refresh under the authoritative auth-store transaction and save through."""
     from hermes_cli.auth import (
@@ -379,6 +380,12 @@ def _refresh_minimax_oauth_state(
         _load_auth_store(), "minimax-oauth"
     )
     if persisted is None and source_path is None:
+        if require_persisted:
+            raise _minimax_err(
+                "MiniMax OAuth session was removed; please re-login.",
+                "not_logged_in",
+                relogin=True,
+            )
         # Preserve the direct helper contract used by setup/tests where the
         # supplied state has not yet been materialized in auth.json.
         updated = dict(state)
@@ -502,14 +509,38 @@ def _minimax_oauth_quarantine_on_terminal_refresh(
 
 
 def _minimax_fresh_state() -> Dict[str, Any]:
-    """Load the MiniMax OAuth state and refresh it if near expiry; quarantine on terminal failure."""
-    from hermes_cli.auth import _refresh_minimax_oauth_state, get_provider_auth_state
-    state = get_provider_auth_state("minimax-oauth")
+    """Load MiniMax state with source identity, refresh, and quarantine terminal failures."""
+    from hermes_cli.auth import (
+        _load_auth_store,
+        _load_provider_state_with_source,
+        _refresh_minimax_oauth_state,
+        get_provider_auth_state,
+    )
+
+    state, source_path = _load_provider_state_with_source(
+        _load_auth_store(), "minimax-oauth"
+    )
+    if state is None:
+        # Preserve the public monkeypatch seam used by callers/tests that
+        # supply an unmaterialized state directly.
+        state = get_provider_auth_state("minimax-oauth")
+        if state is not None:
+            persisted, persisted_path = _load_provider_state_with_source(
+                _load_auth_store(), "minimax-oauth"
+            )
+            if persisted is not None:
+                state, source_path = persisted, persisted_path
     if not state or not state.get("access_token"):
         raise _minimax_err(
             "Not logged into MiniMax OAuth. Run `hermes model` and select MiniMax (OAuth).", "not_logged_in", relogin=True,
         )
     try:
+        if source_path is not None:
+            return _refresh_minimax_oauth_state(
+                state,
+                source_path=source_path,
+                require_persisted=True,
+            )
         return _refresh_minimax_oauth_state(state)
     except AuthError as exc:
         if exc.code != "not_logged_in":

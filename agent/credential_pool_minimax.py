@@ -15,6 +15,48 @@ logger = logging.getLogger(__name__)
 _REFRESH_TIMEOUT_SECONDS = 15.0
 
 
+def prune_removed_borrowed_source(entry_ids: set[str]) -> bool:
+    """Delete root pool references only after both stores confirm the source is gone."""
+    if not entry_ids:
+        return False
+    with auth._auth_store_lock():
+        active_store = auth._load_auth_store()
+        active_state = (active_store.get("providers") or {}).get("minimax-oauth")
+        if isinstance(active_state, dict) and active_state.get("access_token"):
+            return False
+        root_path = auth._global_auth_file_path()
+        if root_path is None or auth._same_path(root_path, auth._auth_file_path()):
+            return False
+        with auth._auth_store_lock(target_path=root_path):
+            root_store = auth._load_auth_store(root_path)
+            root_state = (root_store.get("providers") or {}).get("minimax-oauth")
+            if isinstance(root_state, dict) and root_state.get("access_token"):
+                return False
+            pool = root_store.get("credential_pool")
+            if not isinstance(pool, dict):
+                return False
+            rows = pool.get("minimax-oauth")
+            if not isinstance(rows, list):
+                return False
+            kept = [
+                row
+                for row in rows
+                if not (
+                    isinstance(row, dict)
+                    and row.get("id") in entry_ids
+                    and row.get("source") == "oauth"
+                )
+            ]
+            if len(kept) == len(rows):
+                return False
+            if kept:
+                pool["minimax-oauth"] = kept
+            else:
+                pool.pop("minimax-oauth", None)
+            auth._save_auth_store(root_store, target_path=root_path)
+            return True
+
+
 def _expiry_ms(state: Dict[str, Any]) -> Optional[int]:
     try:
         raw = state.get("expires_at")
@@ -99,7 +141,17 @@ def _quarantine_source(
             "MiniMax OAuth terminal quarantine could not be persisted",
             exc_info=True,
         )
+    borrowed_ids = {
+        str(item.id) for item in pool._entries if item.source == "oauth" and item.id
+    }
     pool._quarantine_sources(entry, {"oauth"})
+    try:
+        prune_removed_borrowed_source(borrowed_ids)
+    except Exception:
+        logger.error(
+            "MiniMax OAuth quarantined state but could not remove stale root pool rows",
+            exc_info=True,
+        )
 
 
 def _fail_closed_after_write_error(
@@ -145,7 +197,19 @@ def refresh_entry(pool: Any, entry: Any, *, force: bool) -> Any:
                     "MiniMax OAuth source disappeared while waiting for its lock; "
                     "dropping the stale pool row"
                 )
+                stale_ids = {
+                    str(item.id)
+                    for item in pool._entries
+                    if item.source == "oauth" and item.id
+                }
                 pool._quarantine_sources(entry, {"oauth"})
+                try:
+                    prune_removed_borrowed_source(stale_ids)
+                except Exception:
+                    logger.warning(
+                        "MiniMax OAuth source vanished but stale root rows could not be removed",
+                        exc_info=True,
+                    )
                 return None
 
             stale_pair = (entry.access_token, entry.refresh_token)

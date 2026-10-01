@@ -1532,6 +1532,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 self._mark_exhausted(entry, None)
             return None
         if self.provider == "minimax-oauth":
+            if entry.source != "oauth":
+                return None
             from agent.credential_pool_minimax import refresh_entry
 
             return refresh_entry(self, entry, force=force)
@@ -1998,6 +2000,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 entry.access_token, auth_mod._xai_proactive_refresh_skew_seconds(entry.access_token),
             )
         if self.provider == "minimax-oauth":
+            if entry.source != "oauth":
+                return False
             from agent.credential_pool_minimax import entry_needs_refresh
 
             return entry_needs_refresh(entry)
@@ -3018,6 +3022,11 @@ def _prune_stale_seeded_entries(
         # requested (an `hermes auth` command that confirmed the source is gone).
         if entry.source.startswith("env:"):
             return prune_env_sources
+        if entry.provider == "minimax-oauth" and entry.source == "oauth":
+            # MiniMax's row is backed by providers.minimax-oauth in auth.json;
+            # once that authoritative block is gone, retaining the sanitized
+            # row would leave a selectable reference to a removed grant.
+            return True
         # File-backed singletons and Hermes PKCE disappear when their backing file is gone.
         return is_borrowed_credential_source(entry.source, entry.provider) or entry.source == "hermes_pkce"
 
@@ -3120,19 +3129,39 @@ def load_pool(provider: str) -> CredentialPool:
         changed |= singleton_changed or env_changed
         # ``load_pool()`` is a non-destructive read for env-seeded entries
         # (#9331); file-backed singletons still prune when their file is gone.
-        if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and disk_ids:
+        if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and (
+            disk_ids or (provider == "minimax-oauth" and entries)
+        ):
             owns_provider = _profile_owns_pool_provider(provider)
         if owns_provider is False:
-            # Rows read through the global-root fallback are seeded from the
-            # ROOT's singleton files, which this profile cannot see; pruning
-            # them would hide (and, via write-through, delete) the shared
-            # grant. The root's own load_pool() prunes.
-            borrowed = [e for e in entries if e.id in disk_ids]
-            others = [e for e in entries if e.id not in disk_ids]
-            changed |= _prune_stale_seeded_entries(
-                others, singleton_sources | env_sources, prune_env_sources=False,
-            )
-            entries[:] = borrowed + others
+            if provider == "minimax-oauth" and "oauth" not in singleton_sources:
+                before_ids = {entry.id for entry in entries}
+                changed |= _prune_stale_seeded_entries(
+                    entries, singleton_sources | env_sources, prune_env_sources=False,
+                )
+                removed_borrowed_ids = before_ids - {entry.id for entry in entries}
+                if removed_borrowed_ids:
+                    try:
+                        from agent.credential_pool_minimax import (
+                            prune_removed_borrowed_source,
+                        )
+
+                        prune_removed_borrowed_source(removed_borrowed_ids)
+                    except Exception:
+                        logger.warning(
+                            "MiniMax OAuth: stale borrowed rows could not be removed from root",
+                            exc_info=True,
+                        )
+            else:
+                # Rows read through the global-root fallback may be seeded from
+                # singleton files this profile cannot see. The root owner prunes
+                # those rows; a borrower must leave them alone.
+                borrowed = [e for e in entries if e.id in disk_ids]
+                others = [e for e in entries if e.id not in disk_ids]
+                changed |= _prune_stale_seeded_entries(
+                    others, singleton_sources | env_sources, prune_env_sources=False,
+                )
+                entries[:] = borrowed + others
         else:
             changed |= _prune_stale_seeded_entries(
                 entries, singleton_sources | env_sources, prune_env_sources=False,
@@ -3143,15 +3172,22 @@ def load_pool(provider: str) -> CredentialPool:
     pool._persisted_token_pairs = auth_mod._token_pairs_by_id(raw_entries)
     if changed:
         pool._persist(removed_ids=sorted(disk_ids - {entry.id for entry in entries}))
-    # Remember the root's borrowed rows so a later ``add_entry`` in this
-    # profile leaves them out of the profile's own store (#100339).
-    # No disk rows -> nothing borrowed; the ``set()`` default already applies.
-    if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and disk_ids:
+    # Remember borrowed root rows so a later profile-local add does not copy
+    # the shared single-use grant into the profile store. MiniMax can be seeded
+    # directly from the root providers block before a root pool row exists.
+    if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and (
+        disk_ids or (provider == "minimax-oauth" and entries)
+    ):
         # Reuse the pre-persist ownership answer unless _persist() just rewrote
         # the store (it can give the profile its own rows); nothing else between
         # the two checks touches auth.json.
         if changed:
             owns_provider = _profile_owns_pool_provider(provider)
         if not owns_provider:
-            pool._borrowed_root_ids = set(disk_ids)
+            if provider == "minimax-oauth":
+                pool._borrowed_root_ids = {
+                    str(entry.id) for entry in entries if entry.id
+                }
+            else:
+                pool._borrowed_root_ids = set(disk_ids)
     return pool
