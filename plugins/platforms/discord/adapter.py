@@ -5593,6 +5593,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 allowed_role_ids=self._allowed_role_ids, require_admin=require_admin,
                 admin_user_ids=admin_user_ids, allow_permanent="always" in choices,
                 allow_session="session" in choices, smart_denied=prompt.smart_denied,
+                owner_chat_id=prompt.chat_id, owner_metadata=prompt.metadata,
             )
             send_kwargs: Dict[str, Any] = {"content": content, "embed": embed, "view": view}
             if mention_content:
@@ -5659,6 +5660,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                     choices=clean_choices, clarify_id=clarify_id,
                     allowed_user_ids=self._allowed_user_ids,
                     allowed_role_ids=self._allowed_role_ids,
+                    owner_chat_id=chat_id, owner_metadata=metadata,
                 )
             else:
                 hint = t("platform.discord.prompt.clarify_hint_text")
@@ -6388,9 +6390,12 @@ def _define_discord_view_classes() -> None:
             self, session_key: str, allowed_user_ids: set, allowed_role_ids: Optional[set] = None,
             require_admin: bool = False, admin_user_ids: Optional[set] = None,
             allow_permanent: bool = True, allow_session: bool = True, smart_denied: bool = False,
+            owner_chat_id: str = "", owner_metadata: Optional[dict] = None,
         ):
             super().__init__(allowed_user_ids, allowed_role_ids, timeout=_read_discord_prompt_timeout())
             self.session_key = session_key
+            from gateway.interaction_owner import InteractionOwner
+            self._interaction_owner = InteractionOwner.capture(owner_chat_id, owner_metadata)
             self.require_admin = require_admin
             self.admin_user_ids = {str(a).strip() for a in (admin_user_ids or set()) if str(a).strip()}
             self._localize_buttons(
@@ -6428,6 +6433,9 @@ def _define_discord_view_classes() -> None:
 
         async def _resolve(self, interaction: discord.Interaction, choice: str, color: discord.Color, label_key: str):
             """Resolve the approval via the gateway approval queue and update the embed."""
+            if not self._owner_accepts(interaction):
+                await interaction.response.send_message(_unauthorized(), ephemeral=True)
+                return
             if not await self._gate(
                 interaction, resolved_msg=t("platform.discord.approval.already_resolved"),
                 unauth_msg=_unauthorized(),
@@ -6453,6 +6461,14 @@ def _define_discord_view_classes() -> None:
             await self._finalize_embed(
                 interaction, color,
                 t("platform.discord.approval.by_user", label=label, user=interaction.user.display_name) if count else label)
+
+        def _owner_accepts(self, interaction):
+            message = getattr(interaction, "message", None)
+            channel_id = str(getattr(interaction, "channel_id", "") or getattr(getattr(message, "channel", None), "id", ""))
+            owner = self._interaction_owner.bind_prompt(getattr(self._message, "id", ""))
+            return owner.accepts(actor_id=getattr(interaction.user, "id", ""), chat_id=channel_id,
+                                 channel_id=channel_id, thread_id=channel_id if owner.thread_id else "",
+                                 prompt_message_id=getattr(message, "id", ""), generation=owner.generation)
 
         # Decorator labels are placeholders; ``_localize_buttons`` in __init__ sets the real text.
         @discord.ui.button(label="Allow Once", style=discord.ButtonStyle.green)
@@ -6798,10 +6814,12 @@ def _define_discord_view_classes() -> None:
         gateway clarify entry immediately; ``Other`` flips to text-capture (next message answers).
         Single-use: after the first valid click all buttons disable."""
 
-        def __init__(self, choices: List[str], clarify_id: str, allowed_user_ids: set, allowed_role_ids: Optional[set] = None):
+        def __init__(self, choices: List[str], clarify_id: str, allowed_user_ids: set, allowed_role_ids: Optional[set] = None, owner_chat_id: str = "", owner_metadata: Optional[dict] = None):
             super().__init__(allowed_user_ids, allowed_role_ids, timeout=_read_discord_prompt_timeout())
             self.choices = list(choices)[:24]
             self.clarify_id = clarify_id
+            from gateway.interaction_owner import InteractionOwner
+            self._interaction_owner = InteractionOwner.capture(owner_chat_id, owner_metadata)
             for index, choice in enumerate(self.choices):
                 button = discord.ui.Button(
                     label=self._button_label(index, choice), style=discord.ButtonStyle.primary,
@@ -6861,8 +6879,19 @@ def _define_discord_view_classes() -> None:
                 except Exception:
                     pass
 
+        def _owner_accepts(self, interaction):
+            message = getattr(interaction, "message", None)
+            channel_id = str(getattr(interaction, "channel_id", "") or getattr(getattr(message, "channel", None), "id", ""))
+            owner = self._interaction_owner.bind_prompt(getattr(self._message, "id", ""))
+            return owner.accepts(actor_id=getattr(interaction.user, "id", ""), chat_id=channel_id,
+                                 channel_id=channel_id, thread_id=channel_id if owner.thread_id else "",
+                                 prompt_message_id=getattr(message, "id", ""), generation=owner.generation)
+
         async def _resolve_choice(self, interaction: "discord.Interaction", index: int, choice: str) -> None:
             """Resolve the clarify with a chosen option."""
+            if not self._owner_accepts(interaction):
+                await interaction.response.send_message(_unauthorized(), ephemeral=True)
+                return
             if not await self._gate(
                 interaction, resolved_msg=t("platform.discord.prompt.clarify_already_answered"),
                 unauth_msg=_unauthorized(),
