@@ -1,10 +1,6 @@
-"""Effort pickers and /reasoning report the actual harness or inference request vocabulary."""
+"""#61634: ``ultra`` is Hermes-internal and every wire clamps it; the display label used by the
+effort pickers and ``/reasoning`` status must say what the route really sends."""
 from agent.reasoning_effort import effort_display_label
-
-
-def test_ultra_label_distinguishes_native_codex_from_direct_responses():
-    assert effort_display_label("ultra", "openai-codex", "gpt-6-sol", "codex_app_server") == "ultra"
-    assert effort_display_label("ultra", "openai-codex", "gpt-6-sol", "codex_responses") == "ultra (sends max on this route)"
 
 
 

@@ -331,7 +331,10 @@ def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None
         caps: dict[str, dict[str, Any]] = {}
         read_reasoning_catalog = _reasoning_catalog_reader(slug.lower())
         programs = {}
-        if slug == 'openai-codex':
+        # The Codex app-server runtime keeps Codex's own model settings (#75186) and cannot carry
+        # Daybreak, so the switch is only offered on the direct Responses route.
+        from hermes_cli.codex_runtime_switch import get_current_runtime
+        if slug == 'openai-codex' and get_current_runtime(metadata_config or {}) != "codex_app_server":
             try:
                 from hermes_cli.auth_codex import resolve_codex_runtime_credentials
                 from agent.model_metadata import codex_access_programs

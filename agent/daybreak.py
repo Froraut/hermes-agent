@@ -22,7 +22,14 @@ def daybreak_requested() -> bool:
 
 @contextmanager
 def daybreak_turn(enabled: bool | None, *, provider: str, api_mode: str, model: str = "") -> Iterator[None]:
-    subscription = provider == "openai-codex" and api_mode in {"codex_responses", "codex_app_server"}
+    # Only the direct ChatGPT Responses route carries the access program. The optional Codex
+    # app-server runtime keeps Codex's own model settings (#75186), so it cannot honor the choice.
+    subscription = provider == "openai-codex" and api_mode == "codex_responses"
+    if enabled and provider == "openai-codex" and api_mode == "codex_app_server":
+        raise ValueError(
+            "Daybreak is not available on the Codex app-server runtime, which keeps Codex's own "
+            "model settings. Use /codex-runtime auto to request it."
+        )
     if enabled and not subscription:
         raise ValueError("Daybreak requires a ChatGPT/Codex subscription model.")
     # These model ids cannot run with standard treatment. Make their implicit
@@ -45,8 +52,3 @@ def requested_program(model: str) -> str | None:
     if slug.startswith(("gpt-daybreak-red-", "gpt-5.6-cyber")):
         return "daybreak_red"
     return "daybreak_blue"
-
-
-def requested_app_server_program(model: str) -> str | None:
-    program = requested_program(model)
-    return {"daybreak_blue": "daybreakBlue", "daybreak_red": "daybreakRed"}.get(program)

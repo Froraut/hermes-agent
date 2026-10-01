@@ -35,3 +35,8 @@ def test_daybreak_options_follow_account_catalog_and_context_alias(monkeypatch):
     assert not row["capabilities"]["gpt-6.1-sol-900k"]["daybreak"]
     assert row["capabilities"]["gpt-6-sol-900k"]["daybreak"]
     assert row["capabilities"]["gpt-daybreak-blue-latest"]["daybreak"]
+
+    # The Codex app-server runtime keeps Codex's own model settings (#75186): no Daybreak switch.
+    native = {"slug": "openai-codex", "models": ["gpt-6-sol-900k"]}
+    _apply_capabilities([native], metadata_config={"model": {"openai_runtime": "codex_app_server"}})
+    assert not native["capabilities"]["gpt-6-sol-900k"]["daybreak"]

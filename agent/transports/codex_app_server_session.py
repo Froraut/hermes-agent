@@ -216,7 +216,6 @@ class CodexAppServerSession:
         request_routing: Optional[_ServerRequestRouting] = None,
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
         model: Optional[str] = None, model_provider: Optional[str] = None,
-        context_window: Optional[int] = None,
         developer_instructions: Optional[str] = None, resume_thread_id: Optional[str] = None,
         history_seed: Optional[str] = None,
     ) -> None:
@@ -230,7 +229,6 @@ class CodexAppServerSession:
         # ``[model_providers.<id>]`` table. Only the id travels; codex reads base_url/env_key itself.
         self._model = (model or "").strip() or None
         self._model_provider = (model_provider or "").strip() or None
-        self._context_window = context_window
         # Hermes' composed system prompt (SOUL.md, memory, channel overrides). Sent ONCE per thread as
         # ``thread/start.developerInstructions``: codex keeps its own base instructions (tool guidance) and
         # inserts this as the first developer message of every model request. ``baseInstructions`` would
@@ -249,7 +247,6 @@ class CodexAppServerSession:
 
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
-        self._thread_model_provider: Optional[str] = None
         self._interrupt_event = threading.Event()
         self._active_turn_id: Optional[str] = None
         self._active_turn_lock = threading.Lock()
@@ -266,19 +263,12 @@ class CodexAppServerSession:
             return self._thread_id
         if self._client is None:
             self._client = self._client_factory(codex_bin=self._codex_bin, codex_home=self._codex_home)
-            # cyberAccessProgram is an experimental per-turn field. Negotiate
-            # it once at startup so the user can enable Daybreak on later turns.
-            self._client.initialize(
-                client_name="hermes", client_title="Hermes Agent", client_version=_get_hermes_version(),
-                capabilities={"experimentalApi": True},
-            )
+            self._client.initialize(client_name="hermes", client_title="Hermes Agent", client_version=_get_hermes_version())
         # Permissions are NOT sent on thread/start: codex gates ``thread/start.permissions``
         # behind experimentalApi + a matching ``[permissions]`` table in ~/.codex/config.toml.
         # Hermes supplies the agent identity through its own system prompt; ``personality: "none"`` strips
         # codex's built-in "# Personality" section from the base instructions so it cannot compete (#72104).
         params: dict[str, Any] = {"cwd": self._cwd, "personality": "none"}
-        if self._context_window is not None:
-            params["config"] = {"model_context_window": self._context_window}
         if self._developer_instructions and self._developer_instructions.strip():
             params["developerInstructions"] = self._developer_instructions
         if self._model_provider:
@@ -294,7 +284,6 @@ class CodexAppServerSession:
                 params["developerInstructions"] = "\n\n".join(
                     part for part in (params.get("developerInstructions"), self._history_seed) if part)
             result = self._client.request("thread/start", params, timeout=15)
-            self._thread_model_provider = result.get("modelProvider")
             thread_id = _extract_thread_id(result)
             if not thread_id:
                 raise CodexAppServerError(
@@ -315,7 +304,6 @@ class CodexAppServerSession:
         thread_id = _extract_thread_id(result)
         if thread_id != wanted:
             raise CodexThreadResumeError(wanted, f"app-server answered with thread {str(thread_id)[:8]!r}")
-        self._thread_model_provider = result.get("modelProvider")
         return wanted
 
     def close(self) -> None:
@@ -458,10 +446,6 @@ class CodexAppServerSession:
     def run_turn(
         self, user_input: Any, *, turn_timeout: float = 600.0,
         notification_poll_timeout: float = 0.25, post_tool_quiet_timeout: float = 90.0,
-        cyber_access_program: str | None = None,
-        effort: str | None = None,
-        service_tier: str | None = None,
-        model: str | None = None,
     ) -> TurnResult:
         """Send a user message and block until turn/completed, bridging approvals and projecting items.
 
@@ -477,51 +461,17 @@ class CodexAppServerSession:
             # be honored before launching a Codex turn.
             if self._interrupt_event.is_set():
                 result.interrupted = True
-            elif cyber_access_program and not self._check_daybreak_subscription(result):
-                pass  # The check records an actionable error; never send an ordinary turn instead.
             else:
                 input_items, result.submitted_user_text = _build_turn_input(user_input)
-                turn_params = {"threadId": self._thread_id, "input": input_items}
-                if cyber_access_program:
-                    turn_params["cyberAccessProgram"] = cyber_access_program
-                if effort is not None:
-                    turn_params["effort"] = effort
-                    # The requested effort belongs to Hermes' selected model,
-                    # which may differ from Codex's configured default.
-                if service_tier is not None:
-                    turn_params["serviceTier"] = service_tier
-                if model:
-                    turn_params["model"] = model
                 ts = self._request_for(
                     result, "turn/start",
-                    turn_params,
+                    {"threadId": self._thread_id, "input": input_items},
                     "turn/start",
                 )
                 if ts is not None:
                     self._run_started_turn(result, ts, turn_timeout, notification_poll_timeout, post_tool_quiet_timeout)
         self._interrupt_event.clear()
         return result
-
-    def _check_daybreak_subscription(self, result: TurnResult) -> bool:
-        # Codex owns its auth/config independently of Hermes. It otherwise
-        # silently omits the program for API-key auth or a custom provider.
-        if self._thread_model_provider != "openai":
-            result.error = (
-                "Daybreak requires the OpenAI provider in Codex app-server. "
-                "Check your Codex model_provider setting."
-            )
-            return False
-        response = self._request_for(result, "account/read", {"refreshToken": False}, "Daybreak account check")
-        if response is None:
-            return False
-        account = response.get("account")
-        if not isinstance(account, dict) or account.get("type") != "chatgpt":
-            result.error = (
-                "Daybreak requires a ChatGPT subscription login in Codex app-server. "
-                "Sign in to Codex with ChatGPT."
-            )
-            return False
-        return True
 
     def _run_started_turn(
         self, result: TurnResult, ts: dict, turn_timeout: float, notification_poll_timeout: float,

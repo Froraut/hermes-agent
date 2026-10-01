@@ -2331,26 +2331,12 @@ def _session_info(agent, session: dict | None = None) -> dict:
         with _profile_build_scope(sess.get("profile_home") or _hermes_home):
             provider = _runtime_model_config(agent).get("provider", provider)
     model = pending_model or mirror.get("model", getattr(agent, "model", ""))
-    # Report the value sent at Hermes' transport boundary. Native Codex accepts
-    # Ultra as a harness mode, whereas direct Responses normalizes it to max.
+    # The level the route's entry clamp actually sends (== reasoning_effort when verbatim), so the
+    # Desktop can say "ultra sends max on this route" like `/reasoning` does instead of presenting a
+    # Hermes-internal step (#61634) as a wire level the route does not have.
     reasoning_effort_wire = ""
-    if (agent is None or sess.get("_compute_host_active")) and "reasoning_effort" in mirror:
-        reasoning_effort = str(mirror.get("reasoning_effort") or "")
-        reasoning_effort_wire = str(mirror.get("reasoning_effort_wire") or "")
-        pending_reasoning = sess.get("create_reasoning_override")
-        if isinstance(pending_reasoning, dict):
-            pending_effort = (
-                "none" if pending_reasoning.get("enabled") is False
-                else str(pending_reasoning.get("effort") or "")
-            )
-            if pending_effort != reasoning_effort:
-                # A fresh menu pick is newer than the last executed host turn.
-                # Its wire value is unknown until that host acknowledges it.
-                reasoning_effort, reasoning_effort_wire = pending_effort, ""
-    elif reasoning_effort and reasoning_effort != "none":
-        reasoning_effort_wire = str(clamp_effort(reasoning_effort, route_supported_efforts(
-            pending_provider or provider, model, getattr(agent, "api_mode", None),
-        )) or "")
+    if reasoning_effort and reasoning_effort != "none":
+        reasoning_effort_wire = str(clamp_effort(reasoning_effort, route_supported_efforts(pending_provider or provider, model)) or "")
     info: dict = {
         "model": model,
         "provider": pending_provider or provider,

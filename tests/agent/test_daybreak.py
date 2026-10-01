@@ -46,12 +46,21 @@ def test_daybreak_rejects_non_subscription_runtime_before_a_model_call():
 
 
 def test_daybreak_alias_requires_its_program_even_without_an_explicit_toggle():
-    with daybreak_turn(False, provider="openai-codex", api_mode="codex_app_server", model="gpt-daybreak-red-latest"):
+    with daybreak_turn(False, provider="openai-codex", api_mode="codex_responses", model="gpt-daybreak-red-latest"):
         assert daybreak_requested() is True
         assert requested_program("gpt-daybreak-red-latest") == "daybreak_red"
     assert daybreak_requested() is False
     with daybreak_turn(None, provider="openai", api_mode="responses", model="gpt-daybreak-red-latest"):
         assert requested_program("gpt-daybreak-red-latest") is None
+
+
+def test_codex_app_server_runtime_keeps_codex_defaults_instead_of_daybreak():
+    """#75186: app-server turns use Codex's own model settings, so Hermes never marks them Daybreak."""
+    with pytest.raises(ValueError, match="app-server runtime"):
+        with daybreak_turn(True, provider="openai-codex", api_mode="codex_app_server"):
+            pass
+    with daybreak_turn(None, provider="openai-codex", api_mode="codex_app_server", model="gpt-daybreak-blue-latest"):
+        assert daybreak_requested() is False
 
 
 def test_daybreak_access_error_does_not_rotate_to_another_subscription_account(monkeypatch):
