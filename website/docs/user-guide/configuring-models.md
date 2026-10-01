@@ -57,13 +57,21 @@ Daybreak aliases and `gpt-5.6-cyber` require their matching access program even 
 
 The choice is captured when you send or queue a message. Changing the switch later applies to later messages. A queued message keeps its captured choice even across an app restart; entries with an explicit choice run as their own turn, since redirecting a running turn would inherit that turn's program. Direct mid-turn steering also follows the running turn's program.
 
-Daybreak is not offered on the optional Codex app-server runtime (`/codex-runtime codex_app_server`): that runtime keeps Codex's own model, reasoning and speed settings from `~/.codex/config.toml`, so Hermes does not send its picker choices there.
+Daybreak is not offered on the optional Codex app-server runtime (`/codex-runtime codex_app_server`): that runtime keeps Codex's own model and speed settings from `~/.codex/config.toml`, so Hermes does not send its model or access-program choices there.
 
 ### Subscription speed and extended context
 
 Speed is separate from reasoning effort and Daybreak access. On supported subscription models, **Fast** requests Priority; **Ultrafast** requests Astra's Ultrafast tier. Selecting one clears the other. The chosen tier is remembered per model and carried into a new chat. Daybreak aliases do not offer accelerated speed controls; a legacy setting can be cleared with **Use standard speed**. An accepted request does not guarantee that OpenAI served the requested tier.
 
 Hermes creates the **GPT-6.1 Sol-900k** choice from an eligible discovered GPT-6.1 Sol model. The `-900k` suffix is a local context choice, removed from the model ID sent to OpenAI. Hermes limits its budget to the account catalog's maximum, and Codex may report a smaller usable context after its own reserve. Use **Refresh models** if a new model is absent. A failed discovery uses short-lived compatibility hints instead of caching them as a successful account catalog.
+
+### Ultra with OpenAI / ChatGPT subscription models
+
+Codex **Ultra** is a native harness mode: it combines model reasoning with the additional orchestration behavior supported by the selected model and account. Codex resolves the model-facing effort itself, typically to `max`. Sending `ultra` directly to a Responses inference endpoint does not activate that harness mode.
+
+To use native Ultra in Hermes, enable `/codex-runtime on`, start a new chat as directed by the command, and choose **Ultra** in the reasoning menu or use `/reasoning ultra`. Hermes sends the reasoning level you picked as `turn/start.effort`; later explicit choices such as `high` or `none` are forwarded on subsequent turns, and an unset effort keeps Codex's configured default. The runtime otherwise keeps Codex's own login and configuration: the model and speed come from `~/.codex/config.toml`, not from Hermes' picker.
+
+The Desktop status shows **Ultra** for a native Codex turn. On the direct ChatGPT OAuth Responses route, **Ultra→Max** reports the inference-level conversion; use the native runtime for Codex's additional Ultra behavior. Model/account eligibility remains controlled by Codex. See [OpenAI's subagent and reasoning guidance](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 
 ### Mid-session switches and context warnings
 

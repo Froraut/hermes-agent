@@ -446,8 +446,13 @@ class CodexAppServerSession:
     def run_turn(
         self, user_input: Any, *, turn_timeout: float = 600.0,
         notification_poll_timeout: float = 0.25, post_tool_quiet_timeout: float = 90.0,
+        effort: str | None = None,
     ) -> TurnResult:
         """Send a user message and block until turn/completed, bridging approvals and projecting items.
+
+        effort: the reasoning level the user explicitly picked in Hermes (``ultra`` included, which codex
+        runs as its harness mode). ``None`` omits the field so codex keeps its configured default; the
+        model and speed always stay codex's own (#75186).
 
         post_tool_quiet_timeout: if codex emits a tool completion and then goes quiet for this many seconds
         without emitting another item or `turn/completed`, log a warning (once per tool result) and keep
@@ -463,11 +468,10 @@ class CodexAppServerSession:
                 result.interrupted = True
             else:
                 input_items, result.submitted_user_text = _build_turn_input(user_input)
-                ts = self._request_for(
-                    result, "turn/start",
-                    {"threadId": self._thread_id, "input": input_items},
-                    "turn/start",
-                )
+                turn_params: dict[str, Any] = {"threadId": self._thread_id, "input": input_items}
+                if effort is not None:
+                    turn_params["effort"] = effort
+                ts = self._request_for(result, "turn/start", turn_params, "turn/start")
                 if ts is not None:
                     self._run_started_turn(result, ts, turn_timeout, notification_poll_timeout, post_tool_quiet_timeout)
         self._interrupt_event.clear()

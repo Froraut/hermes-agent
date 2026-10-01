@@ -670,7 +670,12 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
     _ensure_codex_session(agent, messages)
     try:
         _start_codex_thread(agent)
-        turn = agent._codex_session.run_turn(user_input=user_message)
+        # Only an explicit Hermes reasoning pick travels (``ultra`` is codex's native harness mode);
+        # without one codex keeps its configured effort, and the model/speed stay codex's own (#75186).
+        from agent.reasoning_effort import requested_effort
+        reasoning = getattr(agent, "reasoning_config", None)
+        effort = "none" if isinstance(reasoning, dict) and reasoning.get("enabled") is False else requested_effort(reasoning)
+        turn = agent._codex_session.run_turn(user_input=user_message, effort=effort)
     except Exception as exc:
         logger.exception("codex app-server turn failed")
         _close_codex_session(agent)
