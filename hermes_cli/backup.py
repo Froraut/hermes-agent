@@ -37,6 +37,7 @@ from hermes_cli.backup_restore import (
     _import_db_member,
     _safe_restore_db,
     _validate_backup_zip,
+    _verified_quick_snapshot_manifest,
 )
 
 logger = logging.getLogger(__name__)
@@ -1230,7 +1231,8 @@ def _create_quick_snapshot_locked(
             behavior.
 
     Returns:
-        Snapshot ID (timestamp-based), or None if no files found.
+        Snapshot ID, or ``None`` if no files were found or a non-database
+        capture failed before publication.
     """
     home = hermes_home or get_hermes_home()
     root = _quick_snapshot_root(home)
@@ -1275,6 +1277,7 @@ def _create_quick_snapshot_locked(
 
     manifest: Dict[str, int] = {}  # rel_path -> file size
     failed_dbs: list[str] = []  # present *.db that could not be snapshotted
+    failed_files: list[str] = []  # present non-DB files that could not be captured
     # #68805: track protected DB files skipped for size — they are snapshot
     # incompleteness just like a failed copy, so pruning must be suppressed
     # to preserve the older complete snapshot that may contain the only
@@ -1304,8 +1307,8 @@ def _create_quick_snapshot_locked(
                         oversized_skipped.append(sub_rel)
                     continue
                 dst = staging_dir / sub_rel
-                dst.parent.mkdir(parents=True, exist_ok=True)
                 try:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
                     # Route SQLite DBs through the WAL-safe backup() path so a
                     # board DB with an open WAL (the gateway may hold it at
                     # snapshot time) is captured consistently.
@@ -1327,6 +1330,11 @@ def _create_quick_snapshot_locked(
                     manifest[sub_rel] = dst.stat().st_size
                 except (OSError, PermissionError) as exc:
                     logger.warning("Could not snapshot %s: %s", sub_rel, exc)
+                    if sub.suffix == ".db":
+                        if sub_rel not in failed_dbs:
+                            failed_dbs.append(sub_rel)
+                    else:
+                        failed_files.append(sub_rel)
             continue
 
         if not src.is_file():
@@ -1338,9 +1346,8 @@ def _create_quick_snapshot_locked(
             continue
 
         dst = staging_dir / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-
         try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
             if src.suffix == ".db":
                 if not _safe_copy_db(src, dst):
                     failed_dbs.append(rel)
@@ -1359,6 +1366,11 @@ def _create_quick_snapshot_locked(
             manifest[rel] = dst.stat().st_size
         except (OSError, PermissionError) as exc:
             logger.warning("Could not snapshot %s: %s", rel, exc)
+            if src.suffix == ".db":
+                if rel not in failed_dbs:
+                    failed_dbs.append(rel)
+            else:
+                failed_files.append(rel)
 
     if failed_dbs:
         # Critical: update path used to log-and-continue with exit 0, so a
@@ -1375,6 +1387,19 @@ def _create_quick_snapshot_locked(
             "Quick snapshot failed to capture DB file(s): %s",
             ", ".join(failed_dbs),
         )
+
+    if failed_files:
+        logger.error(
+            "Quick snapshot aborted after non-database capture failure(s): %s",
+            ", ".join(failed_files),
+        )
+        print(
+            "  ⚠ Snapshot aborted: could not capture file(s): "
+            + ", ".join(failed_files)
+            + ". Previous snapshots were retained."
+        )
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        return None
 
     if not manifest:
         shutil.rmtree(staging_dir, ignore_errors=True)
@@ -1511,8 +1536,9 @@ def restore_quick_snapshot(
     if not manifest_path.exists():
         return False
 
-    with open(manifest_path, encoding="utf-8-sig") as f:
-        meta = json.load(f)
+    meta = _verified_quick_snapshot_manifest(manifest_path, snap_dir, snapshot_id, home)
+    if meta is None:
+        return False
 
     restored = 0
     for rel in meta.get("files", {}):
