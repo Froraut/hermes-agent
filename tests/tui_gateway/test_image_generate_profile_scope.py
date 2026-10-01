@@ -191,7 +191,7 @@ def test_sessionless_image_rpc_uses_transport_profile_account_and_cache_a_b_a(
         p["launch"],
     ]
     for call in p["calls"]:
-        assert call["image"].parent == call["home"] / "cache" / "images"
+        assert call["image"].parent == call["home"] / "cache" / "generated" / "images"
         assert call["image"].read_bytes() == base64.b64decode(_PNG_B64)
     assert all(
         response["result"]["image_data"].startswith("data:image/png;base64,")
@@ -247,6 +247,6 @@ def test_image_rpc_rejects_profile_session_mismatch_and_accepts_same_owner(
     assert "error" not in profile_only, profile_only
     assert [call["account"] for call in p["calls"]] == ["account-B", "account-B"]
     assert all(
-        call["image"].parent == p["secondary"] / "cache" / "images"
+        call["image"].parent == p["secondary"] / "cache" / "generated" / "images"
         for call in p["calls"]
     )
