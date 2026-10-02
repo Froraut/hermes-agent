@@ -570,6 +570,28 @@ class TestAtomicWriteNewFilePermissions:
         assert result.error is None, f"write failed: {result.error}"
         assert getattr(os, "getxattr")(dest, attribute) == b"keep-me"
 
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs unavailable")
+    def test_overwrite_of_fifo_does_not_block_on_metadata_clone(self, tmp_path):
+        """``cp`` reads its source, so cloning metadata from a FIFO would block until a writer
+        appears. Only regular targets are cloned; anything else keeps the stat+chmod path."""
+        import threading
+
+        ops = ShellFileOperations(make_real_subprocess_env(str(tmp_path)))
+        dest = tmp_path / "pipe"
+        os.mkfifo(dest)
+        outcome = {}
+        worker = threading.Thread(
+            target=lambda: outcome.setdefault("result", ops.write_file(str(dest), "data\n")),
+            daemon=True)
+        worker.start()
+        worker.join(15)
+        if worker.is_alive():  # unblock the stuck reader so the test process can exit
+            os.close(os.open(dest, os.O_WRONLY | os.O_NONBLOCK))
+            worker.join(5)
+            pytest.fail("write_file blocked reading the FIFO it was replacing")
+        assert outcome["result"].error is None, outcome["result"].error
+        assert dest.read_text(encoding="utf-8") == "data\n"
+
 
 class TestAtomicWriteThroughSymlink:
     """_atomic_write must edit a symlink's target, not replace the link.
