@@ -437,13 +437,44 @@ def aux_stream_deadline(deadline: Optional[float]):
         _aux_stream_deadline.value = previous
 
 
-def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any], kwargs: dict[str, Any]) -> Any:
+class AuxiliaryProviderSaturated(TimeoutError):
+    """The provider already has the maximum number of abandoned (timed-out / cancelled) calls still
+    running, so a new isolated call is refused instead of stacking another stuck worker."""
+
+
+# Live provider workers whose owner stopped waiting (host deadline or explicit cancel) but whose
+# callback has not returned yet, per provider slot key. A provider wedged inside ``next()`` keeps its
+# daemon (and socket) alive until its own timeout, if ever; without a bound, repeating the failing
+# auxiliary operation stacks one orphan per attempt.
+_AUX_MAX_ABANDONED_PROVIDER_WORKERS = 2
+_aux_abandoned_workers: dict[str, set[threading.Event]] = {}
+_aux_abandoned_workers_lock = threading.Lock()
+
+
+def _aux_abandoned_worker_count(slot_key: str | None = None) -> int:
+    with _aux_abandoned_workers_lock:
+        if slot_key is not None:
+            return len(_aux_abandoned_workers.get(slot_key, ()))
+        return sum(len(workers) for workers in _aux_abandoned_workers.values())
+
+
+def _aux_provider_slot_key(kwargs: dict[str, Any], slot_key: str | None) -> str:
+    return slot_key if slot_key else f"model:{kwargs.get('model') or ''}"
+
+
+def _run_protected_sync_provider_call(
+    callback: Callable[[dict[str, Any]], Any], kwargs: dict[str, Any], *, slot_key: str | None = None,
+) -> Any:
     """Run one protected provider callback in an attempt-isolated daemon thread.
 
     Aux clients are process-shared and cannot be closed to wake one request, so the callback (incl.
     stream aggregation) runs in a daemon while the owner polls cancellation; on cancel the owner
     unwinds at once and the daemon finishes under the provider timeout in ``kwargs`` (it owns no
     transcript/commit state, never holds the session lock). Unprotected / no cancel source: direct.
+
+    A worker the owner abandons stays registered under *slot_key* (default: the request's model) until
+    its callback returns; once ``_AUX_MAX_ABANDONED_PROVIDER_WORKERS`` are still alive for that slot, new
+    isolated calls fail fast with :class:`AuxiliaryProviderSaturated` instead of adding another.
     """
     source_cancel_check = _capture_aux_cancel_check()
     host_deadline = _current_aux_stream_deadline()
@@ -459,6 +490,13 @@ def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any],
         source_cancel_check if callable(source_cancel_check) else lambda: False)
     if has_explicit_cancel and cancel_check():
         raise AuxiliaryExplicitCancellation()
+    key = _aux_provider_slot_key(kwargs, slot_key)
+    with _aux_abandoned_workers_lock:
+        stuck = len(_aux_abandoned_workers.get(key, ()))
+    if stuck >= _AUX_MAX_ABANDONED_PROVIDER_WORKERS:
+        raise AuxiliaryProviderSaturated(
+            f"auxiliary provider {key!r} still has {stuck} abandoned call(s) running; "
+            "refusing another until one finishes")
     # Thread-locals do not cross into the daemon: timing hooks fire from the thread running
     # the callback, and the host deadline is inert unless carried along.
     progress_hook = getattr(_aux_progress, "hook", None)
@@ -484,11 +522,29 @@ def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any],
         except BaseException as exc:
             outcome["exception"] = exc
         finally:
-            done.set()
+            with _aux_abandoned_workers_lock:
+                done.set()
+                workers = _aux_abandoned_workers.get(key)
+                if workers is not None:
+                    workers.discard(done)
+                    if not workers:
+                        del _aux_abandoned_workers[key]
 
     threading.Thread(
         target=provider_context.run, args=(_provider_worker,), name="hermes-protected-aux-provider",
         daemon=True).start()
+    try:
+        return _await_protected_provider_worker(done, outcome, cancel_check, host_deadline, has_explicit_cancel)
+    except BaseException:
+        # The owner stops waiting; a still-running worker now counts against the slot until it returns.
+        with _aux_abandoned_workers_lock:
+            if not done.is_set():
+                _aux_abandoned_workers.setdefault(key, set()).add(done)
+        raise
+
+
+def _await_protected_provider_worker(done: threading.Event, outcome: dict[str, Any], cancel_check: Any,
+                                     host_deadline: Optional[float], has_explicit_cancel: bool) -> Any:
     while True:
         # Check cancel before AND after each wait so it wins when result publication and the
         # host Event land in the same polling interval.
@@ -2636,14 +2692,16 @@ def _relay_sync_completion(
     # Isolate only the provider callback so the owning thread can unwind its lease/DB
     # transaction on hard cancel without touching the shared client.
     if route is None:
-        return _run_protected_sync_provider_call(callback, kwargs)
+        return _run_protected_sync_provider_call(
+            callback, kwargs, slot_key=f"{provider or 'auxiliary'}:{kwargs.get('model') or ''}")
     provider_name, fallback_model, metadata = route
     from agent import relay_llm
     from agent.auxiliary_hooks import run_with_aux_hooks
     model_name = str(kwargs.get("model") or fallback_model)
     return run_with_aux_hooks(
         lambda: relay_llm.execute_current(
-            kwargs, lambda request: _run_protected_sync_provider_call(callback, request),
+            kwargs, lambda request: _run_protected_sync_provider_call(
+                callback, request, slot_key=f"{provider_name}:{request.get('model') or ''}"),
             name=provider_name, model_name=model_name, metadata=metadata,
             defer_logical_completion=True,
         ),
