@@ -292,6 +292,35 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: 
         session.pop("one_turn_model_restore", None)
 
 
+def _snapshot_global_config() -> dict:
+    """Pre-write bytes of every config.yaml a ``--global`` switch writes, keyed by path (None =
+    the file did not exist). ``persist_model_selection`` writes ``get_config_path()`` and
+    ``_write_config_key`` the active profile's file; usually one path. A file that could not be
+    read is left out, so a rollback never writes back something it did not capture."""
+    from pathlib import Path
+    from hermes_cli.config import get_config_path
+    snapshot: dict = {}
+    for path in {Path(get_config_path()), Path(_active_config_path())}:
+        try:
+            snapshot[path] = path.read_bytes()
+        except FileNotFoundError:
+            snapshot[path] = None
+        except OSError:
+            continue
+    return snapshot
+
+
+def _restore_global_config(snapshot: dict) -> None:
+    """Put each captured config.yaml back byte for byte (best effort, never raises)."""
+    from utils import atomic_write_bytes
+    for path, data in snapshot.items():
+        with contextlib.suppress(Exception):
+            if data is None:
+                path.unlink(missing_ok=True)
+            else:
+                atomic_write_bytes(path, data)
+
+
 def _apply_model_switch(
     sid: str, session: dict, raw_input: str, *, confirm_expensive_model: bool = False,
     pin_session_override: bool = True, parsed_flags: Any | None = None,
@@ -342,6 +371,9 @@ def _apply_model_switch(
         session["composer_override_profile"] = {
             "model": profile_model, "provider": profile_provider}
     runtime_snapshot = _snapshot_agent_model_runtime(agent) if agent else None
+    # --global writes config.yaml (model keys, then agent.reasoning_effort) inside the
+    # transaction; a later failure must not leave the next process on the rejected model.
+    config_snapshot = _snapshot_global_config() if persist_global else {}
     try:
         if agent:
             # Provenance must exist before this transaction persists the switched runtime.
@@ -360,19 +392,13 @@ def _apply_model_switch(
             _apply_switch_reasoning(
                 sid, session, agent, reasoning_effort,
                 persist_global=persist_global, one_turn=one_turn)
-        if count_switch:
-            from hermes_cli.observability.shared_metrics_events import record_model_switch
-
-            record_model_switch(
-                from_provider=_switch_away_provider(agent, explicit_provider, current_provider),
-                to_provider=result.target_provider, surface=_session_source(session), from_model=current_model,
-                session_id=getattr(agent, "session_id", None))
     except Exception:
         for key, value in session_snapshot.items():
             if value is missing:
                 session.pop(key, None)
             else:
                 session[key] = value
+        _restore_global_config(config_snapshot)
         if agent:
             _restore_agent_model_runtime(agent, runtime_snapshot)
             # The failed transaction may already have written the switched runtime to state.db.
@@ -380,6 +406,14 @@ def _apply_model_switch(
             with contextlib.suppress(Exception):
                 _persist_live_session_runtime(session)
         raise
+    # Telemetry stays outside the rollback boundary: counting a committed switch must not undo it.
+    if count_switch:
+        from hermes_cli.observability.shared_metrics_events import record_model_switch
+
+        record_model_switch(
+            from_provider=_switch_away_provider(agent, explicit_provider, current_provider),
+            to_provider=result.target_provider, surface=_session_source(session), from_model=current_model,
+            session_id=getattr(agent, "session_id", None))
     return {
         "value": result.new_model, "warning": result.warning_message or "",
         "confirm_required": False,
