@@ -17,6 +17,7 @@ Core invariant these tests pin:
 
 import json
 import os
+import threading
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -351,6 +352,100 @@ def test_remote_v4a_executes_in_task_cwd(_remote_cwd_split):
     assert (task_backing / "target.txt").read_text(encoding="utf-8-sig") == "VALUE=task\n"
     assert (stale_backing / "target.txt").read_text(encoding="utf-8-sig") == "VALUE=old\n"
     assert env.calls and {call["cwd"] for call in env.calls} == {task_cwd}
+
+
+class _OverlappingRemoteEnvironment(_FakeRemoteEnvironment):
+    """Records which worker thread issued each command, and holds every worker's first TWO
+    commands at a shared barrier. The first rendezvous puts both workers inside their cwd scope
+    together; the second makes each pick its next cwd only after the other has entered its own
+    scope, which is exactly when a shared mutable cwd would hand one task the other's."""
+
+    def __init__(self, cwd: str, cwd_backing: dict[str, Path], parties: int):
+        super().__init__(cwd, cwd_backing)
+        self._barrier = threading.Barrier(parties, timeout=10)
+        self._lock = threading.Lock()
+        self._issued: dict[str, int] = {}
+        self.worker_calls: list[dict] = []
+
+    def execute(self, command: str, cwd: str | None = None, **kwargs) -> dict:
+        worker = threading.current_thread().name
+        with self._lock:
+            self._issued[worker] = issued = self._issued.get(worker, 0) + 1
+            self.worker_calls.append({"worker": worker, "cwd": cwd or self.cwd})
+        if issued <= 2:
+            self._barrier.wait()  # BrokenBarrierError if the scopes never overlap
+        return super().execute(command, cwd=cwd, **kwargs)
+
+
+@pytest.mark.parametrize("operation", ["read", "search", "patch"])
+def test_overlapping_remote_ops_each_keep_their_own_task_cwd(tmp_path, monkeypatch, operation):
+    """Two tasks share ONE remote env and ONE ShellFileOperations, with different task cwds.
+    Both operations are held mid-flight together; every backend command each one issues must
+    run under its own task's cwd. A cwd stored on the shared env or ops object (instead of the
+    execution-context scope) would leak the later task's cwd into the earlier one."""
+    from tools.file_operations import ShellFileOperations
+
+    backing = {name: tmp_path / name for name in ("task-a", "task-b", "shared-stale")}
+    for root in backing.values():
+        root.mkdir()
+        (root / "target.txt").write_text(f"VALUE={root.name}\n", encoding="utf-8")
+    remote = {name: f"/workspace/{name}" for name in backing}
+    env = _OverlappingRemoteEnvironment(
+        remote["shared-stale"], {remote[name]: path for name, path in backing.items()}, parties=2)
+    ops = ShellFileOperations(env)
+    tasks = {"A": (f"overlap-a-{tmp_path.name}", "task-a"),
+             "B": (f"overlap-b-{tmp_path.name}", "task-b")}
+
+    monkeypatch.setattr(terminal_tool, "_session_cwd", {})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
+    active = {}
+    for task_id, name in tasks.values():
+        terminal_tool.record_session_cwd(task_id, remote[name])
+        active[terminal_tool._resolve_container_task_id(task_id)] = env
+    monkeypatch.setattr(terminal_tool, "_active_environments", active)
+    monkeypatch.setattr(ft, "_get_file_ops", lambda task_id="default": ops)
+
+    def run(task_id: str, name: str) -> dict:
+        if operation == "read":
+            return _dispatch_json("read_file", {"path": "target.txt"}, task_id)
+        if operation == "search":
+            return _dispatch_json("search_files", {"pattern": "VALUE=", "path": "."}, task_id)
+        return _dispatch_json("patch", {"mode": "patch", "patch": (
+            "*** Begin Patch\n*** Update File: target.txt\n@@\n"
+            f"-VALUE={name}\n+VALUE={name}-patched\n*** End Patch\n")}, task_id)
+
+    outcomes: dict[str, object] = {}
+
+    def worker(label: str) -> None:
+        try:
+            outcomes[label] = run(*tasks[label])
+        except BaseException as exc:  # surfaced below
+            outcomes[label] = exc
+
+    threads = [threading.Thread(target=worker, args=(label,), name=label) for label in tasks]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert not any(thread.is_alive() for thread in threads), "a worker never finished"
+    for label, outcome in outcomes.items():
+        assert not isinstance(outcome, BaseException), (label, outcome)
+        assert not outcome.get("error"), (label, outcome)
+
+    for label, (_task_id, name) in tasks.items():
+        cwds = {call["cwd"] for call in env.worker_calls if call["worker"] == label}
+        assert cwds == {remote[name]}, (label, cwds)
+        other = "task-b" if name == "task-a" else "task-a"
+        rendered = json.dumps(outcomes[label])
+        if operation == "patch":
+            assert (backing[name] / "target.txt").read_text(encoding="utf-8-sig") == (
+                f"VALUE={name}-patched\n")
+        else:
+            assert f"VALUE={name}" in rendered, (label, rendered)
+            assert f"VALUE={other}" not in rendered, (label, rendered)
+            assert "VALUE=shared-stale" not in rendered, (label, rendered)
+    assert (backing["shared-stale"] / "target.txt").read_text(encoding="utf-8") == (
+        "VALUE=shared-stale\n")
 
 
 def test_unregistered_session_never_inherits_another_sessions_record(
