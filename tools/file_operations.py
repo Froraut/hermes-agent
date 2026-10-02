@@ -198,7 +198,12 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         parent, name = os.path.split(path)
         if not parent or not name:
             return None
-        return os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)), name
+        try:
+            return os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)), name
+        except OSError:
+            # A missing (or unopenable) parent: fall back to the shell path, which still folds
+            # ``mkdir -p`` into the write and reports failures as a result, not an exception.
+            return None
 
     @staticmethod
     def _read_at(parent_fd: int, name: str) -> bytes:
@@ -1546,47 +1551,37 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         """
         path = self._expand_path(path)
         pinned = self._open_local_parent(path)
-        denied = get_write_denied_error(path)
-        if denied:
+        try:
+            denied = get_write_denied_error(path)
+            if denied:
+                return WriteResult(error=denied)
+            return self._write_validated(path, content, pre_content, pinned)
+        finally:
             if pinned:
                 os.close(pinned[0])
-            return WriteResult(error=denied)
+
+    def _write_validated(self, path: str, content: str, pre_content: Optional[str],
+                         pinned: Optional[tuple[int, str]]) -> WriteResult:
+        """``write_file`` after the deny-list check. ``pinned`` (parent fd, name) routes the probe,
+        the write and the hash check through the descriptor validated with ``path``; lint, LSP
+        and the rest of the pipeline are the same either way. The caller owns the descriptor."""
         refused = self._reject_unencodable(path, content)
         if refused is not None:
-            if pinned:
-                os.close(pinned[0])
             return refused
         ext = os.path.splitext(path)[1].lower()
         refused = self._fail_closed_syntax_error(path, ext, content)
         if refused is not None:
-            if pinned:
-                os.close(pinned[0])
             return refused
-        if pinned:
-            parent_fd, name = pinned
-            try:
-                try:
-                    previous = self._read_at(parent_fd, name)
-                except FileNotFoundError:
-                    previous = b""
-                previous_text = previous.decode("utf-8", "surrogateescape")
-                if _detect_line_ending(previous_text) == "\r\n":
-                    content = _normalize_line_endings(content, "\r\n")
-                if previous.startswith(_UTF8_BOM.encode("utf-8")) and not _has_bom(content):
-                    content = _UTF8_BOM + content
-                data = content.encode("utf-8", "surrogateescape")
-                self._write_at(parent_fd, name, data)
-                return WriteResult(bytes_written=len(data), dirs_created=True, verified=True,
-                                   _content_sha256=hashlib.sha256(data).hexdigest())
-            except OSError as exc:
-                return WriteResult(error=f"Failed to write file: {exc}")
-            finally:
-                os.close(parent_fd)
 
         # Pre-content is read only for extensions in the UNION of in-process lint and
         # LSP coverage (keeps the hot path fast for binaries).
         want_pre = ext in LINTERS_INPROC or self._lsp_handles_extension(ext)
-        has_bom, pre_content, original_ending = self._probe_write_target(path, pre_content, want_pre)
+        if pinned:
+            has_bom, pre_content, original_ending = self._probe_pinned_target(
+                pinned, pre_content, want_pre)
+        else:
+            has_bom, pre_content, original_ending = self._probe_write_target(
+                path, pre_content, want_pre)
         # read_file strips the BOM and models send bare-LF text, so a round-trip would
         # otherwise normalize CRLF files and drop the BOM (prepend only when absent).
         if original_ending == "\r\n":
@@ -1596,16 +1591,24 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         # Best-effort snapshot so the LSP tier reports only this edit's diagnostics.
         self._snapshot_lsp_baseline(path)
         # ``dirs_created`` means "parent dirs ensured" (mkdir -p is folded into
-        # _atomic_write; its failure surfaces as the atomic-write error below).
+        # _atomic_write; its failure surfaces as the atomic-write error below). A pinned
+        # write only happens when the parent already exists.
         dirs_created = bool(os.path.dirname(path))
         # surrogateescape is the exact inverse of the decode that may have produced
         # this content, so these are the bytes on disk; the early rejection above
         # guarantees this cannot raise.
         content_bytes = content.encode("utf-8", "surrogateescape")
-        write_result = self._atomic_write(path, content)
-        if write_result.exit_code != 0:
-            return WriteResult(error=f"Failed to write file: {write_result.stdout}")
-        content_verified, verify_error = self._verify_written_hash(path, content_bytes)
+        if pinned:
+            try:
+                self._write_at(pinned[0], pinned[1], content_bytes)
+            except OSError as exc:
+                return WriteResult(error=f"Failed to write file: {exc}")
+            content_verified, verify_error = self._verify_pinned_hash(path, pinned, content_bytes)
+        else:
+            write_result = self._atomic_write(path, content)
+            if write_result.exit_code != 0:
+                return WriteResult(error=f"Failed to write file: {write_result.stdout}")
+            content_verified, verify_error = self._verify_written_hash(path, content_bytes)
         if verify_error is not None:
             return verify_error
 
@@ -1619,6 +1622,34 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             bytes_written=len(content_bytes), dirs_created=dirs_created, verified=content_verified,
             _content_sha256=hashlib.sha256(content_bytes).hexdigest(),
             lint=lint_result.to_dict() if lint_result else None, lsp_diagnostics=lsp_diagnostics)
+
+    def _probe_pinned_target(self, pinned: tuple[int, str], pre_content: Optional[str],
+                             want_pre: bool) -> tuple[bool, Optional[str], Optional[str]]:
+        """``_probe_write_target`` through the pinned parent: ``(has_bom, pre_content, ending)``.
+        A missing file has no BOM, no pre-content and no ending to preserve."""
+        try:
+            previous = self._read_at(*pinned).decode("utf-8", "surrogateescape")
+        except OSError:
+            return False, pre_content, _detect_line_ending(pre_content) if pre_content else None
+        if want_pre and pre_content is None:
+            pre_content = previous
+        ending = _detect_line_ending(pre_content if pre_content else previous)
+        return _has_bom(previous), pre_content, ending
+
+    def _verify_pinned_hash(self, path: str, pinned: tuple[int, str], content_bytes: bytes,
+                            ) -> tuple[Optional[bool], Optional[WriteResult]]:
+        """``_verify_written_hash`` through the pinned parent: re-read and compare, never assume."""
+        try:
+            on_disk = self._read_at(*pinned)
+        except OSError:
+            return None, None  # hash could not be taken: unverified, as on the shell path
+        if hashlib.sha256(on_disk).digest() != hashlib.sha256(content_bytes).digest():
+            return False, WriteResult(error=(
+                f"Post-write verification failed for {path}: on-disk "
+                "content hash differs from the intended write. The "
+                "write did not persist correctly — re-read the file "
+                "and retry."))
+        return True, None
 
     # --- PATCH (replace mode) -----------------------------------------------
 
@@ -1706,36 +1737,18 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             if file_ending:
                 new_content = _normalize_line_endings(new_content, file_ending)
             if pinned:
-                output = new_content
-                if _has_bom(raw_content) and not _has_bom(output):
-                    output = _UTF8_BOM + output
-                refused = self._reject_unencodable(path, output)
-                if refused is not None:
-                    return PatchResult(error=refused.error)
-                refused = self._fail_closed_syntax_error(
-                    path, os.path.splitext(path)[1].lower(), output)
-                if refused is not None:
-                    return PatchResult(error=refused.error)
-                try:
-                    self._write_at(pinned[0], pinned[1],
-                                   output.encode("utf-8", "surrogateescape"))
-                except OSError as exc:
-                    return PatchResult(error=f"Failed to write changes: {exc}")
-                write_result = WriteResult(verified=True)
-                on_disk = self._read_at(pinned[0], pinned[1]).decode(
-                    "utf-8", "surrogateescape")
-                if _normalize_line_endings(on_disk, "\n") != _normalize_line_endings(
-                        output, "\n"):
-                    return PatchResult(error=(
-                        f"Post-write verification failed for {path}: on-disk content "
-                        "differs from intended write. The patch did not persist."))
+                # The write goes through the descriptor this read used and that the deny-list
+                # check validated, with write_file's full pipeline (verification, lint, LSP).
+                write_result = self._write_validated(path, new_content, raw_content, pinned)
             else:
                 write_result = self.write_file(path, new_content, pre_content=raw_content)
-                if write_result.error:
-                    return PatchResult(error=f"Failed to write changes: {write_result.error}")
-                verify_error = self._verify_patch_persisted(path, new_content)
-                if verify_error is not None:
-                    return verify_error
+            if write_result.error:
+                return PatchResult(error=f"Failed to write changes: {write_result.error}")
+            # The pinned write already re-read its bytes through the descriptor; re-reading
+            # by path here could look at a different directory after a swap.
+            verify_error = None if pinned else self._verify_patch_persisted(path, new_content)
+            if verify_error is not None:
+                return verify_error
             lint_result = self._check_lint_delta(
                 path, pre_content=content, post_content=new_content)
             return PatchResult(

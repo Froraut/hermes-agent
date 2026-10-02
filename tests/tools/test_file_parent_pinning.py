@@ -130,3 +130,78 @@ def test_managed_mutation_pins_parent_across_validation_swap(
         assert (original / "destination.txt").read_text(encoding="utf-8") == "ORIGINAL SOURCE\n"
         assert (outside / "source.txt").read_text(encoding="utf-8") == "OUTSIDE SOURCE\n"
         assert not (outside / "destination.txt").exists()
+
+
+def _managed_ops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[ShellFileOperations, Path]:
+    safe_root = tmp_path / "managed"
+    safe_root.mkdir()
+    monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+    return ShellFileOperations(LocalEnvironment(cwd=str(safe_root)), cwd=str(safe_root)), safe_root
+
+
+@pytest.mark.platforms("posix")
+def test_managed_write_into_missing_directory_still_creates_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parent that does not exist yet cannot be pinned: the write falls back to the shell path
+    (which folds in ``mkdir -p``) and returns a result instead of raising FileNotFoundError."""
+    ops, safe_root = _managed_ops(tmp_path, monkeypatch)
+    target = safe_root / "newdir" / "deep" / "f.txt"
+
+    result = ops.write_file(str(target), "hello\n")
+
+    assert result.error is None, result.error
+    assert result.dirs_created is True
+    assert target.read_text(encoding="utf-8") == "hello\n"
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("operation", ["write", "replace"])
+def test_managed_pinned_write_keeps_lint_and_real_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """The pinned path swaps only the transport (fd-relative write and re-read): the lint tier
+    still runs and ``verified`` comes from re-reading the bytes, not from assuming them."""
+    ops, safe_root = _managed_ops(tmp_path, monkeypatch)
+    target = safe_root / "mod.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    pinned_writes = []
+    real_write_at = ShellFileOperations._write_at
+
+    def spy_write_at(parent_fd: int, name: str, data: bytes) -> None:
+        pinned_writes.append(name)
+        real_write_at(parent_fd, name, data)
+
+    monkeypatch.setattr(ShellFileOperations, "_write_at", staticmethod(spy_write_at))
+
+    if operation == "write":
+        result = ops.write_file(str(target), "def broken(:\n")
+    else:
+        result = ops.patch_replace(str(target), "x = 1", "def broken(:")
+
+    assert pinned_writes == ["mod.py"], "the edit did not take the pinned path"
+    assert result.error is None, result.error
+    assert result.lint and result.lint["status"] == "error", result.lint
+    assert "SyntaxError" in result.lint["output"]
+    if operation == "write":
+        assert result.verified is True
+
+
+@pytest.mark.platforms("posix")
+def test_managed_pinned_write_reports_a_hash_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bytes that did not land as intended fail verification instead of reporting verified=True."""
+    ops, safe_root = _managed_ops(tmp_path, monkeypatch)
+    target = safe_root / "notes.txt"
+    target.write_text("old\n", encoding="utf-8")
+    real_write_at = ShellFileOperations._write_at
+
+    def lossy_write_at(parent_fd: int, name: str, data: bytes) -> None:
+        real_write_at(parent_fd, name, data[:-1])  # drop the last byte
+
+    monkeypatch.setattr(ShellFileOperations, "_write_at", staticmethod(lossy_write_at))
+
+    result = ops.write_file(str(target), "new\n")
+
+    assert result.error and "Post-write verification failed" in result.error
