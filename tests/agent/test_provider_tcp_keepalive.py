@@ -156,3 +156,61 @@ def test_keepalive_failure_never_fails_the_connect(no_proxy_env, monkeypatch, lo
     host, port = local_server
     stream = process_bootstrap._keepalive_sync_backend().connect_tcp(host, port, timeout=5)
     stream.close()
+
+
+def _proxied_client(monkeypatch, local_server, *, async_mode=False):
+    """A provider client behind HTTPS_PROXY/HTTP_PROXY. The local server plays the forward
+    proxy: an absolute-form ``GET http://provider.invalid/...`` is answered like any other."""
+    host, port = local_server
+    monkeypatch.setenv("HTTP_PROXY", f"http://{host}:{port}")
+    monkeypatch.setenv("HTTPS_PROXY", f"http://{host}:{port}")
+    client = build_keepalive_http_client("http://provider.invalid/v1", async_mode=async_mode)
+    assert client is not None
+    assert any(isinstance(t._pool, httpcore.HTTPProxy if not async_mode else httpcore.AsyncHTTPProxy)
+               for t in client._mounts.values()), "not a proxied client"
+    return client
+
+
+def test_proxied_client_puts_keepalive_on_the_proxy_socket(no_proxy_env, monkeypatch, local_server):
+    """Behind a proxy the client <-> proxy socket is the one a dropped tunnel leaves dead."""
+    client = _proxied_client(monkeypatch, local_server)
+    try:
+        with client.stream("GET", "http://provider.invalid/ping") as response:
+            assert response.read() == b"ok"
+            assert _keepalive(response.extensions["network_stream"].get_extra_info("socket"))
+    finally:
+        client.close()
+
+
+def test_async_provider_client_connections_carry_keepalive(no_proxy_env, local_server):
+    """The auxiliary client's async transports (direct, not shared)."""
+    import asyncio
+
+    host, port = local_server
+
+    async def _run():
+        client = build_keepalive_http_client(f"http://{host}:{port}/v1", async_mode=True)
+        try:
+            async with client.stream("GET", f"http://{host}:{port}/ping") as response:
+                assert await response.aread() == b"ok"
+                return _keepalive(response.extensions["network_stream"].get_extra_info("socket"))
+        finally:
+            await client.aclose()
+
+    assert asyncio.run(_run())
+
+
+def test_async_proxied_client_puts_keepalive_on_the_proxy_socket(no_proxy_env, monkeypatch, local_server):
+    import asyncio
+
+    client = _proxied_client(monkeypatch, local_server, async_mode=True)
+
+    async def _run():
+        try:
+            async with client.stream("GET", "http://provider.invalid/ping") as response:
+                assert await response.aread() == b"ok"
+                return _keepalive(response.extensions["network_stream"].get_extra_info("socket"))
+        finally:
+            await client.aclose()
+
+    assert asyncio.run(_run())
