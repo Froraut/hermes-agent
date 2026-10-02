@@ -152,9 +152,12 @@ def _desktop_packaged_executable_in(release_dir: Path) -> Optional[Path]:
         return None
     if len(existing) > 1 and sys.platform != "win32":
         arch = _desktop_staging_arch()
+        # Judge only the platform output dir directly under release_dir (linux-arm64-unpacked,
+        # mac-arm64): its ancestors are shared by every candidate and may themselves say "arm64"
+        # (this host's own .staging-<pid>-arm64-... dir, a checkout under .../linux-arm64-src).
         matching = [
             p for p in existing
-            if any("arm64" in part.lower() for part in p.parts) == (arch == "arm64")
+            if ("arm64" in p.relative_to(release_dir).parts[0].lower()) == (arch == "arm64")
         ]
         if matching:
             existing = matching
@@ -243,8 +246,10 @@ def _desktop_staging_dir(desktop_dir: Path, *, env: Optional[dict] = None) -> Pa
     treating each other's staging tree as their own.
     """
     for stale in desktop_dir.glob(f"{_DESKTOP_STAGING_PREFIX}*"):
-        match = re.fullmatch(r"\.staging-(\d+)-(?:arm64|x64)-[0-9a-f]{12}-\d+", stale.name)
-        if match and not _desktop_staging_owner_alive(int(match.group(1))):
+        # Both this layout and the older ``.staging-<pid>-<ts>`` start with the owner's pid: keep a
+        # live owner's tree, sweep a dead one's. A name without a pid was never ours to keep.
+        match = re.match(r"\.staging-(\d+)-", stale.name)
+        if match is None or not _desktop_staging_owner_alive(int(match.group(1))):
             shutil.rmtree(stale, ignore_errors=True)
     return desktop_dir / (
         f"{_DESKTOP_STAGING_PREFIX}{os.getpid()}-{_desktop_staging_arch()}-"
