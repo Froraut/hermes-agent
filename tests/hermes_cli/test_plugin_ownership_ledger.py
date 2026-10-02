@@ -1489,3 +1489,93 @@ def test_ctx_registrations_and_stream_workers_are_owner_scoped_across_reload(tmp
         manager_a.unload()
         manager_b.unload()
         plugin_stream_hooks.shutdown_plugin_stream_hook_dispatcher()
+
+
+def _write_late_registration_plugin(hermes_home: Path) -> None:
+    plugin_dir = hermes_home / "plugins" / "late_probe"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.yaml").write_text(
+        yaml.safe_dump({"name": "late_probe", "version": "0.1.0", "description": "late registration probe"}))
+    # Each generation parks its ctx where "background work" (the test) can resume it later, then
+    # makes one ordinary registration so the generation is observable.
+    (plugin_dir / "__init__.py").write_text(
+        "import sys\n"
+        "\n"
+        "def register(ctx):\n"
+        "    sys.modules['_late_probe_parking'].ctxs.append(ctx)\n"
+        "    ctx.register_hook('on_stream_end', lambda **payload: None)\n"
+    )
+    (hermes_home / "config.yaml").write_text(yaml.safe_dump({"plugins": {"enabled": ["late_probe"]}}))
+
+
+def test_late_registration_from_an_unloaded_generation_is_rejected(tmp_path, monkeypatch):
+    """gen1 blocks before register_*, reload disposes gen1 and loads gen2 under the same key, then gen1
+    resumes: its late hook / stream worker / subscription / platform handler must never become
+    indistinguishable from gen2's."""
+    import sys
+    import types
+
+    import hermes_cli.plugins as plugins_mod
+    from agent import plugin_stream_hooks
+    from hermes_cli.plugins import PluginManager
+
+    hermes_home = tmp_path / "hermes"
+    _write_late_registration_plugin(hermes_home)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(plugins_mod, "get_bundled_plugins_dir", lambda: tmp_path / "empty-bundled")
+    monkeypatch.setattr(PluginManager, "_scan_entry_points", lambda self: [])
+
+    parking = types.ModuleType("_late_probe_parking")
+    parking.ctxs = []
+    monkeypatch.setitem(sys.modules, "_late_probe_parking", parking)
+    manager = PluginManager()
+    try:
+        manager.discover_and_load()
+        gen1 = manager._plugins["late_probe"]
+        ctx1 = parking.ctxs[0]
+        manager.discover_and_load(force=True)  # reload: gen1 unloaded, gen2 live under the same key
+        gen2_ctx = parking.ctxs[-1]
+        assert gen2_ctx is not ctx1 and manager._plugins["late_probe"] is not gen1
+        hooks_before = list(manager._hooks["on_stream_end"])
+        ledger_before = list(manager._ownership_ledger["late_probe"])
+
+        late_calls = []
+
+        def late_hook(**payload):
+            late_calls.append(payload)
+
+        # gen1 resumes and registers late through every lifecycle surface.
+        assert ctx1.register_hook("on_stream_end", late_hook) is None
+        assert ctx1.subscribe("late_probe:tick", lambda **payload: late_calls.append(payload)) is None
+        assert ctx1.register_platform_handler("telegram", lambda _native, _adapter: None) is None
+        assert ctx1.on_unload(lambda: late_calls.append("unload")) is None
+
+        assert manager._hooks["on_stream_end"] == hooks_before
+        assert late_hook not in manager._hooks["on_stream_end"]
+        assert manager._ownership_ledger["late_probe"] == ledger_before
+        assert manager.get_platform_handler_factories("telegram") == []
+        assert "late_probe:tick" not in manager._subscriptions
+        plugin_stream_hooks.enqueue_plugin_stream_hook("on_stream_end", phase="after-late")
+        with plugin_stream_hooks._dispatcher_lock:
+            assert not any(d.callback is late_hook for d in plugin_stream_hooks._dispatchers.values())
+
+        # Race: gen1 passed the guard, then reload ran before its registrar reached the ledger. The
+        # ledger itself releases the late entry instead of attributing it to the live generation.
+        manager._hooks.setdefault("on_stream_end", []).append(late_hook)
+        handle = ctx1._track(
+            "hook", "on_stream_end", lambda: manager._remove_callback(manager._hooks, "on_stream_end", late_hook))
+        assert handle.active is False and handle.generation is ctx1._load_generation
+        assert late_hook not in manager._hooks["on_stream_end"]
+        assert manager._ownership_ledger["late_probe"] == ledger_before
+
+        # The live generation still registers normally, and a targeted unload tombstones it too.
+        live_handle = gen2_ctx.register_hook("pre_tool_call", lambda **payload: None)
+        assert live_handle is not None and live_handle.active
+        assert live_handle.generation is gen2_ctx._load_generation and not gen2_ctx._generation_retired
+        assert manager.unload("late_probe") is True
+        assert gen2_ctx._generation_retired
+        assert gen2_ctx.register_hook("pre_tool_call", lambda **payload: None) is None
+        assert late_calls == []
+    finally:
+        manager.unload()
+        plugin_stream_hooks.shutdown_plugin_stream_hook_dispatcher()

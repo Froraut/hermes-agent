@@ -59,7 +59,7 @@ from hermes_cli.plugins_dispatch import (  # noqa: F401 — re-exported
     RenderedPluginSystemPromptSection, _EventSubscription, format_system_prompt_sections,
     is_valid_system_prompt_section_id,
 )
-from hermes_cli.plugins_ledger import PluginLedgerMixin, PluginRegistration
+from hermes_cli.plugins_ledger import PluginLedgerMixin, PluginLoadGeneration, PluginRegistration
 from hermes_cli.plugins_state import (
     PluginState, _locked_plugin_state, _nested_plugin_mapping, _nested_plugin_value,
     _plugin_relative_segments, _plugin_settings_entry, save_plugin_setting,
@@ -238,10 +238,23 @@ class PluginContext:
         # Set when this context's load overran ``plugins.load_timeout_seconds``: the abandoned worker may
         # still be running register(), and nothing it registers from then on may reach a registry.
         self._load_abandoned = False
+        # Load generation this context registers under (bound by the loader); once that generation is
+        # unloaded, late registrations from work it started are rejected (see PluginLoadGeneration).
+        self._load_generation: Optional[PluginLoadGeneration] = None
 
     def _abandon_load(self) -> None:
         """Mark this load as timed out; every later ``register_*``/``subscribe``/``on_unload`` is ignored."""
         self._load_abandoned = True
+
+    def _bind_load_generation(self) -> "PluginContext":
+        """Tie this context to the manager's live load generation for its plugin key."""
+        self._load_generation = self._manager._begin_plugin_generation(self.plugin_id)
+        return self
+
+    @property
+    def _generation_retired(self) -> bool:
+        generation = getattr(self, "_load_generation", None)
+        return generation is not None and generation.retired
 
     @property
     def plugin_id(self) -> str:
@@ -314,7 +327,9 @@ class PluginContext:
     ) -> PluginRegistration:
         """Record host-owned cleanup for a successful registration (see
         :meth:`PluginManager._track_registration` for ``persistent``)."""
-        return self._manager._track_registration(self.manifest, kind, key, release, persistent=persistent)
+        return self._manager._track_registration(
+            self.manifest, kind, key, release, persistent=persistent,
+            generation=getattr(self, "_load_generation", None))
 
     def _track_replacement(
         self, kind: str, key: str, *, slot: tuple, current: Any, previous: Any,
@@ -1200,6 +1215,12 @@ def _ignore_after_abandoned_load(method):
             logger.warning(
                 "Plugin '%s' called %s() after its load timed out; ignored", self.manifest.name,
                 method.__name__,
+            )
+            return None
+        if self._generation_retired:
+            logger.warning(
+                "Plugin '%s' called %s() after that load generation was unloaded; ignored",
+                self.manifest.name, method.__name__,
             )
             return None
         return method(self, *args, **kwargs)

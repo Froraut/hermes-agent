@@ -40,6 +40,8 @@ class PluginRegistration:
     # re-discovery when the plugin no longer re-registers it.
     # See #91701.
     persistent: bool = False
+    # Load generation that made this registration (``None`` = not bound to a loader generation).
+    generation: Optional["PluginLoadGeneration"] = None
     _disposed: bool = field(default=False, init=False, repr=False)
     _on_dispose: Optional[Callable[["PluginRegistration"], None]] = field(default=None, init=False, repr=False)
 
@@ -60,6 +62,22 @@ class PluginRegistration:
                 self._on_dispose(self)
 
 
+class PluginLoadGeneration:
+    """Identity token for one load of one plugin key in one manager. Unload tombstones it before any
+    registration is disposed, so work that the unloaded generation started (a thread blocked before
+    ``ctx.register_*``) can never register late into the next generation under the same key."""
+
+    __slots__ = ("plugin_key", "retired")
+
+    def __init__(self, plugin_key: str):
+        self.plugin_key = plugin_key
+        self.retired = False
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        state = "retired" if self.retired else "live"
+        return f"<PluginLoadGeneration {self.plugin_key} {state} {id(self):#x}>"
+
+
 class PluginLedgerMixin:
     _discovery_lock: Any
     home_path: Path
@@ -69,9 +87,26 @@ class PluginLedgerMixin:
     _stop_event_dispatcher: Callable[[], None]
     _reset_event_dispatch: Callable[[], None]
 
+    def _begin_plugin_generation(self, plugin_key: str) -> PluginLoadGeneration:
+        """The live load generation for *plugin_key*, minting one when the key has none (a fresh load or
+        the first load after an unload). Repeated binding within one load shares the token."""
+        generations = self.__dict__.setdefault("_plugin_load_generations", {})
+        generation = generations.get(plugin_key)
+        if generation is None or generation.retired:
+            generation = generations[plugin_key] = PluginLoadGeneration(plugin_key)
+        return generation
+
+    def _retire_plugin_generations(self, plugin_keys: Optional[Set[str]] = None) -> None:
+        """Tombstone the load generations of *plugin_keys* (all when ``None``) ahead of disposal."""
+        generations = self.__dict__.setdefault("_plugin_load_generations", {})
+        for plugin_key in list(generations) if plugin_keys is None else list(plugin_keys):
+            generation = generations.pop(plugin_key, None)
+            if generation is not None:
+                generation.retired = True
+
     def _track_registration(
         self, manifest: PluginManifest, kind: str, key: str, release: Callable[[], None], *,
-        persistent: bool = False,
+        persistent: bool = False, generation: Optional[PluginLoadGeneration] = None,
     ) -> PluginRegistration:
         """Record one registration under its canonical plugin key. ``persistent`` ones (process-global host
         infrastructure) stay in the ownership ledger for attribution but NOT in ``_registration_order``, so a
@@ -80,7 +115,19 @@ class PluginLedgerMixin:
         See #91701.
         """
         registration = PluginRegistration(
-            kind=kind, key=key, release=release, plugin_key=manifest_key(manifest), persistent=persistent)
+            kind=kind, key=key, release=release, plugin_key=manifest_key(manifest), persistent=persistent,
+            generation=generation)
+        if generation is not None and generation.retired:
+            # The registrar already mutated its registry; undo it now instead of letting a tombstoned
+            # generation's late registration become indistinguishable from the live one.
+            logger.warning(
+                "Plugin '%s' registered %s '%s' after that load generation was unloaded; released",
+                registration.plugin_key, kind, key)
+            try:
+                registration.dispose()
+            except (Exception, SystemExit, asyncio.CancelledError) as exc:  # pragma: no cover - defensive
+                logger.warning("Failed to release late plugin registration %s/%s: %s", kind, key, exc)
+            return registration
         registration._on_dispose = lambda disposed: self._forget_registrations([disposed])
         self._ownership_ledger.setdefault(registration.plugin_key, []).append(registration)
         if not persistent:
@@ -252,8 +299,10 @@ class PluginLedgerMixin:
         if unload_all:
             target_keys = set(self._ownership_ledger) | set(self._plugins)
             registrations = list(self._registration_order)
+            self._retire_plugin_generations()
         else:
             target_keys = self._unload_target_keys(self._resolve_plugin_key(plugin))
+            self._retire_plugin_generations(target_keys)
             registrations = [r for r in self._registration_order if r.plugin_key in target_keys]
             # Persistent registrations are absent from _registration_order (unload-all keeps them), but a
             # *targeted* unload is the disable/uninstall path: a disabled auth plugin's provider must NOT stay
