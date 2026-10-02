@@ -82,3 +82,24 @@ def test_like_message_scan_matches_non_ascii_words_in_any_case(db):
         != _expected(needle, tool_rows)
     ]
     assert misses == []
+
+
+@pytest.mark.parametrize("needle", ["ss", "SS", "Ss", "ß", "fi", "FI"])
+def test_ascii_needle_finds_casefold_equal_spelling_in_every_consumer(db, needle):
+    """An ASCII needle ("ss") must find its casefold-equal non-ASCII spelling ("ß") in the LIKE
+    message scan exactly as the title/model/branch filters do: gating the fold on the needle's
+    script made the sidebar search miss a session that ``--title ss`` listed."""
+    text = "das ß ist hier, ﬁle"  # only spellings: sharp s and the U+FB01 ligature, no ASCII "ss"/"fi"
+    db.create_session(session_id="s1", source="cli")
+    db.set_session_title("s1", text)
+    db._conn.execute("UPDATE sessions SET model = ?, git_branch = ? WHERE id = 's1'", (text, text))
+    db.append_message("s1", role="assistant", content="", tool_calls=[
+        {"id": "c1", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}])
+    tool_row = db.append_message("s1", role="tool", content=text, tool_call_id="c1", tool_name="terminal")
+    db.end_session("s1", "user_exit")
+    assert needle.casefold() in text.casefold()
+
+    assert [hit["id"] for hit in db.search_messages(needle, role_filter=["tool"], limit=10)] == [tool_row]
+    for prune_filter in ("title_like", "model_like", "branch_like"):
+        assert [row["id"] for row in db.list_prune_candidates(**{prune_filter: needle})] == ["s1"]
+    assert [row["id"] for row in db.list_sessions_rich(limit=10, search_query=needle)] == ["s1"]
