@@ -117,3 +117,49 @@ def test_existing_board_gains_the_guards_on_connect(board):
         names = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")}
 
     assert names == kb.KANBAN_SCHEMA_TRIGGERS
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT OR REPLACE INTO tasks (id, title, status, created_at) VALUES (?, 'HIJACKED', 'running', 0)",
+        "REPLACE INTO tasks (id, title, status, created_at) VALUES (?, 'HIJACKED', 'running', 0)",
+        "INSERT INTO tasks (id, title, status, created_at) VALUES (?, 'HIJACKED', 'running', 0) "
+        "ON CONFLICT(id) DO UPDATE SET title = excluded.title, status = excluded.status",
+        "INSERT OR IGNORE INTO tasks (id, title, status, created_at) VALUES (?, 'HIJACKED', 'running', 0)",
+    ],
+    ids=["or-replace", "replace", "upsert", "or-ignore"],
+)
+def test_foreign_writer_cannot_insert_over_an_existing_task(board, statement):
+    """``INSERT OR REPLACE`` drops the old row by implicit delete + insert: the
+    id is well-formed and no UPDATE runs, so the shape and immutability guards
+    never fire. Every insert onto an existing id is refused, and the claimed
+    row keeps its assignee and claim."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="alpha", assignee="coder")
+        other = kb.create_task(conn, title="beta", assignee="coder")
+        assert kb.claim_task(conn, tid) is not None
+        before = dict(conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone())
+
+    raw = sqlite3.connect(board, isolation_level=None)
+    with pytest.raises(sqlite3.IntegrityError, match="insert over an existing task id"):
+        raw.execute(statement, (tid,))
+    raw.close()
+
+    with kbc.connect_closing() as conn:
+        after = dict(conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone())
+    assert after == before
+    assert after["claim_lock"] and after["assignee"] == "coder"
+    assert _ids(board) == {tid, other}
+
+
+def test_create_task_id_collision_retry_still_works(board, monkeypatch):
+    """The replace guard surfaces as IntegrityError, which create_task's
+    one-shot collision retry already catches: a colliding mint still lands on
+    a fresh id instead of failing the create."""
+    with kbc.connect_closing() as conn:
+        existing = kb.create_task(conn, title="first", assignee="coder")
+        minted = iter([existing, "t_00c0ffee"])
+        monkeypatch.setattr(kb, "_new_task_id", lambda: next(minted))
+        assert kb.create_task(conn, title="second", assignee="coder") == "t_00c0ffee"
+    assert _ids(board) == {existing, "t_00c0ffee"}

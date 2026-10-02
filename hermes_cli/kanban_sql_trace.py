@@ -12,6 +12,13 @@ Only writes that can create, remove or rename a task are logged: INSERT and
 ALTER TABLE at INFO; DELETE, DROP TABLE, an UPDATE of ``tasks.id`` and any
 ``tasks`` write a trigger issues at WARNING (Hermes's own triggers never write).
 Status, claim and heartbeat updates are never logged.
+
+Known blind spot: SQLite reports ``INSERT OR REPLACE`` to the authorizer as a
+single ``SQLITE_INSERT`` -- the implicit delete of the conflicting row emits no
+``SQLITE_DELETE`` -- and the conflict clause is not visible here, so a REPLACE
+is traced as a routine INSERT. The schema's ``kanban_guard_task_id_replace``
+trigger is what refuses an insert over an existing task id; this trace only
+records who issued it.
 """
 
 from __future__ import annotations

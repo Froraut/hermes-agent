@@ -1080,11 +1080,13 @@ CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
 
 -- Task identity guards (#119003). Hermes mints ids only via _new_task_id()
--- ("t_" + lowercase hex) and never rewrites one. A writer that breaks either
--- rule (a foreign trigger, a script, any process) now aborts its statement --
--- and everything that statement did -- instead of silently swapping the board
--- for a ghost row. Self-contained on purpose: a trigger naming another table is
--- rewritten by the task_events/task_runs rebuild's RENAME and then dangles.
+-- ("t_" + lowercase hex), never rewrites one and never inserts over one. A
+-- writer that breaks any of those rules (a foreign trigger, a script, any
+-- process) now aborts its statement -- and everything that statement did --
+-- instead of silently swapping the board for a ghost row. The guards read only
+-- ``tasks`` on purpose: ``tasks`` is never rebuilt, whereas a trigger that also
+-- named task_events/task_runs would be rewritten by their drift rebuild's
+-- RENAME (_rebuild_drifted_tables) and then dangle.
 CREATE TRIGGER IF NOT EXISTS kanban_guard_task_id_insert BEFORE INSERT ON tasks
 WHEN typeof(NEW.id) != 'text' OR NEW.id NOT GLOB 't_[0-9a-f]*'
      OR substr(NEW.id, 3) GLOB '*[^0-9a-f]*'
@@ -1097,11 +1099,28 @@ WHEN NEW.id IS NOT OLD.id
 BEGIN
     SELECT RAISE(ABORT, 'kanban: task ids are immutable (see #119003)');
 END;
+
+-- INSERT OR REPLACE reaches an existing row by implicit delete + insert: the
+-- id is well-formed and no UPDATE runs, so neither guard above sees it, and the
+-- row comes back with every claim/assignee/history column reset. Refuse any
+-- insert onto an id that already exists. That also turns INSERT OR IGNORE and
+-- ON CONFLICT upserts onto an existing task into errors; Hermes uses neither on
+-- ``tasks``, and a plain duplicate INSERT already failed (create_task's
+-- collision retry still catches the IntegrityError).
+CREATE TRIGGER IF NOT EXISTS kanban_guard_task_id_replace BEFORE INSERT ON tasks
+WHEN EXISTS (SELECT 1 FROM tasks WHERE id = NEW.id)
+BEGIN
+    SELECT RAISE(ABORT, 'kanban: refusing to insert over an existing task id (INSERT OR REPLACE / upsert; see #119003)');
+END;
 """
 
 # Triggers SCHEMA_SQL owns; any other trigger in a board runs inside every
 # writer's transaction without Hermes knowing (see _warn_foreign_triggers).
-KANBAN_SCHEMA_TRIGGERS = frozenset({"kanban_guard_task_id_insert", "kanban_guard_task_id_update"})
+KANBAN_SCHEMA_TRIGGERS = frozenset({
+    "kanban_guard_task_id_insert",
+    "kanban_guard_task_id_update",
+    "kanban_guard_task_id_replace",
+})
 
 
 # --- ID generation ---

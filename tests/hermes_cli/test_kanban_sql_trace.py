@@ -167,3 +167,21 @@ def test_runtime_context_exposes_task_presence_not_task_id(monkeypatch):
     assert context["task_env_set"] is True
     assert "task_env" not in context
     assert "t_context_secret" not in context.values()
+
+
+def test_insert_or_replace_is_reported_as_a_plain_insert(tmp_path, caplog):
+    """Pins the documented blind spot: the authorizer sees ``INSERT OR
+    REPLACE`` as one SQLITE_INSERT (no SQLITE_DELETE for the implicit drop), so
+    the trace cannot tell it from a create. The schema guard, not the trace,
+    is what refuses it on a real board (test_kanban_task_id_guard)."""
+    conn = _db(tmp_path)
+    caplog.set_level(logging.INFO, logger=trace.logger.name)
+
+    conn.execute(
+        "INSERT OR REPLACE INTO tasks (id, title, body, status) VALUES ('t_deadbeef', 'x', 'y', 'running')"
+    )
+
+    assert [r.getMessage().split(" via_trigger")[0] for r in _records(caplog)] == [
+        "[kanban-sql-trace] tasks write op=INSERT"
+    ]
+    conn.close()
