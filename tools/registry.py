@@ -495,7 +495,10 @@ class ToolRegistry:
 
     def _snapshot_state(
         self, scope: Optional[str] = None) -> tuple[List[ToolEntry], Dict[str, Callable]]:
-        """Return a coherent snapshot of registry entries and toolset checks."""
+        """Return a coherent snapshot of registry entries and toolset checks (default: the
+        current registry scope, including an ACP session override)."""
+        if scope is None:
+            scope = self.current_scope_key()
         with self._lock:
             entries = list(self._merged_tools(scope).values())
             checks = dict(self._toolset_checks)
@@ -503,7 +506,7 @@ class ToolRegistry:
             return entries, checks
 
     def _snapshot_entries(self) -> List[ToolEntry]:
-        return self._snapshot_state(self.current_scope_key())[0]
+        return self._snapshot_state()[0]
 
     def _toolset_has_exposable_tools(self, toolset: str, entries: List[ToolEntry]) -> bool:
         """True when at least one tool in *toolset* would be exposed. Mirrors
