@@ -32,14 +32,25 @@ const tuiInputs = [
 
 function treeHash(root, inputs, skip, contents = () => true) {
   const hash = createHash('sha256')
-  function visit(name) {
+  function visit(name, entry) {
     if (osMetadata(name) || skip(name)) return
     const file = join(root, name)
     hash.update(name.replaceAll('\\', '/')).update('\0')
-    if (!existsSync(file)) { hash.update('missing\0'); return }
-    if (statSync(file).isDirectory()) {
+    // Directory enumeration already supplies the type on Windows. Avoid two
+    // metadata probes per descendant; still follow links (including junctions)
+    // and probe explicit roots, whose absence is part of the receipt identity.
+    let directory
+    if (entry && !entry.isSymbolicLink()) {
+      directory = entry.isDirectory()
+    } else {
+      if (!existsSync(file)) { hash.update('missing\0'); return }
+      directory = statSync(file).isDirectory()
+    }
+    if (directory) {
       hash.update('directory\0')
-      for (const child of readdirSync(file).sort()) visit(`${name}/${child}`)
+      const children = readdirSync(file, { withFileTypes: true })
+        .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+      for (const child of children) visit(`${name}/${child.name}`, child)
     } else {
       hash.update(contents(name) ? readFileSync(file) : 'file').update('\0')
     }
