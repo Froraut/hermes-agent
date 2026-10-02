@@ -28,46 +28,112 @@ import sys
 from pathlib import Path
 
 
-_DURABLE_REFERENCE_FILES = (
-    "cron/jobs.json",
-    "config.yaml",
-)
+# Keys whose whole value is a profile name. Only an exact match is rewritten.
+_PROFILE_NAME_KEYS = frozenset({"profile", "transport_profile", "target_profile", "profile_name"})
+# Characters that continue a profile name; every rule below refuses a match followed by one, so
+# renaming ``bot`` never touches ``bot2`` / ``bot-dev``.
+_NAME_TAIL = r"(?![A-Za-z0-9_-])"
+
+
+def _profile_reference_rules(old_dir: Path, new_dir: Path):
+    """Anchored (pattern, replacement) pairs for references embedded inside a string value:
+    the absolute profile home (and paths under it), ``agent:<name>:`` session keys, and
+    ``bot-chat:<name>`` delivery tokens (also inside comma-separated ``deliver`` lists)."""
+    old_name, new_name = old_dir.name, new_dir.name
+    # Replacements are callables so a Windows path's backslashes are never read as group escapes.
+    return (
+        (re.compile(re.escape(str(old_dir)) + _NAME_TAIL), lambda m: str(new_dir)),
+        (re.compile(r"(?<![A-Za-z0-9_-])agent:" + re.escape(old_name) + ":"), lambda m: f"agent:{new_name}:"),
+        (re.compile(r"(?<![A-Za-z0-9_-])(bot-chat:)" + re.escape(old_name) + _NAME_TAIL, re.IGNORECASE),
+         lambda m: m.group(1) + new_name),
+    )
+
+
+def _rewrite_reference_text(value: str, rules) -> str:
+    for pattern, replacement in rules:
+        value = pattern.sub(replacement, value)
+    return value
+
+
+def _rewrite_json_references(node, old_name: str, new_name: str, rules):
+    """Rewrite identity fields (exact profile-name values) and embedded references in string
+    values; free text such as a cron ``command`` or a prompt is never searched for the bare name."""
+    if isinstance(node, dict):
+        out = {}
+        for key, value in node.items():
+            if key in _PROFILE_NAME_KEYS and value == old_name:
+                out[key] = new_name
+            else:
+                out[key] = _rewrite_json_references(value, old_name, new_name, rules)
+        return out
+    if isinstance(node, list):
+        return [_rewrite_json_references(item, old_name, new_name, rules) for item in node]
+    if isinstance(node, str):
+        return _rewrite_reference_text(node, rules)
+    return node
+
+
+def _rewrite_yaml_references(text: str, old_name: str, new_name: str, rules) -> str:
+    """Line-level YAML rewrite that keeps comments and layout: ``<identity key>: <old>`` values
+    (optionally quoted, optionally a list item) plus the anchored embedded-reference rules."""
+    keys = "|".join(sorted(_PROFILE_NAME_KEYS))
+    identity = re.compile(
+        rf"^(\s*(?:-\s+)?(?:{keys})\s*:\s*)([\"']?){re.escape(old_name)}\2(?=\s*(?:#.*)?$)",
+        re.MULTILINE)
+    text = identity.sub(lambda m: f"{m.group(1)}{m.group(2)}{new_name}{m.group(2)}", text)
+    return _rewrite_reference_text(text, rules)
+
+
+def _durable_reference_files(new_dir: Path) -> list:
+    """Every file that may durably name the renamed profile: its own cron jobs, config and plugin
+    JSON state; the shared root's config and cron jobs (default-profile jobs can deliver to
+    ``bot-chat:<name>``); and sibling profiles' cron jobs, which can target it the same way."""
+    profiles_root = new_dir.parent
+    hermes_root = profiles_root.parent
+    candidates = [
+        new_dir / "cron" / "jobs.json",
+        new_dir / "config.yaml",
+        hermes_root / "config.yaml",
+        hermes_root / "cron" / "jobs.json",
+    ]
+    if profiles_root.is_dir():
+        candidates.extend(sorted(profiles_root.glob("*/cron/jobs.json")))
+    plugins = new_dir / "plugins"
+    if plugins.is_dir():
+        candidates.extend(sorted(plugins.rglob("*.json")))
+    return list(dict.fromkeys(candidates))
 
 
 def migrate_profile_durable_references(old_dir: Path, new_dir: Path) -> bool:
-    """Rekey durable profile names and absolute homes left inside a moved profile.
+    """Rekey durable profile names and absolute homes that the directory move did not carry.
 
-    The directory rename carries files but not values embedded in cron targets, plugin state,
-    routes, wrappers, or aliases.  Keep the inventory here rather than growing one-off rename
-    hooks. JSON plugin state is included because installed plugins may persist profile routing.
-    Atomic rewrites and exact token replacement make retries harmless.
+    The directory rename carries files but not values embedded in cron targets, plugin state, or
+    routes. Keep the inventory here rather than growing one-off rename hooks. Only identity
+    fields and anchored references are rewritten (never the bare name in free text), JSON is
+    rewritten structurally and YAML line by line, and writes are atomic, so retries are harmless.
     """
     from utils import atomic_write_text
 
     old_name, new_name = old_dir.name, new_dir.name
-    candidates = [new_dir / rel for rel in _DURABLE_REFERENCE_FILES]
-    root_config = new_dir.parent.parent / "config.yaml"
-    candidates.append(root_config)
-    plugins = new_dir / "plugins"
-    if plugins.is_dir():
-        candidates.extend(plugins.rglob("*.json"))
+    rules = _profile_reference_rules(old_dir, new_dir)
     ok = True
-    for path in dict.fromkeys(candidates):
+    for path in _durable_reference_files(new_dir):
         if not path.is_file():
             continue
         try:
             text = path.read_text(encoding="utf-8-sig")
-            migrated = text.replace(str(old_dir), str(new_dir))
-            migrated = migrated.replace(f"agent:{old_name}:", f"agent:{new_name}:")
-            migrated = migrated.replace(f"bot-chat:{old_name}", f"bot-chat:{new_name}")
-            migrated = re.sub(
-                rf"(?<![A-Za-z0-9_-]){re.escape(old_name)}(?![A-Za-z0-9_-])",
-                new_name, migrated)
-            if migrated != text:
-                # Parse JSON before replacing the durable copy; malformed plugin state is retained.
-                if path.suffix == ".json":
-                    json.loads(migrated)
-                atomic_write_text(path, migrated)
+            if path.suffix == ".json":
+                # Malformed plugin state raises here and is retained untouched.
+                data = json.loads(text)
+                migrated_data = _rewrite_json_references(data, old_name, new_name, rules)
+                if migrated_data == data:
+                    continue
+                migrated = json.dumps(migrated_data, indent=2, ensure_ascii=False) + "\n"
+            else:
+                migrated = _rewrite_yaml_references(text, old_name, new_name, rules)
+                if migrated == text:
+                    continue
+            atomic_write_text(path, migrated)
         except Exception as exc:
             ok = False
             print(f"⚠ Profile reference migration failed for {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
