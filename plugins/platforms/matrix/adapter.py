@@ -10,7 +10,7 @@ Env vars (config.yaml ``matrix:`` keys alias several — env wins):
   MATRIX_REQUIRE_MENTION (default true), MATRIX_THREAD_REQUIRE_MENTION, MATRIX_FREE_RESPONSE_ROOMS,
   MATRIX_PROCESS_NOTICES, MATRIX_ALLOW_ROOM_MENTIONS, MATRIX_ALLOW_PUBLIC_ROOMS (all default false);
   MATRIX_AUTO_THREAD (default true), MATRIX_DM_AUTO_THREAD, MATRIX_DM_MENTION_THREADS,
-  MATRIX_SESSION_SCOPE auto|room|thread; MATRIX_MAX_MESSAGE_LENGTH (default 16000),
+  MATRIX_SESSION_SCOPE auto|room|thread; MATRIX_MAX_MESSAGE_LENGTH (UTF-8 bytes, default/max 15000),
   MATRIX_MAX_MEDIA_BYTES, MATRIX_ROOM_IDENTITY_TTL_SECONDS; MATRIX_APPROVAL_REQUIRE_SENDER (default
   true), MATRIX_APPROVAL_TIMEOUT_SECONDS (default 300).
 
@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import array
 import inspect
+import json
 from contextlib import suppress
 import logging
 import mimetypes
@@ -370,12 +371,23 @@ class _MatrixPickerPrompt:
 _MatrixModelPickerPrompt = _MatrixChoicePickerPrompt = _MatrixPickerPrompt
 
 
-# Spec allows ~65 KB events; 4000 was too small (split Markdown tables mid-row).
-# Matrix message size limit. The spec allows large events (~65 KB), but very large bodies can render poorly
-# in some clients. The previous 4,000-char default was overly conservative and split Markdown tables mid-row
-# (#53026).
-DEFAULT_MAX_MESSAGE_LENGTH = 16000
-MATRIX_MAX_MESSAGE_LENGTH_CEILING = 65535
+# The homeserver rejects an event whose JSON exceeds 65,536 bytes (M_TOO_LARGE). Event content stays
+# under this budget so the envelope (ids, hashes, signatures) and E2EE's 4/3 base64 inflation still fit.
+_MAX_CONTENT_BYTES = 45_000
+# Outbound text is measured in UTF-8 bytes (``message_len_fn``). A message carries it twice (body +
+# formatted_body, whose HTML runs up to about twice the Markdown), so a chunk gets a third of the
+# budget. The previous 4,000-char default split Markdown tables mid-row (#53026).
+MATRIX_MAX_MESSAGE_LENGTH_CEILING = _MAX_CONTENT_BYTES // 3
+DEFAULT_MAX_MESSAGE_LENGTH = MATRIX_MAX_MESSAGE_LENGTH_CEILING
+
+
+def _utf8_len(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _content_bytes(content: Dict[str, Any]) -> int:
+    """Size of event content as the homeserver counts it (canonical JSON is UTF-8, not \\u-escaped)."""
+    return _utf8_len(json.dumps(content, ensure_ascii=False, separators=(",", ":")))
 
 
 def _resolve_max_message_length(config) -> int:
@@ -829,6 +841,11 @@ class MatrixAdapter(BasePlatformAdapter):
     # Class-level defaults keep object.__new__-built test instances working.
     max_message_length = DEFAULT_MAX_MESSAGE_LENGTH
     _SPLIT_THRESHOLD = DEFAULT_MAX_MESSAGE_LENGTH - 100
+
+    @property
+    def message_len_fn(self):
+        """UTF-8 bytes, the unit of the homeserver's event cap (a CJK character is three)."""
+        return _utf8_len
 
     def _resolve_store_dir(self) -> Path:
         """Pin the crypto-store dir to the active profile (connect() runs inside the profile
@@ -1408,7 +1425,8 @@ class MatrixAdapter(BasePlatformAdapter):
         if not content:
             return SendResult(success=True)
         last_event_id = None
-        for chunk in self.truncate_message(self.format_message(content), self.max_message_length):
+        for chunk in self.truncate_message(
+                self.format_message(content), self.max_message_length, len_fn=self.message_len_fn):
             msg_content = self._build_text_message_content(chunk)
             self._apply_relation_metadata(msg_content, reply_to=reply_to, metadata=metadata)
             try:
@@ -1491,8 +1509,48 @@ class MatrixAdapter(BasePlatformAdapter):
     async def stop_typing(self, chat_id: str) -> None:
         await self._set_typing(chat_id, 0)
 
-    async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False) -> SendResult:
+    async def edit_message(
+        self, chat_id: str, message_id: str, content: str, *, finalize: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Edit a sent message. An ``m.replace`` event carries the text twice (top-level fallback and
+        ``m.new_content``) and cannot be split, so the text is first bounded to one chunk of
+        ``max_message_length`` UTF-8 bytes -- the same unit and budget ``send()`` uses.
+
+        Oversized text must neither truncate silently nor fail (the consumer would re-send a
+        duplicate): mid-stream the original keeps a truncated preview (splitting would move the edit
+        target every tick, the Telegram #48648 lesson); ``finalize=True`` edits chunk 1 in place and
+        sends chunks 2..N as continuations, returning the last id as the next edit target."""
         formatted = self.format_message(content)
+        chunks = self.truncate_message(formatted, self.max_message_length, len_fn=self.message_len_fn)
+        if len(chunks) <= 1 or not finalize:
+            return await self._send_content_event(chat_id, self._build_edit_content(message_id, chunks[0]))
+        first = await self._send_content_event(chat_id, self._build_edit_content(message_id, chunks[0]))
+        if not first.success:
+            return first
+        continuation_ids: list[str] = []
+        previous = message_id
+        for index, chunk in enumerate(chunks[1:], start=2):
+            msg_content = self._build_text_message_content(chunk)
+            # Without routing metadata, anchor the continuation to the message it continues.
+            self._apply_relation_metadata(
+                msg_content, reply_to=None if (metadata or {}).get("thread_id") else previous, metadata=metadata)
+            try:
+                previous = str(await self._send_room_message(chat_id, msg_content))
+            except Exception as exc:
+                logger.warning("Matrix: edit overflow stopped at %d/%d chunks: %s", index - 1, len(chunks), exc)
+                last_id = continuation_ids[-1] if continuation_ids else message_id
+                return SendResult(
+                    success=True, message_id=last_id, continuation_message_ids=tuple(continuation_ids),
+                    raw_response={"partial_overflow": True, "delivered_chunks": index - 1,
+                                  "total_chunks": len(chunks), "last_message_id": last_id,
+                                  "continuation_message_ids": tuple(continuation_ids)})
+            continuation_ids.append(previous)
+        return SendResult(success=True, message_id=continuation_ids[-1],
+                          continuation_message_ids=tuple(continuation_ids))
+
+    def _build_edit_content(self, message_id: str, formatted: str) -> Dict[str, Any]:
+        """``m.replace`` content for one chunk, kept under ``_MAX_CONTENT_BYTES`` as a whole."""
         new_content = self._build_text_message_content(formatted)
         msg_content: Dict[str, Any] = {"msgtype": "m.text", "body": f"* {formatted}", "m.new_content": new_content}
         if "m.mentions" in new_content:
@@ -1501,7 +1559,27 @@ class MatrixAdapter(BasePlatformAdapter):
             msg_content["format"] = "org.matrix.custom.html"
             msg_content["formatted_body"] = f'* {new_content["formatted_body"]}'
         msg_content["m.relates_to"] = {"rel_type": "m.replace", "event_id": message_id}
-        return await self._send_content_event(chat_id, msg_content)
+        if _content_bytes(msg_content) <= _MAX_CONTENT_BYTES:
+            return msg_content
+        # The top-level copy is only the fallback for clients without edit support (edit-aware
+        # clients render m.new_content); shorten it rather than double the event past the cap.
+        msg_content.pop("format", None)
+        msg_content.pop("formatted_body", None)
+        msg_content["body"] = ""
+        if _content_bytes(msg_content) > _MAX_CONTENT_BYTES:
+            # Many distinct mentions: the top-level list only drives this edit's notifications,
+            # while m.new_content keeps the full list, so the duplicate goes rather than the edit.
+            msg_content.pop("m.mentions", None)
+        if _content_bytes(msg_content) > _MAX_CONTENT_BYTES and "formatted_body" in new_content:
+            # m.new_content itself is what renders; HTML of an escape-heavy chunk is the part that
+            # can still overflow, so the replacement falls back to plain text like send() does.
+            new_content.pop("format", None)
+            new_content.pop("formatted_body", None)
+        room = _MAX_CONTENT_BYTES - _content_bytes(msg_content)
+        # JSON escaping grows a character at most sixfold (\u00XX).
+        fallback = formatted.encode("utf-8")[: max(0, room // 6)].decode("utf-8", "ignore")
+        msg_content["body"] = f"* {fallback}…"
+        return msg_content
 
     async def send_image(
         self, chat_id: str, image_url: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
@@ -1809,7 +1887,18 @@ class MatrixAdapter(BasePlatformAdapter):
             if audio_metadata:
                 msg_content["org.matrix.msc1767.audio"] = audio_metadata
         self._apply_relation_metadata(msg_content, reply_to=reply_to, metadata=metadata)
-        return await self._send_content_event(room_id, msg_content)
+        overflow_caption = None
+        if caption and _content_bytes(msg_content) > _MAX_CONTENT_BYTES:
+            # A media event cannot be split; ship it with its filename and deliver the caption as
+            # ordinary (byte-chunked) text right after it instead of an M_TOO_LARGE rejection.
+            msg_content["body"] = filename
+            overflow_caption = caption
+        result = await self._send_content_event(room_id, msg_content)
+        if overflow_caption and result.success:
+            caption_result = await self.send(room_id, overflow_caption, reply_to=reply_to, metadata=metadata)
+            if not caption_result.success:
+                logger.warning("Matrix: media sent but its long caption failed: %s", caption_result.error)
+        return result
 
     async def _room_needs_encrypted_upload(self, room_id: str) -> bool:
         """E2EE on, Olm machine loaded, and the state store says the room is encrypted."""
@@ -2860,6 +2949,9 @@ class MatrixAdapter(BasePlatformAdapter):
         if html and html != text:
             msg_content["format"] = "org.matrix.custom.html"
             msg_content["formatted_body"] = html
+            if _content_bytes(msg_content) > _MAX_CONTENT_BYTES:
+                # Escape-heavy text can outgrow the budget as HTML; send it as plain text instead.
+                del msg_content["format"], msg_content["formatted_body"]
         return msg_content
 
     def _apply_relation_metadata(
@@ -3094,34 +3186,49 @@ async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_f
         token = getattr(pconfig, "token", None) or get_secret("MATRIX_ACCESS_TOKEN", "") or ""
         if not homeserver or not token:
             return send_error("Matrix not configured (MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN required)")
-        txn_id = f"hermes_{int(time.time() * 1000)}_{os.urandom(4).hex()}"
         from urllib.parse import quote
-        url = f"{homeserver}/_matrix/client/v3/rooms/{quote(chat_id, safe='')}/send/m.room.message/{txn_id}"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        payload = {"msgtype": "m.text", "body": message}
-        with suppress(ImportError):
-            import markdown as _md
-            tokenized, tex_store = _latex_to_tokens(message)
-            html = _md.markdown(tokenized, extensions=["fenced_code", "tables"])
-            payload["format"] = "org.matrix.custom.html"
-            payload["formatted_body"] = _tokens_to_mx_maths(
-                re.sub(r"<h[1-6]>(.*?)</h[1-6]>", r"<strong>\1</strong>", html), tex_store)
         # asyncio.wait_for, not aiohttp.ClientTimeout: cron invokes this via
         # run_coroutine_threadsafe ("Timeout context manager should be used inside a task").
         async with aiohttp.ClientSession() as session:
-            async def _do_send():
+            async def _do_send(payload):
+                txn_id = f"hermes_{int(time.time() * 1000)}_{os.urandom(4).hex()}"
+                url = f"{homeserver}/_matrix/client/v3/rooms/{quote(chat_id, safe='')}/send/m.room.message/{txn_id}"
                 async with session.put(url, headers=headers, json=payload) as resp:
                     if resp.status not in {200, 201}:
                         return send_error(f"Matrix API error ({resp.status}): {await resp.text()}")
                     data = await resp.json()
                     return {"success": True, "platform": "matrix", "chat_id": chat_id,
                             "message_id": data.get("event_id")}
-            try:
-                return await asyncio.wait_for(_do_send(), timeout=30)
-            except asyncio.TimeoutError:
-                return send_error("Matrix API timeout (30s)")
+            result = None
+            for payload in _standalone_payloads(message):
+                try:
+                    result = await asyncio.wait_for(_do_send(payload), timeout=30)
+                except asyncio.TimeoutError:
+                    return send_error("Matrix API timeout (30s)")
+                if not result.get("success"):
+                    break
+            return result
     except Exception as e:
         return send_error(f"Matrix send failed: {e}")
+
+
+def _standalone_payloads(message: str) -> list[Dict[str, Any]]:
+    """One m.room.message content per chunk. The caller chunks on characters, and a chunk of
+    non-Latin text can still exceed the homeserver's byte cap, so re-chunk on UTF-8 bytes."""
+    payloads = []
+    for chunk in BasePlatformAdapter.truncate_message(message, MATRIX_MAX_MESSAGE_LENGTH_CEILING, _utf8_len):
+        payload = {"msgtype": "m.text", "body": chunk}
+        with suppress(ImportError):
+            import markdown as _md
+            tokenized, tex_store = _latex_to_tokens(chunk)
+            html = _md.markdown(tokenized, extensions=["fenced_code", "tables"])
+            formatted = {"format": "org.matrix.custom.html", "formatted_body": _tokens_to_mx_maths(
+                re.sub(r"<h[1-6]>(.*?)</h[1-6]>", r"<strong>\1</strong>", html), tex_store)}
+            if _content_bytes({**payload, **formatted}) <= _MAX_CONTENT_BYTES:
+                payload.update(formatted)
+        payloads.append(payload)
+    return payloads
 
 
 def interactive_setup() -> None:
