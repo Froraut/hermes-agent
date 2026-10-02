@@ -734,11 +734,13 @@ def remove_board(slug: str, *, archive: bool = True, signal_fn=None) -> dict:
                 except FileExistsError as exc:
                     raise ValueError(f"board {normed!r} is already being removed") from exc
                 marker_created = True
-                with write_txn(conn):
-                    if not _terminate_task_workers(conn, signal_fn=signal_fn):
-                        raise ValueError(
-                            f"board {normed!r} has a live worker without a terminable verified identity"
-                        )
+                # The marker and the dispatch lock already stop new spawns; the
+                # drain still runs without the write lock so a worker slow to
+                # exit on SIGTERM never stalls the board's other writers.
+                if _mutate_after_worker_drain(conn, lambda _c: True, signal_fn=signal_fn) is not True:
+                    raise ValueError(
+                        f"board {normed!r} has a live worker without a terminable verified identity"
+                    )
 
             # No worker survives the DB close. The marker prevents any stale
             # holder from recreating the old path before the filesystem hand-off.
@@ -3964,24 +3966,17 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> b
     """Archive a task; a *running* task's host-local worker is terminated.
 
     Clearing ``worker_pid`` in the DB alone left the OS process running past its
-    own archive (#76196). The IMMEDIATE transaction makes this caller the
-    transition winner before any signal is sent; task/run rows remain intact
-    until every live identity is safely terminated. An unverified survivor
-    leaves the task untouched. Termination evidence and the status flip commit
-    together.
+    own archive (#76196). Workers are terminated before the write lock is taken
+    (``_poll_worker_exit`` can wait ~5 s and must not hold it); the status flip
+    then commits only in a transaction that re-verifies no recorded worker is
+    alive, so an unverified survivor leaves the task untouched. Termination
+    evidence and the status flip commit together.
     """
+    if _task_status(conn, task_id) is None:
+        return False
     terminations: list[dict[str, Any]] = []
-    with write_txn(conn):
-        row = conn.execute(
-            "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?",
-            (task_id,),
-        ).fetchone()
-        if not row:
-            return False
-        if not _terminate_task_workers(
-            conn, task_id=task_id, signal_fn=signal_fn, outcomes=terminations,
-        ):
-            return False
+
+    def _archive(conn: sqlite3.Connection) -> bool:
         cur = conn.execute(
             "UPDATE tasks SET status = 'archived', "
             "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
@@ -3997,6 +3992,12 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> b
         _append_event(conn, task_id, "archived", None, run_id=run_id)
         for termination in terminations:
             _append_event(conn, task_id, "archive_worker_termination", termination, run_id=run_id)
+        return True
+
+    if _mutate_after_worker_drain(
+        conn, _archive, task_id=task_id, signal_fn=signal_fn, outcomes=terminations,
+    ) is not True:
+        return False
     # ``archived`` parents no longer block children; promote them now.
     recompute_ready(conn)
     # Reap the workspace on archive too (never-completed tasks kept it forever).
@@ -4026,22 +4027,21 @@ class WorkerStillRunningError(ValueError):
         )
 
 
-def _terminate_task_workers(
-    conn: sqlite3.Connection,
-    *,
-    task_id: Optional[str] = None,
-    signal_fn=None,
-    outcomes: Optional[list[dict[str, Any]]] = None,
-) -> bool:
-    """Drain worker identities for one task or the whole board; fail closed."""
-    where = " WHERE id = ?" if task_id is not None else ""
-    run_where = " WHERE task_id = ?" if task_id is not None else ""
+def _worker_identity_rows(
+    conn: sqlite3.Connection, *, task_id: Optional[str] = None,
+) -> Optional[list[dict[str, Any]]]:
+    """Every recorded worker identity for one task or the whole board, or
+    ``None`` when the set cannot be trusted (fail closed).
+
+    A host-foreign running claim cannot be disproved with this host's PID
+    table, and a local running claim with no registered PID may be in the
+    claim->spawn hand-off; either one makes the snapshot unusable."""
+    task_filter = " AND id = ?" if task_id is not None else ""
+    run_filter = " AND task_id = ?" if task_id is not None else ""
     params: tuple[Any, ...] = (task_id,) if task_id is not None else ()
     running_claims = conn.execute(
         "SELECT claim_lock, worker_pid FROM tasks"
-        + where
-        + (" AND" if where else " WHERE")
-        + " status = 'running' AND claim_lock IS NOT NULL",
+        " WHERE status = 'running' AND claim_lock IS NOT NULL" + task_filter,
         params,
     ).fetchall()
     host_prefix = _host_prefix()
@@ -4050,18 +4050,73 @@ def _terminate_task_workers(
         or not str(row["claim_lock"] or "").startswith(host_prefix)
         for row in running_claims
     ):
-        # A host-foreign claim cannot be disproved with this host's PID table;
-        # a local claim with no registered PID may be in the spawn hand-off.
+        return None
+    columns = "SELECT worker_pid, worker_started_at, claim_lock FROM "
+    rows = [dict(r) for r in conn.execute(
+        columns + "tasks WHERE worker_pid IS NOT NULL" + task_filter, params,
+    )]
+    rows.extend(dict(r) for r in conn.execute(
+        columns + "task_runs WHERE worker_pid IS NOT NULL" + run_filter, params,
+    ))
+    return rows
+
+
+# A dispatcher can claim+spawn between the unlocked drain and the locked
+# re-check; drain again a bounded number of times before refusing.
+_WORKER_DRAIN_ATTEMPTS = 3
+_NOT_DRAINED = object()
+
+
+def _mutate_after_worker_drain(
+    conn: sqlite3.Connection,
+    mutate,
+    *,
+    task_id: Optional[str] = None,
+    signal_fn=None,
+    outcomes: Optional[list[dict[str, Any]]] = None,
+):
+    """Terminate verified workers with NO write lock held, then run
+    ``mutate(conn)`` inside one ``BEGIN IMMEDIATE`` that re-reads the
+    identities and proves none of them is alive.
+
+    ``_terminate_reclaimed_worker`` can spend ~5 s in ``_poll_worker_exit``
+    plus a SIGKILL; doing that inside the write transaction would stall every
+    other writer on the board (dispatcher tick, notifier pollers, another
+    archive) until SQLite's busy handler gives up and fails them. The locked
+    re-check is a single non-blocking ``_worker_alive`` probe per identity,
+    so the destructive write still commits only when no recorded worker
+    survives, and the rows stay intact until then. Signal authority comes
+    from the verified host-local fingerprint, not from winning the
+    transition, so a concurrent caller signalling the same identity is
+    harmless; only the locked mutation decides the winner.
+
+    Returns ``mutate``'s result, or ``_NOT_DRAINED`` when a live worker
+    could not be stopped (nothing was mutated)."""
+    for _attempt in range(_WORKER_DRAIN_ATTEMPTS):
+        rows = _worker_identity_rows(conn, task_id=task_id)
+        if rows is None or not _terminate_worker_identities(
+            rows, signal_fn=signal_fn, outcomes=outcomes,
+        ):
+            return _NOT_DRAINED
+        with write_txn(conn):
+            locked = _worker_identity_rows(conn, task_id=task_id)
+            if locked is None:
+                return _NOT_DRAINED
+            if not any(
+                _worker_alive(int(row["worker_pid"]), row["worker_started_at"])
+                for row in locked
+            ):
+                return mutate(conn)
+        # A worker that was not in the snapshot appeared before the lock.
+    return _NOT_DRAINED
+
+
+def _delete_task_rows(conn: sqlite3.Connection, task_id: str) -> bool:
+    cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    if cur.rowcount != 1:
         return False
-    rows = list(conn.execute(
-        "SELECT worker_pid, worker_started_at, claim_lock FROM tasks" + where,
-        params,
-    ))
-    rows.extend(conn.execute(
-        "SELECT worker_pid, worker_started_at, claim_lock FROM task_runs" + run_where,
-        params,
-    ))
-    return _terminate_worker_identities(rows, signal_fn=signal_fn, outcomes=outcomes)
+    _delete_task_relations(conn, task_id)
+    return True
 
 
 def delete_archived_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> bool:
@@ -4069,31 +4124,33 @@ def delete_archived_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=No
     archived first so data loss takes two deliberate actions. Raises
     :class:`WorkerStillRunningError` (nothing deleted) when a live worker
     cannot be stopped."""
-    with write_txn(conn):
+    if _task_status(conn, task_id) != "archived":
+        return False
+
+    def _delete(conn: sqlite3.Connection) -> bool:
         if _task_status(conn, task_id) != "archived":
             return False
-        if not _terminate_task_workers(conn, task_id=task_id, signal_fn=signal_fn):
-            raise WorkerStillRunningError(task_id)
-        cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        if cur.rowcount != 1:
-            return False
-        _delete_task_relations(conn, task_id)
-        return True
+        return _delete_task_rows(conn, task_id)
+
+    result = _mutate_after_worker_drain(conn, _delete, task_id=task_id, signal_fn=signal_fn)
+    if result is _NOT_DRAINED:
+        raise WorkerStillRunningError(task_id)
+    return result
 
 
 def delete_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> bool:
     """Hard-delete a task and relations after draining its verified workers.
     False when the task does not exist; :class:`WorkerStillRunningError`
     (nothing deleted) when a live worker cannot be stopped."""
-    with write_txn(conn):
-        if _task_status(conn, task_id) is None:
-            return False
-        if not _terminate_task_workers(conn, task_id=task_id, signal_fn=signal_fn):
-            raise WorkerStillRunningError(task_id)
-        cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        if cur.rowcount != 1:
-            return False
-        _delete_task_relations(conn, task_id)
+    if _task_status(conn, task_id) is None:
+        return False
+    result = _mutate_after_worker_drain(
+        conn, lambda c: _delete_task_rows(c, task_id), task_id=task_id, signal_fn=signal_fn,
+    )
+    if result is _NOT_DRAINED:
+        raise WorkerStillRunningError(task_id)
+    if not result:
+        return False
     recompute_ready(conn)
     return True
 
