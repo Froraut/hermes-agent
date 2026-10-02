@@ -2125,30 +2125,56 @@ def _default_export_ignore(root_dir: Path):
     return _ignore
 
 
-# Credential files and containers dropped from exports at any depth. ``bot-desktop`` is the
-# screen's runtime state: its Chromium profile (Cookies, Login Data), Xauthority, and sockets.
+# Credential files and containers dropped from exports at any depth, compared case-insensitively
+# (case-insensitive filesystems keep the authored spelling, e.g. ``Credentials/``). ``bot-desktop``
+# is the screen's runtime state: its Chromium profile (Cookies, Login Data), Xauthority, sockets.
 _EXPORT_CREDENTIAL_FILES = frozenset({
-    "auth.json", ".env", "bot-desktop", "credentials", ".credentials", "secrets", ".secrets",
+    # Hermes credential stores (mirrors agent.file_safety and the managed-files denylist)
+    "auth.json", "auth.lock", ".env", ".anthropic_oauth.json", "google_token.json",
+    "google_client_secret.json", "google_oauth.json", "google_oauth_pending.json",
+    "bws_cache.json", "bws_cache.enc.json", ".git-credentials",
+    # Common third-party credential files: whole-file tokens, not text the redactor can trust
+    "credentials.json", "client_secret.json", "oauth.json", "token.json", "tokens.json", "secrets.json",
+    # Credential containers
+    "bot-desktop", "credentials", ".credentials", "secrets", ".secrets",
 })
-_EXPORT_CREDENTIAL_ARTIFACT_SUFFIXES = (
-    ".bak", ".backup", ".old", ".orig", ".save", ".zip", ".tar", ".tar.gz", ".tgz",
-    ".db", ".sqlite", ".sqlite3", ".log", ".jsonl",
-)
-_EXPORT_CREDENTIAL_ARTIFACT_STEMS = (
+# Hermes-owned credential trees, excluded only at the profile root: a skill may legitimately own a
+# ``vault`` (an Obsidian vault) or ``pairing`` directory deeper in the tree.
+_EXPORT_CREDENTIAL_ROOT_DIRS = frozenset({"mcp-tokens", "browser-profile", "vault", "pairing"})
+# ``.env.<x>`` is an environment/rotated copy of a live env file, except these documented templates.
+_EXPORT_ENV_TEMPLATE_NAMES = frozenset({
+    ".env.example", ".env.sample", ".env.template", ".env.dist", ".env.defaults", ".env.schema",
+})
+# Backup / archive / opaque extensions that hide a credential-stemmed file from the redactor.
+# Matched against every dotted segment, so logrotate output (``tokens.log.1``, ``tokens.log.gz``)
+# and nested backups (``secrets.yaml.bak``) are caught too.
+_EXPORT_CREDENTIAL_ARTIFACT_EXTS = frozenset({
+    "bak", "backup", "old", "orig", "save", "zip", "tar", "gz", "tgz",
+    "db", "sqlite", "sqlite3", "log", "jsonl",
+})
+_EXPORT_CREDENTIAL_ARTIFACT_STEMS = frozenset({
     "auth", "credential", "credentials", "oauth", "secret", "secrets", "token", "tokens",
-)
+})
+# SQLite sidecars (``token.db-journal`` / ``-wal`` / ``-shm``) hold the same pages as the database.
+_SQLITE_SIDECAR_RE = re.compile(r"-(?:journal|wal|shm)$")
+
+
+def _is_credential_artifact(lower: str) -> bool:
+    stem, dot, rest = lower.partition(".")
+    if not dot or stem not in _EXPORT_CREDENTIAL_ARTIFACT_STEMS:
+        return False
+    return any(_SQLITE_SIDECAR_RE.sub("", ext) in _EXPORT_CREDENTIAL_ARTIFACT_EXTS for ext in rest.split("."))
 
 
 def _export_credential_entries(contents: list) -> set:
-    """Credential containers and backup/opaque artifacts, matched by basename at every depth."""
-    ignored = set(_EXPORT_CREDENTIAL_FILES & set(contents))
+    """Credential stores, containers and backup/opaque artifacts, matched case-insensitively by
+    basename at every depth. ``.env`` templates (``.env.example`` ...) are documentation and stay."""
+    ignored = set()
     for entry in contents:
         lower = entry.lower()
-        if lower.startswith(("auth.json.", ".env.")) or any(
-            lower == f"{stem}{suffix}"
-            for stem in _EXPORT_CREDENTIAL_ARTIFACT_STEMS
-            for suffix in _EXPORT_CREDENTIAL_ARTIFACT_SUFFIXES
-        ):
+        if lower in _EXPORT_CREDENTIAL_FILES or _is_credential_artifact(lower):
+            ignored.add(entry)
+        elif lower.startswith(("auth.json.", ".env.")) and lower not in _EXPORT_ENV_TEMPLATE_NAMES:
             ignored.add(entry)
     return ignored
 
@@ -2157,7 +2183,8 @@ _EXPORT_REDACT_SUFFIXES = frozenset({
     ".md", ".txt", ".yaml", ".yml", ".json", ".jsonl", ".toml", ".ini", ".cfg", ".conf", ".py", ".sh",
     ".bash", ".zsh", ".js", ".ts", ".tsx", ".jsx", ".css", ".html", ".xml", ".csv",
 })
-# ``Path(".cursorrules").suffix`` is "" — name-match; ``*.env.example`` uses endswith.
+# ``Path(".cursorrules").suffix`` is "" — name-match; ``.env`` templates (``.env.example``,
+# ``prod.env.sample`` ...) match on their trailing template name.
 _EXPORT_REDACT_NAMES = frozenset({".cursorrules"})
 
 
@@ -2165,7 +2192,7 @@ def _should_redact_export_file(path: Path) -> bool:
     name = path.name
     return (
         name in _EXPORT_REDACT_NAMES
-        or name.lower().endswith(".env.example")
+        or name.lower().endswith(tuple(_EXPORT_ENV_TEMPLATE_NAMES))
         or path.suffix.lower() in _EXPORT_REDACT_SUFFIXES
     )
 
@@ -2212,6 +2239,7 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
         ignored.update(_export_credential_entries(contents))
         if Path(directory) == profile_dir:
             ignored |= PM_RUNTIME_ROOT_DIRS & set(contents)
+            ignored.update(e for e in contents if e.lower() in _EXPORT_CREDENTIAL_ROOT_DIRS)
         return ignored
 
     ignore = _default_export_ignore(profile_dir) if canon == "default" else _ignore_credentials
