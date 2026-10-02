@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 import type { ChannelResolver, ChannelTarget } from './channel'
 import type { ChannelBuild } from './channel-protocol'
 
@@ -17,6 +19,7 @@ export interface ChannelStrategyDeps {
 }
 interface NativeSelection {
   kind: 'native'
+  identity: string
   strategy: UpdaterStrategy
   available: boolean
 }
@@ -57,6 +60,7 @@ export class ChannelStrategy implements UpdaterStrategy {
 
   private async select(): Promise<UpdaterStatusWire> {
     // Failed reads invalidate prior availability, never leave a stale install action.
+    const previous = this.selection
     this.selection = null
     const result = await this.deps.resolver.resolve()
 
@@ -83,7 +87,7 @@ export class ChannelStrategy implements UpdaterStrategy {
         // Sequence counters are per-channel; a retired preview's sequence says
         // nothing about the pinned stable build. The native strategy's own
         // version comparison decides availability, exactly as for stable.
-        return await this.selectNative(base, result.retirement.target, { crossChannel: true })
+        return await this.selectNative(base, result.retirement.target, { crossChannel: true, previous })
       }
 
       // Discontinued (suffixed identity): notice only. No migration callbacks,
@@ -100,13 +104,13 @@ export class ChannelStrategy implements UpdaterStrategy {
       }
     }
 
-    return await this.selectNative(base, result.target)
+    return await this.selectNative(base, result.target, { previous })
   }
 
   private async selectNative(
     base: UpdaterStatusWire,
     target: ChannelTarget,
-    options: { crossChannel?: boolean } = {}
+    options: { crossChannel?: boolean; previous?: Selection | null } = {}
   ): Promise<UpdaterStatusWire> {
     if (!options.crossChannel && target.manifest.request.sequence <= this.deps.build.sequence) {
       this.selection = { kind: 'empty' }
@@ -114,14 +118,22 @@ export class ChannelStrategy implements UpdaterStrategy {
       return { ...base, updateAvailable: false }
     }
 
-    const strategy = this.deps.nativeFactory(target)
+    // Polling still resolves and validates current metadata, but the identical
+    // target can retain its native adapter. Never reuse by version alone: its
+    // downloaded/native state belongs to the complete artifact and policy.
+    const identity = createHash('sha256')
+      .update(JSON.stringify([this.mechanism, Boolean(options.crossChannel), target]))
+      .digest('hex')
+    const strategy = options.previous?.kind === 'native' && options.previous.identity === identity
+      ? options.previous.strategy
+      : this.deps.nativeFactory(target)
     const status = await strategy.check()
 
     if (status.error || status.updateAvailable === undefined) {
       throw new Error(status.error || 'Native update availability unknown')
     }
 
-    this.selection = { kind: 'native', strategy, available: status.updateAvailable }
+    this.selection = { kind: 'native', identity, strategy, available: status.updateAvailable }
 
     return {
       ...status,

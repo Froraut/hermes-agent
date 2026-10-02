@@ -666,6 +666,78 @@ test('Windows resolves its numeric native version, publisher and immutable descr
   expect(result.target.feedUrl).toContain('/win32/stable.appinstaller')
 })
 
+test('reuses a native adapter for identical validated targets while polling current metadata', async (): Promise<void> => {
+  const f = await fixture()
+  let factories = 0
+  let checked = 0
+  let applied = 0
+  const strategy = new ChannelStrategy({
+    resolver: new ChannelResolver({ build: f.build, platform: 'darwin', arch: 'arm64', signer: 'ABCDE12345' }),
+    build: f.build,
+    mechanism: 'electron-updater',
+    nativeFactory: () => {
+      factories += 1
+
+      return {
+        mechanism: 'electron-updater',
+        check: async () => {
+          checked += 1
+
+          return { supported: true, updateAvailable: true }
+        },
+        apply: async () => {
+          applied += 1
+
+          return { ok: true }
+        }
+      }
+    }
+  })
+
+  expect((await strategy.check()).updateAvailable).toBe(true)
+  expect((await strategy.check()).updateAvailable).toBe(true)
+  expect(f.requests.filter(request => request === `/releases/channels/${f.record.name}.json`)).toHaveLength(2)
+  expect(checked).toBe(2)
+  expect(factories).toBe(1)
+  expect(await strategy.apply()).toMatchObject({ ok: true })
+  expect(applied).toBe(1)
+})
+
+test('recreates the native adapter when a validated artifact changes at the same version', async (): Promise<void> => {
+  const f = await fixture()
+  const selected: string[] = []
+  let applied = ''
+  const strategy = new ChannelStrategy({
+    resolver: new ChannelResolver({ build: f.build, platform: 'darwin', arch: 'arm64', signer: 'ABCDE12345' }),
+    build: f.build,
+    mechanism: 'electron-updater',
+    nativeFactory: target => {
+      const digest = target.package.artifact.sha256
+      selected.push(digest)
+
+      return {
+        mechanism: 'electron-updater',
+        check: async () => ({ supported: true, updateAvailable: true }),
+        apply: async () => {
+          applied = digest
+
+          return { ok: true }
+        }
+      }
+    }
+  })
+
+  await strategy.check()
+  const version = f.manifest.packages[0].version
+  f.manifest.packages[0].artifact.sha256 = 'e'.repeat(64)
+  f.publish()
+  await strategy.check()
+  expect(f.manifest.packages[0].version).toBe(version)
+  expect(selected).toEqual(['d'.repeat(64), 'e'.repeat(64)])
+  await strategy.apply()
+  expect(applied).toBe('e'.repeat(64))
+})
+
 test('failed checks clear a previously checked selection, never authorizing a stale apply', async (): Promise<void> => {
   const f = await fixture()
   let applied = false

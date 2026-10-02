@@ -20,6 +20,7 @@ export interface MacStrategyDeps {
 export class MacStrategy implements UpdaterStrategy {
   readonly mechanism = 'electron-updater' as const
   private applying = false
+  private checkedPinnedRelease: UpdaterStatusWire | null = null
 
   constructor(private readonly deps: MacStrategyDeps) {}
 
@@ -32,6 +33,8 @@ export class MacStrategy implements UpdaterStrategy {
   }
 
   private async checkRelease(): Promise<UpdaterStatusWire> {
+    // A failed or unavailable recheck cannot authorize an older selection.
+    this.checkedPinnedRelease = null
     const result = await this.deps.updater.checkForUpdates()
 
     if (!result) {
@@ -42,7 +45,7 @@ export class MacStrategy implements UpdaterStrategy {
       throw new Error('Native macOS feed does not match the pinned channel version')
     }
 
-    return {
+    const status: UpdaterStatusWire = {
       supported: true,
       mechanism: this.mechanism,
       currentVersion: this.deps.appVersion,
@@ -51,6 +54,12 @@ export class MacStrategy implements UpdaterStrategy {
       updateAvailable: result.isUpdateAvailable,
       fetchedAt: Date.now()
     }
+
+    if (this.deps.expectedVersion && status.updateAvailable) {
+      this.checkedPinnedRelease = status
+    }
+
+    return status
   }
 
   async apply(): Promise<UpdaterApplyResultWire> {
@@ -74,7 +83,12 @@ export class MacStrategy implements UpdaterStrategy {
           emitProgress: this.deps.emitProgress
         },
         async (stop: () => Promise<void>): Promise<UpdaterApplyResultWire> => {
-          const status = await this.checkRelease()
+          // The channel pins this native instance to one immutable build. Its
+          // admitted metadata already selects the download; legacy feeds move.
+          const status =
+            (this.deps.expectedVersion && this.checkedPinnedRelease?.latestTag === `v${this.deps.expectedVersion}`
+              ? this.checkedPinnedRelease
+              : null) ?? (await this.checkRelease())
 
           if (!status.updateAvailable) {
             return { ok: true, mechanism: this.mechanism }
@@ -95,6 +109,9 @@ export class MacStrategy implements UpdaterStrategy {
           return { ok: true, bundled: true, handedOff: true, mechanism: this.mechanism }
         }
       )
+    } catch (error) {
+      this.checkedPinnedRelease = null
+      throw error
     } finally {
       this.deps.updater.removeListener('download-progress', progress)
       this.applying = false

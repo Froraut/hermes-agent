@@ -47,13 +47,52 @@ function fixture() {
 afterEach(() => vi.useRealTimers())
 
 describe('macOS strategy', () => {
-  it('checks the release, verifies before teardown, and installs once', async () => {
-    const { strategy, events, emitter } = fixture()
+  it('reuses only the pinned release check and still verifies before teardown', async () => {
+    const legacy = fixture()
+    await legacy.strategy.check()
+    await legacy.strategy.apply()
+    expect(legacy.events).toEqual(['check', 'check', 'download', 'verify', 'stop', 'install'])
+
+    const { deps, strategy, events, emitter } = fixture()
+    deps.expectedVersion = '0.29.0'
+    deps.verifyDownload = vi.fn(async () => {
+      events.push('hash')
+    })
     expect(await strategy.check()).toMatchObject({ channel: 'canary', latestTag: 'v0.29.0', updateAvailable: true })
-    events.length = 0
+    expect(deps.updater.downloadUpdate).not.toHaveBeenCalled()
     expect(await strategy.apply()).toMatchObject({ ok: true, handedOff: true })
-    expect(events).toEqual(['check', 'download', 'verify', 'stop', 'install'])
+    expect(events).toEqual(['check', 'download', 'hash', 'verify', 'stop', 'install'])
+    expect(deps.updater.checkForUpdates).toHaveBeenCalledOnce()
     expect(emitter.listenerCount('download-progress')).toBe(0)
+  })
+
+  it('invalidates pinned availability after failed or unavailable rechecks and retries safely', async () => {
+    const { deps, strategy, events } = fixture()
+    deps.expectedVersion = '0.29.0'
+    await strategy.check()
+    vi.mocked(deps.updater.checkForUpdates).mockRejectedValueOnce(new Error('feed offline'))
+    await expect(strategy.check()).rejects.toThrow('feed offline')
+    vi.mocked(deps.updater.checkForUpdates).mockRejectedValueOnce(new Error('feed still offline'))
+    await expect(strategy.apply()).rejects.toThrow('feed still offline')
+    expect(deps.updater.downloadUpdate).not.toHaveBeenCalled()
+    expect(events).not.toContain('stop')
+
+    const info = { version: '0.29.0', files: [], releaseDate: '', path: '', sha512: '' }
+    vi.mocked(deps.updater.checkForUpdates).mockResolvedValueOnce({
+      isUpdateAvailable: false,
+      updateInfo: info,
+      versionInfo: info
+    })
+    expect((await strategy.check()).updateAvailable).toBe(false)
+    vi.mocked(deps.updater.checkForUpdates).mockRejectedValueOnce(new Error('feed unavailable'))
+    await expect(strategy.apply()).rejects.toThrow('feed unavailable')
+    expect(deps.updater.downloadUpdate).not.toHaveBeenCalled()
+    expect(events).not.toContain('stop')
+
+    expect(await strategy.apply()).toMatchObject({ ok: true, handedOff: true })
+    expect(deps.updater.checkForUpdates).toHaveBeenCalledTimes(6)
+    expect(deps.updater.downloadUpdate).toHaveBeenCalledOnce()
+    expect(events.slice(-4)).toEqual(['download', 'verify', 'stop', 'install'])
   })
 
   it.each(['downloadUpdate', 'prepareInstall'] as const)('keeps backends alive on %s failure', async failure => {
