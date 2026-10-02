@@ -1,6 +1,7 @@
 """Profile management for multiple isolated Hermes instances."""
 
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -2172,35 +2173,70 @@ def _scrub_export_secrets(staged: Path) -> None:
         path.write_text(redacted, encoding="utf-8")
 
 
-def _validate_export_sources(profile_dir: Path) -> None:
-    """Refuse archive sources that can name data outside ``profile_dir``."""
-    if profile_dir.is_symlink():
-        raise ValueError(f"Profile root escapes through a symlink: {profile_dir}")
+def _validating_export_ignore(profile_dir: Path, ignore):
+    """Wrap a copytree *ignore* so every regular file that will actually be archived is checked
+    for a hardlink to data outside ``profile_dir``. copytree copies a hardlinked file's bytes
+    verbatim, so an outside alias (a binary, a database) would enter the archive unredacted.
+
+    Only archived entries are inspected: ignored ones (credential stores, the default export's
+    non-allow-listed root such as ``profiles/``) never block an export they are not part of, so a
+    profile ``auth.json`` hardlinked to the root store (a supported shared-grant setup) is fine.
+    Two names for one inode *inside* the profile escape nothing and are allowed.
+
+    Symlinks keep the existing contract: archived as links (``symlinks=True``), with linked text
+    followed only through the redaction pass in :func:`_scrub_export_secrets`.
+    """
     root = profile_dir.resolve(strict=True)
-    for directory, dirnames, filenames in os.walk(root, followlinks=False):
-        for name in (*dirnames, *filenames):
+    inside_names: Optional[Dict[Tuple[int, int], int]] = None
+
+    def _names_inside_root() -> Dict[Tuple[int, int], int]:
+        # Built lazily: only exports that archive a multiply-linked file pay for the walk.
+        nonlocal inside_names
+        if inside_names is None:
+            inside_names = {}
+            for directory, _dirnames, filenames in os.walk(root, followlinks=False):
+                for filename in filenames:
+                    try:
+                        st = os.lstat(os.path.join(directory, filename))
+                    except OSError:
+                        continue
+                    if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                        key = (st.st_dev, st.st_ino)
+                        inside_names[key] = inside_names.get(key, 0) + 1
+        return inside_names
+
+    def _ignore(directory: str, contents: list) -> set:
+        ignored = ignore(directory, contents)
+        for name in contents:
+            if name in ignored:
+                continue
             path = Path(directory) / name
             try:
                 metadata = path.lstat()
             except OSError as exc:
                 raise ValueError(f"Cannot safely inspect export source: {path}") from exc
-            if stat.S_ISLNK(metadata.st_mode):
-                try:
-                    path.resolve(strict=True).relative_to(root)
-                except (OSError, ValueError) as exc:
-                    raise ValueError(f"Export source escapes profile root: {path}") from exc
-            elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink > 1:
-                raise ValueError(f"Export source may escape profile root through a hardlink: {path}")
+            if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink > 1:
+                if _names_inside_root().get((metadata.st_dev, metadata.st_ino), 0) < metadata.st_nlink:
+                    raise ValueError(f"Export source is hardlinked outside the profile root: {path}")
+        return ignored
+
+    return _ignore
 
 
 def _publish_import(source: Path, destination: Path) -> None:
-    """Atomically publish a same-filesystem staged profile without replacing a raced target."""
+    """Atomically publish a same-filesystem staged profile without replacing a raced target.
+    Never falls back to a copy: a cross-device rename fails instead of half-publishing."""
     if destination.exists() or destination.is_symlink():
         raise _profile_exists_error(destination.name)
     try:
         os.rename(source, destination)
     except FileExistsError as exc:
         raise _profile_exists_error(destination.name) from exc
+    except OSError as exc:
+        # POSIX reports a raced, already-populated directory as ENOTEMPTY rather than EEXIST.
+        if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
+            raise _profile_exists_error(destination.name) from exc
+        raise
 
 
 def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, str]] = None) -> Path:
@@ -2208,7 +2244,6 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
     force-redacted first. Returns the output file path."""
     import tempfile
     canon, profile_dir = _existing_profile_dir(name)
-    _validate_export_sources(profile_dir)
     # Archive base name without extension (.tar.gz appended by the writer).
     base = str(Path(output_path)).removesuffix(".tar.gz").removesuffix(".tgz")
 
@@ -2223,6 +2258,7 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
         return ignored
 
     ignore = _default_export_ignore(profile_dir) if canon == "default" else _ignore_credentials
+    ignore = _validating_export_ignore(profile_dir, ignore)
     with tempfile.TemporaryDirectory() as tmpdir:
         staged = Path(tmpdir) / canon
         shutil.copytree(profile_dir, staged, symlinks=True, ignore=ignore)
