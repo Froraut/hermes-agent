@@ -665,6 +665,139 @@ def test_frame_id_guard_uses_selected_frame_url(
         ]
 
 
+# Selected-destination matrix (review on #128503): the REAL page-URL predicate runs here —
+# only DNS is faked, so the scheme floor and the SSRF verdict are both exercised.
+SELECTED_DESTINATION_MATRIX = [
+    # (selected page/frame URL, blocked?)
+    ("https://example.com/", False),
+    ("http://127.0.0.1:9222/", True),
+    ("http://LocalHost.:9222/json", True),
+    ("http://[::ffff:127.0.0.1]:9222/", True),
+    ("http://metadata.google.internal/", True),
+    ("about:blank", False),
+    ("chrome://newtab/", False),
+    ("devtools://devtools/bundled/inspector.html", False),
+    ("chrome-extension://abcdefghijklmnop/popup.html", False),
+    ("data:text/html,<h1>hi", False),
+    ("blob:https://example.com/2f1a", False),
+    ("blob:null/2f1a", False),
+    ("view-source:https://example.com", False),
+    # Wrappers are judged by the URL they wrap, so they cannot launder a private page.
+    ("blob:http://127.0.0.1:9222/2f1a", True),
+    ("view-source:http://127.0.0.1:9222/json", True),
+    ("VIEW-SOURCE:http://10.0.0.5/", True),
+    ("view-source:blob:http://192.168.1.1/2f1a", True),
+    ("filesystem:http://10.0.0.5/temporary/x", True),
+    # file: is a genuine local read on the browser host: blocked explicitly, also when wrapped.
+    ("file:///tmp/report.html", True),
+    ("view-source:file:///etc/passwd", True),
+    # Other authority-bearing schemes are host-checked, not waved through.
+    ("ftp://10.0.0.1/pub/", True),
+    ("ftp://example.com/pub/", False),
+]
+
+
+@pytest.fixture
+def fake_public_dns(monkeypatch):
+    import ipaddress
+    import socket
+    from tools import url_safety
+
+    def fake_getaddrinfo(hostname, port=None):
+        try:
+            ip = str(ipaddress.ip_address(hostname))
+        except ValueError:
+            ip = "127.0.0.1" if hostname.rstrip(".").lower() == "localhost" else "93.184.215.14"
+        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        return [(family, socket.SOCK_STREAM, 6, "", (ip, port or 0))]
+
+    monkeypatch.setattr(url_safety, "_getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(url_safety, "_global_allow_private_urls", lambda: False)
+
+
+@pytest.mark.parametrize(("selected_url", "blocked"), SELECTED_DESTINATION_MATRIX)
+def test_page_url_predicate_matrix(fake_public_dns, selected_url, blocked):
+    from tools import browser_tool as bt
+
+    assert bt_eval_policy._page_url_blocked(bt, selected_url) is blocked
+    # The navigate-time predicate stays fail-closed for every non-http(s) scheme.
+    if not selected_url.lower().startswith(("http:", "https:")):
+        assert bt_eval_policy._url_blocked(bt, selected_url) is True
+
+
+@pytest.mark.parametrize(("selected_url", "blocked"), SELECTED_DESTINATION_MATRIX)
+def test_target_id_guard_matrix_with_real_predicate(
+    monkeypatch, cdp_server, fake_public_dns, selected_url, blocked
+):
+    cdp_server.on(
+        "Target.getTargetInfo",
+        lambda params, sid: {
+            "targetInfo": {"targetId": params["targetId"], "type": "page", "url": selected_url}
+        },
+    )
+    cdp_server.on("Target.attachToTarget", lambda params, sid: {"sessionId": "selected-session"})
+    cdp_server.on(
+        "Runtime.evaluate",
+        lambda params, sid: {"result": {"type": "string", "value": "selected data"}},
+    )
+    monkeypatch.setattr(bt_eval_policy, "_eval_ssrf_guard_active", lambda task_id: True)
+    monkeypatch.setattr(bt_eval_policy, "_current_page_private_url", lambda task_id: None)
+
+    result = json.loads(
+        browser_cdp_tool.browser_cdp(
+            method="Runtime.evaluate",
+            params={"expression": "document.title"},
+            target_id="selected-target",
+            task_id="task-1",
+        )
+    )
+    methods = [request["method"] for request in cdp_server.received()]
+
+    if blocked:
+        assert selected_url in result["error"]
+        assert "Runtime.evaluate" not in methods
+    else:
+        assert result.get("success") is True, result
+        assert "Runtime.evaluate" in methods
+
+
+def test_supervisor_created_about_blank_target_is_usable(monkeypatch, cdp_server, fake_public_dns):
+    """The supervisor opens its own page via Target.createTarget(url='about:blank'); the
+    next raw CDP call against that target must not be refused as 'private'."""
+    cdp_server.on(
+        "Target.getTargetInfo",
+        lambda params, sid: {"targetInfo": {"targetId": params["targetId"], "type": "page", "url": "about:blank"}},
+    )
+    cdp_server.on("Target.attachToTarget", lambda params, sid: {"sessionId": "s"})
+    cdp_server.on("Runtime.evaluate", lambda params, sid: {"result": {"type": "number", "value": 2}})
+    monkeypatch.setattr(bt_eval_policy, "_eval_ssrf_guard_active", lambda task_id: True)
+    monkeypatch.setattr(bt_eval_policy, "_current_page_private_url", lambda task_id: None)
+
+    result = json.loads(
+        browser_cdp_tool.browser_cdp(
+            method="Runtime.evaluate", params={"expression": "1+1"}, target_id="fresh", task_id="task-1"
+        )
+    )
+
+    assert result.get("success") is True, result
+
+
+def test_ambient_page_guard_allows_about_blank_but_not_wrapped_private(monkeypatch, fake_public_dns):
+    """The ambient current-page probe shares the already-loaded-page predicate."""
+    from tools import browser_tool_session
+
+    current = {"url": "about:blank"}
+    monkeypatch.setattr(
+        browser_tool_session,
+        "_run_browser_command",
+        lambda *a, **k: {"success": True, "data": {"result": current["url"]}},
+    )
+
+    assert bt_eval_policy._current_page_private_url("task-1") is None
+    current["url"] = "view-source:http://127.0.0.1:9222/json"
+    assert bt_eval_policy._current_page_private_url("task-1") == current["url"]
+
+
 def test_frame_id_route_allowed_when_page_is_not_private(monkeypatch):
     """Sanity check: the new guard call must not block ordinary frame_id
     routing when the current page isn't private."""

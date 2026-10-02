@@ -135,13 +135,18 @@ def _selected_destination_guard_active(task_id: str, method: str) -> bool:
 
 
 def _private_destination_url(url: str) -> Optional[str]:
-    """Return ``url`` when it is private/internal; fail open like sibling browser guards."""
+    """Return ``url`` when the selected page/frame is private/internal (or a local file).
+
+    Uses the already-loaded-page predicate, not the navigate-time one: ``about:blank`` (which
+    the supervisor itself creates), ``chrome://``, ``devtools://``, ``data:`` and public
+    ``blob:``/``view-source:`` pages are not private destinations. Fails open on probe errors
+    like the sibling browser guards."""
     if not url:
         return None
     try:
         from tools import browser_tool as bt  # type: ignore[import-not-found]
         from tools import browser_tool_eval_policy as policy
-        return url if policy._url_blocked(bt, url) else None
+        return url if policy._page_url_blocked(bt, url) else None
     except Exception as exc:  # noqa: BLE001
         logger.debug("browser_cdp: selected-destination URL probe failed: %s", exc)
         return None
@@ -149,7 +154,7 @@ def _private_destination_url(url: str) -> Optional[str]:
 
 def _blocked_private_destination(url: str, method: str) -> str:
     return _blocked(
-        f"Blocked: selected CDP destination targets a private or internal address ({url}). "
+        f"Blocked: selected CDP destination is a private/internal address or local file ({url}). "
         f"Raw CDP method {method!r} could expose private page content or state.",
         method,
     )
