@@ -304,6 +304,9 @@ def test_launch_turn_binds_terminal_scope_once_multiplexing_is_active(
     assert get_terminal_scope() is None
 
 
+# "any": every OS lane imports this file and runs this test, so the Windows lane exercises the
+# memory-cap composition without os.sysconf (a missing sysconf must fall back, not raise).
+@pytest.mark.platforms("any")
 def test_sandbox_roots_wait_limit_and_memory_cap_follow_the_routed_profile(tmp_path, monkeypatch):
     """terminal.sandbox_dir, terminal.timeout and TERMINAL_SCRATCH_DIR resolve from the routed
     profile, A -> B -> A, never from the launch profile's values bridged into ``os.environ``.
