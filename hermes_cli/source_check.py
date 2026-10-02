@@ -147,7 +147,9 @@ def _branch_tip(repository: str | None, branch: str, root: Path, git: str,
     if repository:
         from hermes_cli.github_api import describe_github_failure, github_token
         try:
-            sha = _request(f"https://api.github.com/repos/{repository}/commits/{quote(branch, safe='')}",
+            # An unqualified ref may resolve a same-named tag or commit SHA.
+            # This discovery path follows branches, never release tags.
+            sha = _request(f"https://api.github.com/repos/{repository}/commits/{quote('heads/' + branch, safe='')}",
                            "application/vnd.github.sha")
         except Exception as exc:
             sha = None
@@ -408,7 +410,7 @@ def check_for_updates(*, install_root: Path | None = None, home: Path | None = N
     else:
         result["branch"] = selected_branch
     identity = {"root": str(root), "home": str(home), "head": co.head, "origin": co.origin, "branch": selected_branch,
-                "channel": channel, "embedded": embedded, "branchOverride": branch is not None, "channelProtocol": 1}
+                "channel": channel, "embedded": embedded, "branchOverride": branch is not None, "channelProtocol": 2}
     cache_file = Path(cache_path) if cache_path is not None else home / "source-checks" / f"{install_id(root)}.json"
     now = time.time()
     cached = None if force else _cached_status(cache_file, identity, now)
