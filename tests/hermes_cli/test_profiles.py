@@ -1277,6 +1277,86 @@ class TestRenameProfile:
 
         assert (profile_env / ".hermes" / "profiles" / "newname").is_dir()
 
+    def test_admission_fence_waits_for_holder_instead_of_failing(self, profile_env, monkeypatch):
+        """A contender waits for the holder; the old Windows LK_LOCK path gave up after ~10 s."""
+        import time
+
+        from hermes_cli import profiles as profiles_mod
+
+        monkeypatch.setattr(profiles_mod, "_PROFILE_ADMISSION_TIMEOUT", 10.0)
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            with profiles_mod._profile_admission_fence("slug"):
+                held.set()
+                assert release.wait(5)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(holder)
+            assert held.wait(5)
+            threading.Timer(0.5, release.set).start()
+            started = time.monotonic()
+            with profiles_mod._profile_admission_fence("slug"):
+                waited = time.monotonic() - started
+            fut.result(timeout=5)
+        assert waited >= 0.4
+
+    def test_admission_fence_timeout_raises_profile_busy(self, profile_env, monkeypatch):
+        from hermes_cli import profiles as profiles_mod
+
+        monkeypatch.setattr(profiles_mod, "_PROFILE_ADMISSION_TIMEOUT", 0.2)
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            with profiles_mod._profile_admission_fence("newname"):
+                held.set()
+                assert release.wait(5)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(holder)
+            assert held.wait(5)
+            try:
+                with pytest.raises(profiles_mod.ProfileBusyError, match="'newname' is busy"):
+                    create_profile("newname", no_alias=True)
+            finally:
+                release.set()
+            fut.result(timeout=5)
+        assert not (profile_env / ".hermes" / "profiles" / "newname").exists()
+
+    def test_admission_lock_never_uses_bounded_blocking_lock_on_windows(self, tmp_path, monkeypatch):
+        """Windows polls LK_NBLCK; LK_LOCK's built-in ~10 s give-up must not be the wait."""
+        import errno as errno_mod
+
+        from hermes_cli import profiles as profiles_mod
+
+        modes = []
+        fake = types.SimpleNamespace(LK_LOCK=1, LK_NBLCK=2, LK_UNLCK=0)
+
+        def locking(_fd, mode, _n):
+            modes.append(mode)
+            if mode == fake.LK_NBLCK and modes.count(fake.LK_NBLCK) < 3:
+                raise OSError(errno_mod.EDEADLK, "Resource deadlock avoided")
+
+        fake.locking = locking
+        monkeypatch.setitem(sys.modules, "msvcrt", fake)
+        with open(tmp_path / "slug.lock", "a+b") as fh:
+            monkeypatch.setattr(profiles_mod.os, "name", "nt")
+            results = [profiles_mod._try_lock_admission_file(fh) for _ in range(3)]
+            monkeypatch.undo()
+        assert results == [False, False, True]
+        assert fake.LK_LOCK not in modes
+
+    def test_profile_busy_maps_to_http_409(self):
+        from fastapi import HTTPException
+
+        from hermes_cli import profiles as profiles_mod
+        from hermes_cli.web_routers.profiles import _profile_errors
+
+        with pytest.raises(HTTPException) as excinfo:
+            with _profile_errors("test", bad_request=(ValueError, FileExistsError)):
+                raise profiles_mod.ProfileBusyError("Profile 'x' is busy")
+        assert excinfo.value.status_code == 409
+
 
 
     def test_migrate_identity_command_repairs_a_failed_live_migration(self, profile_env, capsys):
