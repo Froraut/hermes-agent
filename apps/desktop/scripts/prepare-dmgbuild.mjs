@@ -2,6 +2,17 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { runPython } from '../../../scripts/build/python.mjs'
 
+/** @param {string} binary @returns {string} */
+export function dmgbuildVendor(binary) {
+  const vendor = path.dirname(binary)
+  if (path.basename(binary) !== 'dmgbuild' || !fs.existsSync(binary) ||
+      !fs.statSync(binary).isFile() || !fs.existsSync(path.join(vendor, 'python/bin/python3')) ||
+      !fs.statSync(path.join(vendor, 'python/bin/python3')).isFile()) {
+    throw new Error(`PM dmgbuild launcher or paired Python is missing: ${binary}`)
+  }
+  return vendor
+}
+
 /**
  * PM supplies the complete vendor tree, including the diagnostic hook's Python.
  * Source convenience uses the same Python entrypoint as other build helpers.
@@ -14,11 +25,7 @@ export function prepareDmgbuild({ source, out, cache, binary }) {
       '--out', path.join(cache, 'pm-tools'), '--cache', cache],
     { cwd: source, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] })).trim()
   }
-  const vendor = path.dirname(binary)
-  if (path.basename(binary) !== 'dmgbuild' || !fs.existsSync(binary) ||
-      !fs.statSync(binary).isFile() || !fs.existsSync(path.join(vendor, 'python/bin/python3'))) {
-    throw new Error(`PM dmgbuild launcher or paired Python is missing: ${binary}`)
-  }
+  const vendor = dmgbuildVendor(binary)
   const destination = path.join(out, 'dmgbuild')
   fs.rmSync(destination, { recursive: true, force: true })
   fs.cpSync(vendor, destination, { recursive: true, verbatimSymlinks: true })

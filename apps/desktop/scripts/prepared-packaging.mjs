@@ -62,7 +62,9 @@ export function treeDigest(root) {
   return hash.digest('hex')
 }
 
-/** @param {string} source @returns {string} */
+/** Supplier recipes and complete pins; UI edits do not change these inputs.
+ * @param {string} source @returns {string}
+ */
 export function packagingIdentity(source) {
   const files = ['package-lock.json', 'apps/desktop/package.json', 'apps/desktop/electron-builder.config.cjs']
   const recipe = ['prepare-packaging-tools.mjs', 'prepared-packaging.mjs', 'prepare-dmgbuild.mjs', 'prepare_dmgbuild.py', 'windows-bundle-tools.mjs', 'run-electron-builder.mjs']
@@ -127,6 +129,8 @@ export function readPackagingInputs(manifest, source, target = `${process.platfo
       throw preparationRequired('Stale or foreign packaging inputs')
     }
     const required = [result.electron, result.toolsets.sevenZip, result.toolsets.icons, ...Object.values(result.toolsets)]
+    if (result.formats.includes('AppImage') && !result.toolsets.appimage) throw preparationRequired('Missing AppImage tool selection')
+    if (result.formats.some(format => format === 'deb' || format === 'rpm') && !result.toolsets.fpm) throw preparationRequired('Missing fpm tool selection')
     validateWindowsCapability(result)
     if (target.startsWith('win32-')) {
       if (!result.windows || !result.toolsets.winCodeSign) throw preparationRequired('Missing Windows tool selection')

@@ -5,9 +5,9 @@ import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { isMain } from './utils.mjs'
-import { publishPackagingInputs, windowsSigningConfigured } from './prepared-packaging.mjs'
+import { publishPackagingInputs, readPackagingInputs, treeDigest, windowsSigningConfigured } from './prepared-packaging.mjs'
 import { ensureWindowsBundleTools } from './windows-bundle-tools.mjs'
-import { prepareDmgbuild } from './prepare-dmgbuild.mjs'
+import { dmgbuildVendor, prepareDmgbuild } from './prepare-dmgbuild.mjs'
 
 /** @param {string} source @param {string} name @returns {string} */
 export function pinnedPackageRoot(source, name) {
@@ -43,6 +43,33 @@ function copyTool(from, to) {
 }
 
 /**
+ * Reuse only a complete matching selection, with all supplier bytes checked by
+ * read-only admission. An explicit dmgbuild selector remains authoritative.
+ * @param {{ source: string, out: string, target: string, formats: string[], windowsSigning?: boolean, dmgbuild?: string }} options
+ * @returns {string | null}
+ */
+export function reusePackagingInputs({ source, out, target, formats, windowsSigning = true, dmgbuild }) {
+  const manifest = path.join(out, 'prepared.json')
+  /** @type {import('./prepared-packaging.mjs').PreparedPackaging} */
+  let inputs
+  try {
+    inputs = readPackagingInputs(manifest, source, target)
+    if (inputs.formats.includes('dmg')) dmgbuildVendor(/** @type {string} */ (inputs.dmgbuild))
+  } catch {
+    return null
+  }
+  const requested = new Set(formats)
+  const selected = new Set(inputs.formats)
+  if (selected.size !== requested.size || [...selected].some(format => !requested.has(format)) ||
+      (inputs.windowsSigning ?? true) !== windowsSigning) return null
+  if (formats.includes('dmg') && dmgbuild) {
+    const preparedVendor = path.dirname(/** @type {string} */ (inputs.dmgbuild))
+    if (treeDigest(dmgbuildVendor(dmgbuild)) !== inputs.files.find(file => file.path === preparedVendor)?.digest) return null
+  }
+  return manifest
+}
+
+/**
  * Acquire bytes without signing credentials. Builder modules are loaded only
  * after the explicit cache root has been selected, before their lazy state runs.
  * @param {{ source: string, out: string, cache: string, target?: string, formats?: string[], dmgbuild?: string, unsignedDir?: boolean }} options
@@ -53,28 +80,39 @@ async function preparePackagingTools({ source, out, cache, target = `${process.p
   out = path.resolve(out)
   cache = path.resolve(cache)
   fs.mkdirSync(out, { recursive: true })
-  fs.rmSync(path.join(out, 'prepared.json'), { force: true })
-  packagingTargetArch(target)
-  const builderRoot = pinnedPackageRoot(source, 'app-builder-lib')
-  pinnedPackageRoot(source, 'electron-builder')
-  const require = createRequire(path.join(source, 'apps/desktop/package.json'))
-  const config = require(path.join(source, 'apps/desktop/electron-builder.config.cjs'))
-  formats ??= process.platform === 'win32' ? ['msix'] : process.platform === 'darwin' ? ['dmg', 'zip'] : ['AppImage']
-  if (unsignedDir && (process.platform !== 'win32' || formats.length !== 1 || formats[0] !== 'dir' ||
-      windowsSigningConfigured() || config.win?.sign)) {
-    throw new Error('--unsigned-dir requires an unsigned Windows source directory build')
-  }
-  if (process.env.CUSTOM_DMGBUILD_PATH) throw new Error('Preparation must select the pinned dmgbuild supplier, not CUSTOM_DMGBUILD_PATH')
-  const supported = process.platform === 'win32' ? ['dir', 'msix', 'zip'] : process.platform === 'darwin' ? ['dir', 'dmg', 'zip'] : ['dir', 'AppImage', 'deb', 'rpm', 'zip']
-  if (formats.some(format => !supported.includes(format))) throw new Error(`Unsupported prepared package formats: ${formats.join(', ')}`)
-  const dmg = formats.includes('dmg') ? prepareDmgbuild({ source, out, cache, binary: dmgbuild }) : null
-  const previousCache = process.env.ELECTRON_BUILDER_CACHE
-  process.env.ELECTRON_BUILDER_CACHE = path.join(cache, 'builder')
+  const manifest = path.join(out, 'prepared.json')
   try {
-    return await acquirePackagingTools({ source, out, cache, target, formats, builderRoot, config, dmgbuild: dmg, unsignedDir })
-  } finally {
-    if (previousCache === undefined) delete process.env.ELECTRON_BUILDER_CACHE
-    else process.env.ELECTRON_BUILDER_CACHE = previousCache
+    packagingTargetArch(target)
+    const builderRoot = pinnedPackageRoot(source, 'app-builder-lib')
+    pinnedPackageRoot(source, 'electron-builder')
+    const require = createRequire(path.join(source, 'apps/desktop/package.json'))
+    const config = require(path.join(source, 'apps/desktop/electron-builder.config.cjs'))
+    formats ??= process.platform === 'win32' ? ['msix'] : process.platform === 'darwin' ? ['dmg', 'zip'] : ['AppImage']
+    if (unsignedDir && (process.platform !== 'win32' || formats.length !== 1 || formats[0] !== 'dir' ||
+        windowsSigningConfigured() || config.win?.sign)) {
+      throw new Error('--unsigned-dir requires an unsigned Windows source directory build')
+    }
+    if (process.env.CUSTOM_DMGBUILD_PATH) throw new Error('Preparation must select the pinned dmgbuild supplier, not CUSTOM_DMGBUILD_PATH')
+    const supported = process.platform === 'win32' ? ['dir', 'msix', 'zip'] : process.platform === 'darwin' ? ['dir', 'dmg', 'zip'] : ['dir', 'AppImage', 'deb', 'rpm', 'zip']
+    if (formats.some(format => !supported.includes(format))) throw new Error(`Unsupported prepared package formats: ${formats.join(', ')}`)
+    // Custom local/remote toolsets may change bytes without changing configuration.
+    if (!Object.values(config.toolsets ?? {}).some(tool => tool !== null && typeof tool === 'object')) {
+      const reusable = reusePackagingInputs({ source, out, target, formats, windowsSigning: !unsignedDir, dmgbuild })
+      if (reusable) return reusable
+    }
+    fs.rmSync(manifest, { force: true })
+    const dmg = formats.includes('dmg') ? prepareDmgbuild({ source, out, cache, binary: dmgbuild }) : null
+    const previousCache = process.env.ELECTRON_BUILDER_CACHE
+    process.env.ELECTRON_BUILDER_CACHE = path.join(cache, 'builder')
+    try {
+      return await acquirePackagingTools({ source, out, cache, target, formats, builderRoot, config, dmgbuild: dmg, unsignedDir })
+    } finally {
+      if (previousCache === undefined) delete process.env.ELECTRON_BUILDER_CACHE
+      else process.env.ELECTRON_BUILDER_CACHE = previousCache
+    }
+  } catch (error) {
+    fs.rmSync(manifest, { force: true })
+    throw error
   }
 }
 
