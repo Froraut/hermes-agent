@@ -33,6 +33,7 @@ def sessions(monkeypatch):
     monkeypatch.setattr(server, "_sessions", live)
     monkeypatch.setattr(server, "_session_pending_kind", lambda sid: "")
     monkeypatch.setattr(turn_alive, "_last_emit", {})
+    monkeypatch.setattr(turn_alive, "_ended", set())
     event_replay.reset_replay_state()
     yield live
     event_replay.reset_replay_state()
@@ -195,6 +196,46 @@ def test_a_later_turn_counts_its_quiet_afresh(sessions):
 
     assert turn_alive.tick(200.0) == 0  # first sight of the new turn
     assert turn_alive.tick(200.0 + turn_alive.TURN_ALIVE_INTERVAL_S) == 1
+
+
+def test_no_frame_once_the_turn_sent_message_complete(sessions, monkeypatch):
+    """``running`` outlives ``message.complete`` (goal judge, loop hooks, follow-up scheduling). A frame in that
+    window reached a Desktop that had already settled the turn, so it read as the finished turn still going."""
+    sessions["s1"] = _session()
+    clock = [6000.0]
+    monkeypatch.setattr(turn_alive.time, "monotonic", lambda: clock[0])
+    server._emit("message.start", "s1")
+    turn_alive.tick()
+    server._emit("message.complete", "s1", {"text": "done", "status": "complete"})
+
+    for _ in range(12):  # a minute of post-turn work with running still True
+        clock[0] += turn_alive._TICK_S
+        assert turn_alive.tick() == 0
+    assert sessions["s1"]["transport"].alive() == []
+
+    # The next turn's message.start is a new turn: its quiet counts afresh and gets frames again.
+    server._emit("message.start", "s1")
+    clock[0] += turn_alive.TURN_ALIVE_INTERVAL_S
+    assert turn_alive.tick() == 1
+
+
+def test_a_turn_finishing_mid_tick_gets_no_late_frame(sessions, monkeypatch):
+    """The ticker found the session due, then the turn thread sent message.complete and cleared running before
+    the frame went out: nothing may follow the terminal frame on the wire."""
+    sessions["s1"] = _session()
+    turn_alive.tick(0.0)
+    activity = turn_alive._activity
+
+    def finish_while_building_the_frame(session):
+        server._emit("message.complete", "s1", {"text": "done", "status": "complete"})
+        session["running"] = False
+        return activity(session)
+
+    monkeypatch.setattr(turn_alive, "_activity", finish_while_building_the_frame)
+
+    assert turn_alive.tick(turn_alive.TURN_ALIVE_INTERVAL_S) == 0
+    types = [f["params"]["type"] for f in sessions["s1"]["transport"].frames]
+    assert types == ["message.complete"]
 
 
 def test_payload_matches_the_contract(sessions, monkeypatch):

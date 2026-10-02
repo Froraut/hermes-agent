@@ -21,7 +21,8 @@ import {
   SESSION_WATCHDOG_TIMEOUT_MS,
   type SessionTileDelegate,
   setLiveTurnBackend,
-  setSessionTileDelegate
+  setSessionTileDelegate,
+  UNACCEPTED_TURN_GRACE_MS
 } from './session-states'
 
 vi.mock('@/store/gateway', async importActual => ({
@@ -303,13 +304,16 @@ describe('live turn event silence', () => {
     // the session idle (or not at all), exactly like the snapshot rule in
     // rehydrateLiveSessionStatuses. Ending it would arm a Retry for a prompt
     // that may still start.
-    publishSessionState('rt-queued', state({ awaitingResponse: true, busy: true, storedSessionId: 's-queued' }))
+    publishSessionState(
+      'rt-queued',
+      state({ awaitingResponse: true, busy: true, storedSessionId: 's-queued', turnStartedAt: Date.now() })
+    )
     const request = backend(async () => listing('rt-queued', 'idle'))
     noteSessionEvent('rt-queued')
 
-    await vi.advanceTimersByTimeAsync(SILENCE_MS * 2)
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
 
-    expect(request).toHaveBeenCalledTimes(2)
+    expect(request).toHaveBeenCalledTimes(1)
     expect($workingSessionIds.get()).toContain('s-queued')
     expect(card('rt-queued')).toBeUndefined()
 
@@ -319,6 +323,51 @@ describe('live turn event silence', () => {
     await vi.advanceTimersByTimeAsync(SILENCE_MS)
 
     expect($workingSessionIds.get()).not.toContain('s-queued')
+  })
+
+  it('stops the turn clock under a finished reply when a re-arm is never taken up', async () => {
+    // The stuck clock: the reply settled, then busy was armed again
+    // optimistically with no event after it, and the backend never accepted a
+    // turn. Rehydration keeps such an arm busy (awaitingResponse with no
+    // payload), the unaccepted-turn hold kept it on every idle answer, and with
+    // no event nothing even asked — the clock ran under the reply for good.
+    const reply: ClientSessionState['messages'] = [
+      { id: 'u1', parts: [textPart('run wave 4')], role: 'user' },
+      { id: 'a1', parts: [textPart('Wave 4 complete.')], pending: false, role: 'assistant' }
+    ]
+
+    $activeSessionId.set('rt-rearmed')
+    const request = backend(async () => listing('rt-rearmed', 'idle'))
+    publishSessionState(
+      'rt-rearmed',
+      state({
+        awaitingResponse: true,
+        busy: true,
+        messages: reply,
+        storedSessionId: 's-rearmed',
+        turnStartedAt: Date.now()
+      })
+    )
+
+    // Inside the hold the backend is asked, and the arm is kept.
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
+    expect(request).toHaveBeenCalledTimes(1)
+    expect($workingSessionIds.get()).toContain('s-rearmed')
+
+    // Past it, idle is the answer: the turn settles, the reply stays, no card.
+    await vi.advanceTimersByTimeAsync(UNACCEPTED_TURN_GRACE_MS)
+
+    const settled = $sessionStates.get()['rt-rearmed']!
+    expect(settled.busy).toBe(false)
+    expect(settled.awaitingResponse).toBe(false)
+    expect(settled.turnStartedAt).toBeNull()
+    expect($workingSessionIds.get()).not.toContain('s-rearmed')
+    expect(chatMessageText(settled.messages.at(-1)!)).toBe('Wave 4 complete.')
+    expect(card('rt-rearmed')).toBeUndefined()
+
+    // And it stays settled: eighteen minutes later nothing has brought it back.
+    await vi.advanceTimersByTimeAsync(18 * 60_000)
+    expect($sessionStates.get()['rt-rearmed']?.busy).toBe(false)
   })
 
   it('stamps the runtime id on the no-reply card for the copied error details', async () => {

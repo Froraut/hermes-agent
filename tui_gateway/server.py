@@ -666,6 +666,8 @@ def write_json(obj: dict) -> bool:
         project_room_member_activity(obj, _sessions)
         sid = ((params or {}).get("session_id")) if isinstance(params, dict) else ""
         if sid and (t := (_sessions.get(sid) or {}).get("transport")) is not None:
+            if obj.get("method") == "event":
+                turn_alive.note_frame(sid, params.get("type"))
             written = t.write(obj)
             if written:
                 # Recorded here rather than in _emit: a compute host's relayed frames and server→client

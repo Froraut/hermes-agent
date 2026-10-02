@@ -34,6 +34,11 @@ _RUNNING_STATUSES = frozenset({"working", "starting"})
 _lock = threading.Lock()
 # sid -> monotonic time of the last event frame emitted for it (or of the first tick that saw it running).
 _last_emit: dict[str, float] = {}
+# Sessions whose turn already sent ``message.complete`` (no ``message.start`` since). ``running`` stays True a
+# little past the terminal frame (goal judge, loop hooks, follow-up scheduling in ``_run_prompt_submit``), and a
+# frame sent in that window would tell a client a turn it has just settled is still going.
+_ended: set[str] = set()
+_TURN_START, _TURN_END = "message.start", "message.complete"
 _started = False
 
 
@@ -43,6 +48,20 @@ def note_emit(sid: str) -> None:
     if sid:
         with _lock:
             _last_emit[sid] = time.monotonic()
+
+
+def note_frame(sid: str, event: object) -> None:
+    """Track turn boundaries from the frames themselves (``server.write_json`` calls this BEFORE writing a session
+    frame, so a tick racing the terminal frame already sees the turn as over): ``message.complete`` ends the
+    turn's liveness, ``message.start`` begins the next one."""
+    if not sid or event not in (_TURN_START, _TURN_END):
+        return
+    with _lock:
+        if event == _TURN_END:
+            _ended.add(sid)
+            _last_emit.pop(sid, None)
+        else:
+            _ended.discard(sid)
 
 
 def _activity(session: dict) -> dict:
@@ -90,10 +109,14 @@ def tick(now: float | None = None) -> int:
     due: list[tuple[str, dict, str, float]] = []
     with _lock:
         running_ids = {sid for sid, _session, _status in running}
-        # Forget sessions that stopped running or left: a later turn counts its quiet afresh.
+        # Forget sessions that stopped running or left: a later turn counts its quiet afresh (and is no longer
+        # the turn that ended, even if its own message.start was muted).
         for stale in [sid for sid in _last_emit if sid not in running_ids]:
             _last_emit.pop(stale, None)
+        _ended.intersection_update(running_ids)
         for sid, session, status in running:
+            if sid in _ended:
+                continue
             # A turn first seen here counts its quiet from now, not from an event before it started.
             quiet = now - _last_emit.setdefault(sid, now)
             if quiet >= TURN_ALIVE_INTERVAL_S:
@@ -104,6 +127,11 @@ def tick(now: float | None = None) -> int:
     sent = 0
     for sid, session, status, quiet in due:
         payload = {"status": status, "quiet_s": round(quiet, 1), **_activity(session)}
+        # Re-checked at the last moment: the turn may have finished since the snapshot above.
+        with _lock:
+            ended = sid in _ended
+        if ended or (status == "working" and not session.get("running")):
+            continue
         try:
             if server._emit("turn.alive", sid, payload):
                 sent += 1
