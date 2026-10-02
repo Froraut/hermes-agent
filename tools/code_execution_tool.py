@@ -216,8 +216,11 @@ def json_parse(text):
     or web_extract() that may contain raw tabs/newlines in strings,
     or from tools/files that prepend a UTF-8 BOM (salvage #57870, credit @woxinwuhen713-bit).
     Pass a whole terminal result dict to reject truncated previews before parsing.
+    A bare result["output"] string is rejected too when it carries the head/tail
+    truncation notice (raw newlines around it: never inside valid strict JSON).
     For large JSON, redirect the command to a file and parse it on the same
     backend; read_file content includes line numbers."""
+    import re as _re
     if isinstance(text, dict):
         if text.get("output_truncated") or text.get("full_output_path"):
             raise ValueError(
@@ -226,6 +229,14 @@ def json_parse(text):
                 "the command to a file and parse it there."
             )
         text = text["output"]
+    if isinstance(text, str) and _re.search(
+            r"\\n\\n\\.\\.\\. \\[[A-Z][A-Z ]* TRUNCATED - [0-9,]+ [a-z]+ omitted out of [0-9,]+ total\\] \\.\\.\\.\\n\\n",
+            text):
+        raise ValueError(
+            "Text contains a terminal truncation notice; it is a display preview, not complete JSON. "
+            "Retrieve complete output when available, or redirect "
+            "the command to a file and parse it there."
+        )
     if isinstance(text, str) and text.startswith("\ufeff"):
         text = text[1:]
     return json.loads(text, strict=False)
@@ -931,7 +942,8 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
         f"{cwd_note}\n\n"
         "Helpers require imports: `from hermes_tools import json_parse, shell_quote, retry`. "
         "json_parse(text_or_result) — tolerant JSON parsing; pass the whole terminal() "
-        "result to reject truncated previews; shell_quote(s) — shlex.quote for "
+        "result to reject truncated previews (a bare output string carrying the truncation "
+        "notice is rejected too); shell_quote(s) — shlex.quote for "
         "dynamic shell args; retry(fn, max_attempts=3, delay=2) — exponential backoff."
     )
     return {
