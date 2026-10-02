@@ -236,12 +236,21 @@ test('a deliberate stop fences recovery until physical shutdown completes', asyn
 
 test('a failed shutdown keeps recovery fenced until an explicit stop retry succeeds', async () => {
   const state = createBackendConnectionState<Child, unknown>()
-  const latch = createBackendExitRecoveryLatch()
+  const latch = createBackendExitRecoveryLatch({ maxRespawns: 1 })
+  const empty = { hasCurrentOwner: false, hasPendingStart: false, intentionalTeardown: false }
+  assert.equal(latch.claim(empty), true)
+  latch.reset()
+  assert.equal(latch.claim(empty), false)
+  assert.equal(latch.isCrashLooping(), true)
   state.attachProcess(state.startAttempt(), { pid: 100 })
   await assert.rejects(state.stopProcess(async () => { throw new Error('still alive') }), /still alive/)
   const recoveryState = () => slotState(state, { intentionalTeardown: state.isStopping() })
   assert.equal(latch.claim(recoveryState()), false)
+  assert.equal(latch.isCrashLooping(), false, 'a deliberate stop must not reuse a stale crash-loop verdict')
   assert.throws(() => state.startAttempt(), /previous backend has not stopped/)
   await state.stopProcess(async () => {})
-  assert.equal(latch.claim(recoveryState()), true)
+  assert.equal(latch.claim(recoveryState()), false)
+  assert.equal(latch.isCrashLooping(), true, 'genuine recovery still respects the spent budget')
+  assert.equal(latch.retryAfterFailedStart({ ...empty, intentionalTeardown: true }), false)
+  assert.equal(latch.isCrashLooping(), false, 'failed-start recovery also ignores a deliberate transition')
 })
