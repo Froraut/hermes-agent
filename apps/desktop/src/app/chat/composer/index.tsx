@@ -31,6 +31,7 @@ import { sessionCompacting } from '@/store/compaction'
 import { browseBackward, browseForward, deriveUserHistory, isBrowsingHistory } from '@/store/composer-input-history'
 import { POPOUT_WIDTH_REM } from '@/store/composer-popout'
 import { parkQueuedPrompts, removeQueuedPrompt, unparkQueuedPrompts } from '@/store/composer-queue'
+import { $daybreakModelChoices, daybreakSelectionFor } from '@/store/daybreak'
 import { $runningDaybreak } from '@/store/daybreak-running'
 import { $hudMode } from '@/store/hud'
 import { $showsAdvancedChrome } from '@/store/interface-mode'
@@ -209,6 +210,8 @@ export function ChatBar({
   const blockingPrompt = useStore(useMemo(() => sessionBlockingPrompt(sessionId ?? null), [sessionId]))
   const activeQueueSessionKey = queueSessionKey || sessionId || freshDraftKey || null
   const runningDaybreak = Boolean(useStore($runningDaybreak)[activeQueueSessionKey ?? ''])
+  useStore($daybreakModelChoices)
+  const requestedDaybreak = daybreakSelectionFor(activeQueueSessionKey, sessionId)
   const { collapsed: statusDrawerCollapsed, toggle: toggleStatusDrawer } = useStatusDrawer(activeQueueSessionKey)
   const statusDrawerId = useId()
   const codingDrawerId = useId()
@@ -1369,6 +1372,7 @@ export function ChatBar({
                     onSendNow={id => void sendQueuedNow(id)}
                     onSteerNow={id => void steerQueuedNow(id)}
                     parked={queueParked}
+                    requestedDaybreak={requestedDaybreak}
                     runningDaybreak={runningDaybreak}
                   />
                 ) : null

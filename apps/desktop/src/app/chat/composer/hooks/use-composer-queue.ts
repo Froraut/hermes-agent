@@ -307,7 +307,7 @@ export function useComposerQueue({
     triggerHaptic('selection')
 
     return true
-  }, [activeQueueSessionKey, attachments, clearDraft, draftRef, scope.attachments, t.composer])
+  }, [activeQueueSessionKey, attachments, clearDraft, draftRef, scope.attachments, t.composer, t.desktop])
 
   // All queue drain paths share one lock + send-then-remove sequence.
   // `pickEntry` lets each caller choose head, by-id, or skip-edited, from the
@@ -472,7 +472,7 @@ export function useComposerQueue({
 
       return true
     },
-    [activeQueueSessionKey, busy, onSteer, queueEditRef, runningDaybreak, t.composer]
+    [activeQueueSessionKey, busy, onSteer, queueEditRef, runningDaybreak, sessionId, t.composer]
   )
 
   // Double-Enter while busy. The entry usually sits in the queue because the
@@ -488,7 +488,13 @@ export function useComposerQueue({
     async (id: string) => {
       const entry = activeQueueSessionKey ? getQueuedPrompts(activeQueueSessionKey).find(e => e.id === id) : undefined
 
-      if (!busy || !entry || entry.displayKind || entry.displayText || !isSteerableEntry(entry, runningDaybreak, daybreakSelectionFor(activeQueueSessionKey, sessionId))) {
+      if (
+        !busy ||
+        !entry ||
+        entry.displayKind ||
+        entry.displayText ||
+        !isSteerableEntry(entry, runningDaybreak, daybreakSelectionFor(activeQueueSessionKey, sessionId))
+      ) {
         return sendQueuedNow(id)
       }
 
@@ -506,7 +512,7 @@ export function useComposerQueue({
         (busyRef.current && getQueuedPrompts(activeQueueSessionKey!).some(e => e.id === id) && sendQueuedNow(id))
       )
     },
-    [activeQueueSessionKey, busy, runningDaybreak, sendQueuedNow, steerQueuedNow]
+    [activeQueueSessionKey, busy, runningDaybreak, sendQueuedNow, sessionId, steerQueuedNow]
   )
 
   // Edge-independent auto-drain: send the head whenever the session is idle and

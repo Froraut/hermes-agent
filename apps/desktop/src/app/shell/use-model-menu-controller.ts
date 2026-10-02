@@ -30,10 +30,10 @@ import { $defaultDaybreak, $defaultReasoningEffort, markComposerSelectionManual 
 import type { ModelMenuController } from './model-catalog-menu'
 
 const UNKNOWN_SERVICE_TIER = atom('')
-const optionEdits = new Map<string, number>()
+const optionEdits = new Map<string, symbol>()
 
 const nextEdit = (key: string) => {
-  const revision = (optionEdits.get(key) ?? 0) + 1
+  const revision = Symbol(key)
   optionEdits.set(key, revision)
 
   return revision
@@ -164,6 +164,18 @@ export function useModelMenuController({
           })
         }
       }
+    }).finally(() => {
+      // A settled request only releases its own stamps; a newer writer keeps
+      // its identity, even when another session edits the same model preset.
+      for (const stamp of stamps.values()) {
+        if (optionEdits.get(stamp.ownerKey) === stamp.owner) {
+          optionEdits.delete(stamp.ownerKey)
+        }
+
+        if (optionEdits.get(stamp.presetKey) === stamp.preset) {
+          optionEdits.delete(stamp.presetKey)
+        }
+      }
     })
   }
 
@@ -172,8 +184,10 @@ export function useModelMenuController({
     // cannot inherit an explicit choice made for another model.
     daybreakFor: row => ({
       required: daybreakOnlyModel(row.model),
-      checked: daybreakOnlyModel(row.model) ||
-        (daybreakModelChoiceFor(storedSessionId, modelPresetKey(row.provider, row.model), activeSessionId) ?? defaultDaybreak)
+      checked:
+        daybreakOnlyModel(row.model) ||
+        (daybreakModelChoiceFor(storedSessionId, modelPresetKey(row.provider, row.model), activeSessionId) ??
+          defaultDaybreak)
     }),
     setDaybreak: (enabled, row) => {
       setDaybreakModelChoice(storedSessionId, modelPresetKey(row.provider, row.model), enabled, activeSessionId)
@@ -203,11 +217,7 @@ export function useModelMenuController({
     // scopes the switch to that session; with none it's UI state shipped on the
     // next session.create. Always stamp sessionId from this surface so a tile
     // switch never hits the primary (busy) session by accident.
-    select: (model, provider) => {
-      nextEdit(`${hostScope}::${activeSessionId ?? 'draft'}::daybreak-intent`)
-
-      return onSelectModel({ model, provider, sessionId: activeSessionId || null })
-    },
+    select: (model, provider) => onSelectModel({ model, provider, sessionId: activeSessionId || null }),
 
     setOptions: (patch, row) => {
       // Editing always records the model's global preset (keyed by

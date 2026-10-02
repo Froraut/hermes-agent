@@ -1051,7 +1051,9 @@ function ModelFamilyRow({
   // on a row whose remembered preset chose one.
   const settings = [
     fastControl.kind !== 'none' && fastControl.on && !(fastControl.kind === 'param' && fastControl.canEnable === false)
-      ? effTier === 'ultrafast' ? t.shell.modelOptions.ultrafast : copy.fast
+      ? effTier === 'ultrafast'
+        ? t.shell.modelOptions.ultrafast
+        : copy.fast
       : null,
     (caps?.reasoning ?? true) && (isCurrent ? !current.effortPending : Boolean(effEffort))
       ? reasoningEffortLabel(effEffort || defaultEffort, isCurrent ? current.effortWire : undefined)

@@ -46,7 +46,6 @@ it('keeps an unselected model row choice in its conversation until the draft is 
   expect(daybreakModelChoiceFor('stored-1', 'openai-codex::gpt-6-luna')).toBe(true)
 })
 
-
 it('keeps model choices independent across switches and restores the original model choice', () => {
   $currentProvider.set('openai-codex')
   $currentModel.set('gpt-6-sol')

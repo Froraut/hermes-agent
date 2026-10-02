@@ -580,9 +580,16 @@ describe('isSteerableEntry and the running turn program', () => {
   })
 })
 
-
-it('never persists a model Daybreak choice with queued content', () => {
-  const entry = enqueueQueuedPrompt('daybreak-queue', { attachments: [], text: 'review' })!
-  updateQueuedPrompt('daybreak-queue', entry.id, { text: 'updated review' })
-  expect(JSON.parse(window.localStorage.getItem(QUEUE_STORAGE_KEY)! )['daybreak-queue'][0]).not.toHaveProperty('daybreakEnabled')
+it('removes legacy model Daybreak choices when queued content is saved again', () => {
+  window.localStorage.setItem(
+    QUEUE_STORAGE_KEY,
+    JSON.stringify({
+      'daybreak-queue': [{ id: 'legacy-entry', text: 'review', attachments: [], queuedAt: 1, daybreakEnabled: true }]
+    })
+  )
+  simulateComposerQueueReloadForTests()
+  expect(updateQueuedPrompt('daybreak-queue', 'legacy-entry', { text: 'updated review' })).toBe(true)
+  const entry = JSON.parse(window.localStorage.getItem(QUEUE_STORAGE_KEY)!)['daybreak-queue'][0]
+  expect(entry.text).toBe('updated review')
+  expect(entry).not.toHaveProperty('daybreakEnabled')
 })

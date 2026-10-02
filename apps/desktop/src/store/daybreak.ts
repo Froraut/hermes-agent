@@ -1,7 +1,15 @@
 import { atom } from 'nanostores'
 
 import { $activeGatewayProfile, resolveNewChatOwnerRoute } from '@/store/profile'
-import { $activeSessionId, $connection, $currentModel, $currentProvider, $selectedStoredSessionId, $sessions, resolveComposerSessionKey } from '@/store/session'
+import {
+  $activeSessionId,
+  $connection,
+  $currentModel,
+  $currentProvider,
+  $selectedStoredSessionId,
+  $sessions,
+  resolveComposerSessionKey
+} from '@/store/session'
 import { $sessionStates } from '@/store/session-states'
 
 // Daybreak is a choice for a conversation, not a credential. Explicit choices
@@ -33,8 +41,15 @@ export const daybreakKeyFor = (storedSessionId: null | string, runtimeId?: null 
 
 function currentModelKey(storedSessionId: null | string, runtimeId?: null | string): string {
   const states = $sessionStates.get()
-  const state = (runtimeId ? states[runtimeId] : undefined) ??
-    Object.values(states).find(row => row.storedSessionId === storedSessionId && storedSessionId !== null)
+
+  const state =
+    (runtimeId ? states[runtimeId] : undefined) ??
+    Object.values(states).find(
+      row =>
+        storedSessionId !== null &&
+        row.storedSessionId &&
+        daybreakKeyFor(row.storedSessionId) === daybreakKeyFor(storedSessionId)
+    )
 
   if (state) {
     return `${state.provider}::${state.model}`
@@ -45,14 +60,17 @@ function currentModelKey(storedSessionId: null | string, runtimeId?: null | stri
   return storedSessionId === null || daybreakKeyFor(storedSessionId, runtimeId) === primaryKey
     ? `${$currentProvider.get()}::${$currentModel.get()}`
     : '::'
-
 }
 
 export function daybreakSelectionFor(storedSessionId: null | string, runtimeId?: null | string): boolean | undefined {
   return daybreakModelChoiceFor(storedSessionId, currentModelKey(storedSessionId, runtimeId), runtimeId)
 }
 
-export function setDaybreakSelection(storedSessionId: null | string, enabled: boolean, runtimeId?: null | string): void {
+export function setDaybreakSelection(
+  storedSessionId: null | string,
+  enabled: boolean,
+  runtimeId?: null | string
+): void {
   setDaybreakModelChoice(storedSessionId, currentModelKey(storedSessionId, runtimeId), enabled, runtimeId)
 }
 
@@ -107,5 +125,4 @@ export function adoptDraftDaybreakSelection(storedSessionId: string, sourceDraft
     const { [sourceDraftKey]: draftChoices, ...restChoices } = choices
     $daybreakModelChoices.set({ ...restChoices, [storedSessionId]: { ...choices[storedSessionId], ...draftChoices } })
   }
-
 }

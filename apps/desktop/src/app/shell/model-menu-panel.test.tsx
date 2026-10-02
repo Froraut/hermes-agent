@@ -211,10 +211,12 @@ describe('ModelMenuPanel current selection', () => {
         }
       ]
     })
-    renderPanel(vi.fn(selection => {
-      $currentModel.set(selection.model)
-      $currentProvider.set(selection.provider)
-    }))
+    renderPanel(
+      vi.fn(selection => {
+        $currentModel.set(selection.model)
+        $currentProvider.set(selection.provider)
+      })
+    )
     const luna = await screen.findByRole('menuitem', { name: /GPT-6-luna/ })
     fireEvent.pointerMove(luna, { pointerType: 'mouse' })
     const daybreak = await screen.findByRole('switch', { name: 'Daybreak' })
@@ -250,10 +252,12 @@ describe('ModelMenuPanel current selection', () => {
         }
       ]
     })
-    renderPanel(vi.fn(selection => {
-      $currentModel.set(selection.model)
-      $currentProvider.set(selection.provider)
-    }))
+    renderPanel(
+      vi.fn(selection => {
+        $currentModel.set(selection.model)
+        $currentProvider.set(selection.provider)
+      })
+    )
     const sol = await screen.findByRole('menuitem', { name: /GPT-6-sol/ })
     fireEvent.pointerMove(sol, { pointerType: 'mouse' })
     const daybreak = await screen.findByRole('switch', { name: 'Daybreak' })
