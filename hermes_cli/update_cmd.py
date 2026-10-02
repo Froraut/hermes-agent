@@ -187,8 +187,10 @@ def _map_ssl_cert_file_for_git(git_cmd) -> None:
     bundle = os.environ.get("SSL_CERT_FILE")
     if not bundle or os.environ.get("GIT_SSL_CAINFO"):
         return
-    configured = _git_run(git_cmd, ["config", "--get", "http.sslCAInfo"])
-    if configured.returncode == 0 and configured.stdout.strip():
+    configured = _check._git(git_cmd, _m().PROJECT_ROOT, ["config", "--get", "http.sslCAInfo"])
+    # Exit 1 proves the key is unset. A configured empty value or a config error
+    # must not be treated as permission to override a deliberate Git CA setting.
+    if configured.returncode != 1:
         return
     os.environ["GIT_SSL_CAINFO"] = bundle
 
@@ -309,15 +311,9 @@ def _heal_stale_shallow_checkout(repo_root: Path, branch: str) -> None:
 def _capture_head_sha(git_cmd, cwd) -> str | None:
     """Return the current HEAD SHA, or None if it can't be resolved."""
     try:
-        result = subprocess.run(
-            git_cmd + ["rev-parse", "HEAD"],
-            cwd=cwd,
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            check=True,
-        )
+        result = _check._git(git_cmd, cwd, ["rev-parse", "HEAD"], check=True)
         return result.stdout.strip() or None
-    except (subprocess.CalledProcessError, OSError):
+    except (subprocess.SubprocessError, OSError):
         return None
 
 
@@ -655,35 +651,44 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False, ch
     # The check fetches over HTTPS too; give git the same CA bundle Python
     # uses, or --check fails where the apply path succeeds (see
     # _map_ssl_cert_file_for_git).
-    _map_ssl_cert_file_for_git(git_cmd)
-    _check.clear_git_debris(root)
+    try:
+        _map_ssl_cert_file_for_git(git_cmd)
+        _check.clear_git_debris(root)
 
-    selected_channel = _source_update_channel(channel=channel, branch_explicit=branch_explicit)
-    if not branch_explicit:
-        branch = _check.channel_compare_branch(selected_channel, git_cmd, root)
-        if branch is None:
-            return
+        selected_channel = _source_update_channel(channel=channel, branch_explicit=branch_explicit)
+        if not branch_explicit:
+            branch = _check.channel_compare_branch(selected_channel, git_cmd, root)
+            if branch is None:
+                return
 
-    # Installer checkouts are shallow (`git clone --depth 1`). A plain fetch would unshallow
-    # the repo (the exact cost the shallow clone avoided) and rev-list would then report a
-    # huge bogus "behind" count, so fetch with --depth 1 and report presence-only.
-    is_shallow = _check.is_shallow_repository(git_cmd, root)
-    fetch_result, compare_branch = _check.fetch_compare_branch(
-        git_cmd, root, branch, ["--depth", "1"] if is_shallow else [],
-    )
-    if fetch_result.returncode != 0:
-        _print_fetch_failure(fetch_result.stderr)
+        # Installer checkouts are shallow (`git clone --depth 1`). A plain fetch would unshallow
+        # the repo (the exact cost the shallow clone avoided) and rev-list would then report a
+        # huge bogus "behind" count, so fetch with --depth 1 and report presence-only.
+        is_shallow = _check.is_shallow_repository(git_cmd, root)
+        fetch_result, compare_branch = _check.fetch_compare_branch(
+            git_cmd, root, branch, ["--depth", "1"] if is_shallow else [],
+        )
+        if fetch_result.returncode != 0:
+            _print_fetch_failure(fetch_result.stderr)
+            sys.exit(1)
+        if is_shallow:
+            _check.repair_shallow_grafts(root)
+
+        if not _check.compare_ref_exists(git_cmd, root, compare_branch):
+            print(f"✗ Branch '{branch}' not found on {compare_branch.split('/', 1)[0]}.")
+            sys.exit(1)
+        if is_shallow:
+            _check.report_shallow_verdict(git_cmd, root, compare_branch)
+        else:
+            _check.report_rev_list_verdict(git_cmd, root, compare_branch)
+    except subprocess.TimeoutExpired as exc:
+        operation = exc.cmd[len(git_cmd)]
+        print(f"✗ Could not check for updates: git {operation} timed out after {exc.timeout:g}s.")
         sys.exit(1)
-    if is_shallow:
-        _check.repair_shallow_grafts(root)
-
-    if not _check.compare_ref_exists(git_cmd, root, compare_branch):
-        print(f"✗ Branch '{branch}' not found on {compare_branch.split('/', 1)[0]}.")
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = (getattr(exc, "stderr", None) or str(exc)).strip()
+        print(f"✗ Could not check for updates: {detail}")
         sys.exit(1)
-    if is_shallow:
-        _check.report_shallow_verdict(git_cmd, root, compare_branch)
-    else:
-        _check.report_rev_list_verdict(git_cmd, root, compare_branch)
 
 
 def _base_git_cmd() -> list[str]:

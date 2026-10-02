@@ -14,14 +14,31 @@ from typing import Any
 
 
 def _git(git_cmd: list[str], root: Path, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-    from hermes_cli._subprocess_compat import windows_hide_flags
-    # Callers pass **_no_prompt_git_kwargs() which already carries creationflags;
-    # OR the hide flag into the shared kwargs instead of passing the keyword twice.
-    kwargs["creationflags"] = kwargs.get("creationflags", 0) | windows_hide_flags()
-    return subprocess.run(
-        git_cmd + args, cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        **kwargs,
+    from hermes_cli._subprocess_compat import NO_LAZY_FETCH_ENV, bounded_probe_run
+
+    network = args[0] == "fetch"
+    timeout = kwargs.pop("timeout", _uc().NETWORK_GIT_TIMEOUT_SECONDS if network else 10)
+    check = kwargs.pop("check", False)
+    env = kwargs.pop("env", None)
+    if env is None:
+        env = _uc()._no_prompt_git_kwargs()["env"]
+    if not network:
+        # Inspecting local refs/history must not start an implicit promisor fetch.
+        env = {**env, **NO_LAZY_FETCH_ENV}
+    # The bounded runner owns hidden windows, DEVNULL stdin, and the process tree.
+    kwargs.pop("creationflags", None)
+    kwargs.pop("stdin", None)
+    if kwargs:
+        raise TypeError(f"Unsupported Git check options: {', '.join(kwargs)}")
+    result = bounded_probe_run(
+        git_cmd + args, cwd=root, timeout=timeout, env=env, raise_on_spawn_failure=True,
     )
+    if result is None:
+        # Do not mistake a failed local probe for 'not shallow' or 'branch missing'.
+        raise subprocess.TimeoutExpired(git_cmd + args, timeout)
+    if check:
+        result.check_returncode()
+    return result
 
 
 def _uc():
@@ -36,8 +53,8 @@ def clear_git_debris(root: Path) -> None:
     A crashed fetch can leave ``.git/shallow.lock`` (or another lock) behind, and every later
     fetch then fails with "File exists". Aborted fetches on flaky lines also strand
     ``tmp_pack_*`` debris: unchecked it reached 6 GB and corrupted the pack dir (#93732).
-    A partial clone's on-demand fetches also strand one small packfile each — fold those
-    back in (#129712).
+    Pack consolidation is deferred to the apply path: asking whether an update exists must
+    not wait for a potentially 20-minute repack (#129712).
     """
     from hermes_cli.gitlock import clear_stale_git_locks, clear_stale_tmp_packs
 
@@ -46,7 +63,6 @@ def clear_git_debris(root: Path) -> None:
     swept = clear_stale_tmp_packs(root)
     if swept:
         print(f"  (removed {len(swept)} aborted-fetch pack temp file(s))")
-    fold_lazy_fetch_packs(root)
 
 
 def fold_lazy_fetch_packs(root: Path) -> None:
@@ -81,7 +97,11 @@ def channel_compare_branch(selected_channel: str, git_cmd: list[str], root: Path
         return target.branch
     if target.retired:
         print(f"→ {selected_channel} retired; source destination: {target.channel}")
-    if _uc()._capture_head_sha(git_cmd, root) == target.commit:
+    installed_commit = _uc()._capture_head_sha(git_cmd, root)
+    if installed_commit is None:
+        print("✗ Could not read the installed source commit to check for updates.")
+        sys.exit(1)
+    if installed_commit == target.commit:
         print(f"✓ Up to date with the latest release ({target.label}).")
     else:
         print(f"→ Selected release available: {target.label}")

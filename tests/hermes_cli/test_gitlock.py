@@ -340,18 +340,28 @@ def test_non_partial_checkout_is_left_alone(repo: Path) -> None:
     assert keys == "", "a full clone keeps git's stock maintenance"
 
 
-def test_update_debris_cleanup_folds_and_reports_a_fold_that_runs_out_of_time(
-        partial_clone: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]) -> None:
-    """A killed fold restarts from scratch every update, so it must say so instead of returning 0."""
+def test_update_check_defers_folding_but_apply_still_folds_and_reports_timeouts(
+        partial_clone: Path, no_git_running: None,
+        monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]) -> None:
+    """Checking cleans required debris without repacking; applying keeps the real fold/retry."""
     from hermes_cli import gitlock
-    from hermes_cli.update_cmd_check import clear_git_debris
+    from hermes_cli.update_cmd_check import clear_git_debris, fold_lazy_fetch_packs
 
     before = len(_packs(partial_clone))
+    stale_lock = partial_clone / ".git" / "shallow.lock"
+    abandoned_pack = partial_clone / ".git" / "objects" / "pack" / "tmp_pack_abandoned"
+    _touch(stale_lock, STALE_LOCK_MIN_AGE_SECONDS + 60)
+    _touch(abandoned_pack, gitlock.STALE_TMP_PACK_MIN_AGE_SECONDS + 60)
+    clear_git_debris(partial_clone)
+    assert not stale_lock.exists() and not abandoned_pack.exists()
+    assert len(_packs(partial_clone)) == before, "discovery must leave the optional repack for apply"
+    assert "Folding" not in capfd.readouterr().out
+
     with monkeypatch.context() as patched:
         patched.setattr(gitlock, "LAZY_FETCH_GC_TIMEOUT_SECONDS", 0)  # the real gc, killed by the real bound
-        clear_git_debris(partial_clone)
+        fold_lazy_fetch_packs(partial_clone)
     out = capfd.readouterr().out
     assert f"Folding {before} lazy-fetch packs" in out and "gc.writeCommitGraph=false gc --auto" in out
 
-    clear_git_debris(partial_clone)
+    fold_lazy_fetch_packs(partial_clone)
     assert len(_packs(partial_clone)) < before
