@@ -38,6 +38,9 @@ def pages(tmp_path, monkeypatch):
             if self.path == "/challenge":
                 self.wfile.write(b"<title>Just a moment</title><main>Verify you are human " + b"Please wait. " * 20 + b"</main>")
                 return
+            if self.path == "/nested":
+                self.wfile.write(b"<div>" * 257 + b"Public content. " * 20 + b"</div>" * 257)
+                return
             self.wfile.write(b"<html><head><title>Public article</title></head><body><nav>Menu</nav><main><h1>Onboarding</h1><p>" + b"Public help article details. " * 10 + b"</p></main><script>bad()</script></body></html>")
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -113,3 +116,16 @@ def test_http_refusal_and_redirect_policy_do_not_fetch_blocked_content(pages, mo
         result = json.loads(asyncio.run(wt.web_extract_tool([origin + "/managed-or-cloud"])))["results"][0]
         assert result.get("error") and not result["content"]
     assert hits == ["/redirect", "/challenge"]
+
+
+def test_deeply_nested_html_is_refused(pages, monkeypatch):
+    origin, hits = pages
+
+    class Scraper:
+        def scrape(self, **kwargs):
+            raise ConnectionError("self-hosted scraper connection refused")
+
+    monkeypatch.setattr(firecrawl, "_get_firecrawl_client", Scraper)
+    result = json.loads(asyncio.run(wt.web_extract_tool([origin + "/nested"])))["results"][0]
+    assert result.get("error") and not result["content"]
+    assert hits == ["/nested"]

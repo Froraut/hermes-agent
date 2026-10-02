@@ -14,6 +14,7 @@ from tools.website_policy import check_website_access
 
 _MAX_BYTES = 2 * 1024 * 1024
 _TIMEOUT = 20.0
+_MAX_HTML_DEPTH = 256
 _SKIP = {"script", "style", "noscript", "nav", "header", "footer", "svg", "template"}
 _BLOCKS = {"p", "div", "section", "article", "main", "li", "br", "h1", "h2", "h3", "h4", "pre", "tr"}
 _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
@@ -33,6 +34,8 @@ class _PageText(HTMLParser):
         if tag in _BLOCKS:
             self.handle_data("\n")
         if tag not in _VOID:
+            if len(self.stack) >= _MAX_HTML_DEPTH:
+                raise ValueError("HTML nesting exceeds direct extraction limit")
             self.stack.append(tag)
 
     def handle_endtag(self, tag):
