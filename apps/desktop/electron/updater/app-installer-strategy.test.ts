@@ -17,7 +17,7 @@ function makeDeps(over: Partial<AppInstallerStrategyDeps> = {}): StrategyFixture
 
   const deps: AppInstallerStrategyDeps = {
     python: 'python.exe',
-    script: 'check.py',
+    module: 'check.module',
     run: async () => ({ code: 0, stdout: '{"available": true}' }),
     channel: 'stable',
     light: false,
@@ -176,8 +176,8 @@ it.each([
   'checker %s %s → available=%s error=%s',
   async (code: number, stdout: string, available: boolean | undefined, error: string | undefined): Promise<void> => {
     const { deps }: ReturnType<typeof makeDeps> = makeDeps({
-      run: async (python: string, script: string): Promise<{ code: number; stdout: string }> => {
-        expect([python, script]).toEqual(['python.exe', 'check.py'])
+      run: async (python: string, module: string): Promise<{ code: number; stdout: string }> => {
+        expect([python, module]).toEqual(['python.exe', 'check.module'])
 
         return { code, stdout }
       }
