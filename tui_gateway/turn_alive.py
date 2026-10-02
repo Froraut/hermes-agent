@@ -18,32 +18,16 @@ import logging
 import threading
 import time
 
-from tui_gateway._env import env_float
-
 logger = logging.getLogger(__name__)
 
 EVENT = "turn.alive"
 _TICK_S = 5.0
-#: Ceiling (and default) for ``HERMES_TURN_ALIVE_S``: the env var can shorten the interval or turn the
-#: frames off, not stretch it. Desktop builds hardcode a 45 s silence window (``LIVE_TURN_EVENT_SILENCE_MS``)
-#: and do not read ``turn_alive_s``, so the frame after a lost one (2 x interval + one tick) must still land
-#: inside it; a longer interval would quietly turn every quiet window back into a ``session.active_list`` probe.
-MAX_TURN_ALIVE_INTERVAL_S = 15.0
-
-
-def _interval_from_env() -> float:
-    requested = max(0.0, env_float("HERMES_TURN_ALIVE_S", MAX_TURN_ALIVE_INTERVAL_S))
-    if requested > MAX_TURN_ALIVE_INTERVAL_S:
-        logger.warning("HERMES_TURN_ALIVE_S=%s is above the %ss ceiling (clients' 45 s silence window); using %ss",
-                       requested, MAX_TURN_ALIVE_INTERVAL_S, MAX_TURN_ALIVE_INTERVAL_S)
-        return MAX_TURN_ALIVE_INTERVAL_S
-    return requested
-
-
 #: Quiet seconds before a running turn gets a frame; advertised as ``gateway.ready`` ``turn_alive_s``.
-#: Well inside the Desktop's 45 s silence window, so one lost frame does not cost a status check.
-#: ``HERMES_TURN_ALIVE_S=0`` turns the frames off (clients then fall back to asking ``session.active_list``).
-TURN_ALIVE_INTERVAL_S = _interval_from_env()
+#: Fixed on purpose, not a setting: Desktop builds hardcode a 45 s silence window (``LIVE_TURN_EVENT_SILENCE_MS``)
+#: and do not read ``turn_alive_s``, so the frame after a lost one (2 x interval + one tick = 35 s) must still
+#: land inside it. A longer interval would quietly turn every quiet window back into a ``session.active_list``
+#: probe, and a shorter one buys nothing a client can see.
+TURN_ALIVE_INTERVAL_S = 15.0
 _ACTIVITY_MAX_CHARS = 160
 _RUNNING_STATUSES = frozenset({"working", "starting"})
 
@@ -86,8 +70,6 @@ def tick(now: float | None = None) -> int:
     """One pass: send ``turn.alive`` to every running session quiet for the interval. Returns frames sent."""
     from tui_gateway import server
 
-    if TURN_ALIVE_INTERVAL_S <= 0:
-        return 0
     now = time.monotonic() if now is None else now
     with server._sessions_lock:
         snapshot = [(sid, s) for sid, s in server._sessions.items() if not s.get("_finalized")]
@@ -133,8 +115,6 @@ def tick(now: float | None = None) -> int:
 def ensure_started() -> None:
     """Start the ticker once per process (WS server startup; idempotent)."""
     global _started
-    if TURN_ALIVE_INTERVAL_S <= 0:
-        return
     with _lock:
         if _started:
             return

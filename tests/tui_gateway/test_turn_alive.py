@@ -207,10 +207,23 @@ def test_payload_matches_the_contract(sessions, monkeypatch):
     assert turn_alive.tick(turn_alive.TURN_ALIVE_INTERVAL_S) == 1
 
 
-@pytest.mark.parametrize("requested, used", [("60", 15.0), ("20", 15.0), ("10", 10.0), ("0", 0.0), ("-5", 0.0), ("", 15.0)])
-def test_interval_stays_inside_the_clients_silence_window(monkeypatch, requested, used):
-    """Desktop builds hardcode a 45 s silence window and never read ``turn_alive_s``: a frame after a lost
-    one (2 x interval + one tick) must still land inside it, so the env value is capped."""
-    monkeypatch.setenv("HERMES_TURN_ALIVE_S", requested)
-    assert turn_alive._interval_from_env() == used
-    assert 2 * turn_alive.MAX_TURN_ALIVE_INTERVAL_S + turn_alive._TICK_S < 45.0
+def test_interval_stays_inside_the_clients_silence_window():
+    """Desktop builds hardcode a 45 s silence window and never read ``turn_alive_s``: the frame after a lost
+    one (2 x interval + one tick) must still land inside it."""
+    assert turn_alive.TURN_ALIVE_INTERVAL_S == 15.0
+    assert 2 * turn_alive.TURN_ALIVE_INTERVAL_S + turn_alive._TICK_S < 45.0
+
+
+def test_interval_is_not_an_env_setting():
+    """Behavioural knobs belong in ``config.yaml`` (AGENTS.md), and this one is not a knob at all: a stray
+    ``HERMES_TURN_ALIVE_S`` in the environment must neither stretch nor disable the frames."""
+    import os
+    import subprocess
+    import sys
+
+    for value in ("0", "60"):
+        out = subprocess.run(
+            [sys.executable, "-c", "from tui_gateway import turn_alive; print(turn_alive.TURN_ALIVE_INTERVAL_S)"],
+            capture_output=True, text=True, check=True, env={**os.environ, "HERMES_TURN_ALIVE_S": value},
+        )
+        assert out.stdout.strip() == "15.0"
