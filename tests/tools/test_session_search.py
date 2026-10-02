@@ -1273,3 +1273,55 @@ class TestDiscoverySessionExclusion:
         excluded = json.loads(session_search(
             query="unique lineage token alpha", limit=5, exclude_session_ids=["s_child"], db=db))
         assert not {r["session_id"] for r in excluded["results"]} & {"s_root", "s_child"}
+
+
+class TestDiscoveryRecallContract:
+    """Discovery says whether rows came from FTS or the bounded canonical fallback (and its bounds)."""
+
+    def test_fts_discovery_reports_fts_source(self, db):
+        _seed_modpack_sessions(db)
+        result = json.loads(session_search(query="modpack", db=db))
+        assert result["success"] is True
+        assert result["recall"] == {"source": "fts", "truncated": False, "deadline_hit": False}
+
+    def test_canonical_fallback_discovery_is_labelled(self, db):
+        _seed_modpack_sessions(db)
+        db._fts_enabled = False
+        result = json.loads(session_search(query="modpack", db=db))
+        assert result["success"] is True and result["results"]
+        recall = result["recall"]
+        assert recall["source"] == "canonical_fallback"
+        assert recall["fallback_reason"] == "fts_unavailable"
+        assert recall["truncated"] is False and recall["deadline_hit"] is False
+        assert "not relevance" in recall["note"]
+
+    def test_canonical_fallback_miss_is_labelled_too(self, db):
+        _seed_modpack_sessions(db)
+        db._fts_enabled = False
+        result = json.loads(session_search(query="zzznothingmatches", db=db))
+        assert result["success"] is True and result["results"] == []
+        assert result["recall"]["source"] == "canonical_fallback"
+
+    def test_fallback_row_bound_is_reported(self, db, monkeypatch):
+        import tools.session_search_tool as tool
+
+        _seed_modpack_sessions(db)
+        db._fts_enabled = False
+        monkeypatch.setattr(tool, "_DISCOVER_SCAN_LIMIT", 2)
+        recall = json.loads(session_search(query="modpack", db=db))["recall"]
+        assert recall["truncated"] is True
+        assert "row limit was reached" in recall["note"]
+
+    def test_deadline_hit_is_an_explicit_failure_not_an_empty_success(self, db, monkeypatch):
+        _seed_modpack_sessions(db)
+
+        def stopped(*_a, recall_info=None, **_kw):
+            recall_info.update(source="canonical_fallback", fallback_reason="fts_stale", deadline_hit=True)
+            raise TimeoutError("canonical session search exceeded 3s deadline")
+
+        monkeypatch.setattr(db, "search_messages", stopped)
+        result = json.loads(session_search(query="modpack", db=db))
+        assert result["success"] is False
+        assert result["recall"]["deadline_hit"] is True
+        assert result["recall"]["source"] == "canonical_fallback"
+        assert "stopped early" in result["error"]

@@ -60,6 +60,10 @@ _FTS_ORDER_BY = {"newest": "ORDER BY m.timestamp DESC, rank", "oldest": "ORDER B
 # Canonical LIKE is the degraded read path when the derived index cannot be used. A
 # progress deadline keeps that full-table fallback from monopolising a large live store.
 _CANONICAL_SEARCH_TIMEOUT_SECONDS = 3.0
+# ``search_messages(recall_info=...)`` sources: callers must not read a canonical-fallback miss
+# (unranked, bounded scan) as the same "no more matches" an FTS answer means.
+RECALL_SOURCE_FTS = "fts"
+RECALL_SOURCE_CANONICAL = "canonical_fallback"
 # Indexed neighbor seeks avoid scanning whole sessions for a sparse set of hits.
 _CONTEXT_WINDOW_SQL = f"""WITH target AS (
     SELECT session_id, timestamp, id FROM messages WHERE id IN ({{ids}})
@@ -991,12 +995,13 @@ class SessionSearchMixin:
             return None
 
     def _like_rows(self, where: List[str], params: list, *, order_by: str, limit_sql: str,
-                   timeout_seconds: Optional[float] = None) -> List[Dict[str, Any]]:
+                   timeout_seconds: Optional[float] = None,
+                   recall_info: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Canonical-table LIKE scan; ``params[0]`` is the snippet anchor term.
 
         A fallback may need to scan the canonical message table, so callers can set a
         cooperative SQLite VM deadline. Timing out raises instead of manufacturing a
-        successful empty result.
+        successful empty result, after recording ``deadline_hit`` in *recall_info*.
         """
         sql = _search_select_sql(_LIKE_SNIPPET_SQL, "messages m", where, order_by, limit_sql)
         if timeout_seconds is None:
@@ -1020,6 +1025,8 @@ class SessionSearchMixin:
                     conn.set_progress_handler(None, 0)
         except sqlite3.OperationalError as exc:
             if interrupted_by_deadline and "interrupt" in str(exc).lower():
+                if recall_info is not None:
+                    recall_info["deadline_hit"] = True
                 raise TimeoutError(
                     f"canonical session search exceeded {timeout_seconds:g}s deadline"
                 ) from exc
@@ -1065,8 +1072,12 @@ class SessionSearchMixin:
         return " OR ".join(compiled_groups), params, snippet_term
 
     def _search_messages_like_fallback(
-        self, query: str, *, limit: int, offset: int, sort: Optional[str], **filters) -> List[Dict[str, Any]]:
-        """Search canonical messages while derived FTS state is stale."""
+        self, query: str, *, limit: int, offset: int, sort: Optional[str],
+        recall_info: Optional[Dict[str, Any]] = None, reason: str = "fts_unavailable",
+        **filters) -> List[Dict[str, Any]]:
+        """Search canonical messages while derived FTS state is stale; *reason* goes into *recall_info*."""
+        if recall_info is not None:
+            recall_info.update(source=RECALL_SOURCE_CANONICAL, fallback_reason=reason)
         predicate, params, snippet_term = self._compile_like_boolean_query(query)
         if not predicate or snippet_term is None:
             return []
@@ -1075,7 +1086,7 @@ class SessionSearchMixin:
         order = "ASC" if isinstance(sort, str) and sort.strip().lower() == "oldest" else "DESC"
         return self._like_rows(where, [snippet_term, *params, limit, offset],
                                order_by=f"ORDER BY m.timestamp {order}, m.id {order}", limit_sql="LIMIT ? OFFSET ?",
-                               timeout_seconds=_CANONICAL_SEARCH_TIMEOUT_SECONDS)
+                               timeout_seconds=_CANONICAL_SEARCH_TIMEOUT_SECONDS, recall_info=recall_info)
 
     def _refresh_fts_stale_state(self) -> None:
         """Observe fail-open initiated by another process sharing state.db."""
@@ -1128,16 +1139,34 @@ class SessionSearchMixin:
         role_filter: List[str] = None, limit: int = 20, offset: int = 0, sort: str = None,
         include_inactive: bool = False, fields: Optional[Collection[str]] = None,
         after_ts: Optional[int] = None, before_ts: Optional[int] = None,
+        recall_info: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """:meth:`_search_messages_impl` plus one log line per slow search with the routing
-        path taken. Threshold HERMES_SEARCH_SLOW_MS (default 1000; 0 logs every call)."""
+        path taken. Threshold HERMES_SEARCH_SLOW_MS (default 1000; 0 logs every call).
+
+        *recall_info*, when given, is filled with how the rows were produced, because the routes
+        have different ranking and completeness semantics:
+
+        - ``source``: ``"fts"`` (ranked index) or ``"canonical_fallback"`` (LIKE scan of the
+          canonical table, newest/oldest order, no BM25), with ``fallback_reason`` naming why.
+        - ``truncated``: the row bound (*limit*) was reached, so more matches may exist; an empty
+          or short result with ``truncated=False`` is a complete answer for that route.
+        - ``deadline_hit``: the bounded canonical scan was stopped by its time budget. The call then
+          raises ``TimeoutError`` (no rows), never a successful empty list.
+        - ``canonical_gap_rows``: rows an FTS answer took from the canonical not-yet-indexed gap
+          while a deferred rebuild is pending."""
+        info: Dict[str, Any] = recall_info if recall_info is not None else {}
+        info.clear()
+        info.update(source=RECALL_SOURCE_FTS, fallback_reason=None, truncated=False, deadline_hit=False,
+                    canonical_gap_rows=0)
         started = time.time()
         rows = None
         try:
             rows = self._search_messages_impl(
                 query, source_filter=source_filter, exclude_sources=exclude_sources, role_filter=role_filter,
                 limit=limit, offset=offset, sort=sort, include_inactive=include_inactive, fields=fields,
-                after_ts=after_ts, before_ts=before_ts)
+                after_ts=after_ts, before_ts=before_ts, recall_info=info)
+            info["truncated"] = limit is not None and limit > 0 and len(rows) >= limit
             return rows
         finally:
             elapsed_ms = (time.time() - started) * 1000.0
@@ -1151,6 +1180,7 @@ class SessionSearchMixin:
         role_filter: List[str] = None, limit: int = 20, offset: int = 0, sort: str = None,
         include_inactive: bool = False, fields: Optional[Collection[str]] = None,
         after_ts: Optional[int] = None, before_ts: Optional[int] = None,
+        recall_info: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """FTS5 search across session messages (keywords, ``"phrases"``, AND/OR/NOT, ``prefix*``).
         Returns snippet + session metadata + 1-message context per hit; ``fields`` selects a
@@ -1168,19 +1198,23 @@ class SessionSearchMixin:
         filters = dict(include_inactive=include_inactive, source_filter=source_filter,
                        exclude_sources=exclude_sources, role_filter=role_filter,
                        after_ts=after_ts, before_ts=before_ts)
+        info: Dict[str, Any] = recall_info if recall_info is not None else {}
         # New oversized tool results index only a bounded prefix; an explicit tool-role search is the
         # opt-in full-body path and scans canonical rows via LIKE.
         if role_filter and "tool" in role_filter:
-            matches = self._search_messages_like_fallback(query, limit=limit, offset=offset, sort=sort, **filters)
+            matches = self._search_messages_like_fallback(
+                query, limit=limit, offset=offset, sort=sort, recall_info=info, reason="tool_role", **filters)
             return self._finalize_search_matches(
                 matches, result_fields=result_fields, include_inactive=include_inactive)
         self._refresh_fts_stale_state()
         if self._fts_stale:
-            matches = self._search_messages_like_fallback(query, limit=limit, offset=offset, sort=sort, **filters)
+            matches = self._search_messages_like_fallback(
+                query, limit=limit, offset=offset, sort=sort, recall_info=info, reason="fts_stale", **filters)
             return self._finalize_search_matches(
                 matches, result_fields=result_fields, include_inactive=include_inactive)
         if not self._fts_enabled:
-            matches = self._search_messages_like_fallback(query, limit=limit, offset=offset, sort=sort, **filters)
+            matches = self._search_messages_like_fallback(
+                query, limit=limit, offset=offset, sort=sort, recall_info=info, reason="fts_unavailable", **filters)
             return self._finalize_search_matches(
                 matches, result_fields=result_fields, include_inactive=include_inactive)
 
@@ -1192,7 +1226,7 @@ class SessionSearchMixin:
             bool(source_filter) and any(src in FTS_TRIGRAM_EXCLUDED_SOURCES for src in source_filter))
         is_cjk = self._contains_cjk(query)
         if is_cjk:
-            matches = self._search_cjk(query, wants_unindexed_rows, route)
+            matches = self._search_cjk(query, wants_unindexed_rows, route, recall_info=info)
         else:
             sql, params = self._fts_match_sql("messages_fts", query, **route)
             try:
@@ -1201,7 +1235,8 @@ class SessionSearchMixin:
                 # Missing/unsupported FTS and query-parser failures are derived-index
                 # failures, not proof that canonical history has no match.
                 matches = self._search_messages_like_fallback(
-                    query, limit=limit, offset=offset, sort=sort, **filters)
+                    query, limit=limit, offset=offset, sort=sort, recall_info=info, reason="fts_query_error",
+                    **filters)
                 return self._finalize_search_matches(
                     matches, result_fields=result_fields, include_inactive=include_inactive)
             except sqlite3.DatabaseError as exc:
@@ -1213,7 +1248,8 @@ class SessionSearchMixin:
                 # stale-open/repair paths retain rebuild ownership.
                 if not self._enter_fts_fail_open(exc):
                     raise
-                matches = self._search_messages_like_fallback(query, limit=limit, offset=offset, sort=sort, **filters)
+                matches = self._search_messages_like_fallback(
+                    query, limit=limit, offset=offset, sort=sort, recall_info=info, reason="fts_corrupt", **filters)
 
         # Deferred-rebuild supplement: while the backfill is pending the FTS indexes miss
         # the (progress, high_water] gap; top up with a bounded LIKE scan so old messages
@@ -1222,7 +1258,9 @@ class SessionSearchMixin:
             try:
                 gap_matches = self._search_unindexed_gap(query, limit - len(matches), **filters)
                 seen_ids = {m["id"] for m in matches}
-                matches.extend(m for m in gap_matches if m["id"] not in seen_ids)
+                gap_new = [m for m in gap_matches if m["id"] not in seen_ids]
+                matches.extend(gap_new)
+                info["canonical_gap_rows"] = info.get("canonical_gap_rows", 0) + len(gap_new)
             except sqlite3.OperationalError as exc:
                 logger.debug("Unindexed-gap supplement skipped: %s", exc)
 
@@ -1262,7 +1300,8 @@ class SessionSearchMixin:
         return self._finalize_search_matches(
             matches, result_fields=result_fields, include_inactive=include_inactive)
 
-    def _search_cjk(self, query: str, wants_unindexed_rows: bool, route: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _search_cjk(self, query: str, wants_unindexed_rows: bool, route: Dict[str, Any],
+                    recall_info: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """CJK routing: the unicode61 table splits CJK into single characters (false positives,
         missed phrases). cjk-bigram serves every shape except queries wanting rows the
         substring indexes exclude (role='tool', cron/subagent sources) and LONE
@@ -1287,6 +1326,8 @@ class SessionSearchMixin:
         filters = {k: route[k] for k in ("include_inactive", "source_filter", "exclude_sources", "role_filter",
                                          "after_ts", "before_ts")}
         _search_filter_clauses(like_where, like_params, **filters)
+        if recall_info is not None:
+            recall_info.update(source=RECALL_SOURCE_CANONICAL, fallback_reason="cjk_substring")
         # instr() for the snippet uses the first search token.
         return self._like_rows(like_where, [non_op_tokens[0], *like_params, route["limit"], route["offset"]],
                                order_by="ORDER BY m.timestamp DESC", limit_sql="LIMIT ? OFFSET ?")

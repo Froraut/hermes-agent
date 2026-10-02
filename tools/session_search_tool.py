@@ -334,6 +334,29 @@ def _title_match_result(db, query: str, current_lineage_root: Optional[str]) -> 
         "_lineage_root": lineage_root}
 
 
+def _recall_block(info: Dict[str, Any]) -> Dict[str, Any]:
+    """How discovery rows were produced (see ``SessionDB.search_messages(recall_info=...)``).
+
+    ``source`` is ``fts`` (ranked index) or ``canonical_fallback`` (bounded, unranked scan of
+    stored messages); ``truncated`` means the scan's row bound was reached, so more matches may
+    exist; ``deadline_hit`` means the bounded scan was stopped by its time budget."""
+    block = {
+        "source": info.get("source") or "fts",
+        "truncated": bool(info.get("truncated")),
+        "deadline_hit": bool(info.get("deadline_hit")),
+    }
+    if info.get("fallback_reason"):
+        block["fallback_reason"] = info["fallback_reason"]
+    if info.get("canonical_gap_rows"):
+        block["canonical_gap_rows"] = info["canonical_gap_rows"]
+    if block["source"] != "fts":
+        block["note"] = ("Results come from a scan of stored messages, not the ranked search index: "
+                         "ordered by time, not relevance"
+                         + ("; the scan's row limit was reached, so further matches may be missing."
+                            if block["truncated"] else "."))
+    return block
+
+
 def _discover_payload(db, query: str, detail: str, results: list, **extra) -> str:
     """Discovery response; notes FTS backfill progress so the agent can explain thin
     results instead of treating them as ground truth."""
@@ -393,19 +416,33 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
         title_started = _coerce_started_ts((_get_session_meta(db, title_root) or _get_session_meta(db, title_sid)).get("started_at"))
         if {title_sid, title_root} & excluded_roots or not _in_time_window(title_started, after_ts, before_ts):
             title_result = None
-    raw_results, err = _loud(lambda: db.search_messages(
-        query=query, role_filter=role_filter or ["user", "assistant"],
-        exclude_sources=list(_HIDDEN_SESSION_SOURCES), limit=_DISCOVER_SCAN_LIMIT, offset=0, sort=sort,
-        fields=_DISCOVER_SEARCH_FIELDS, after_ts=after_ts, before_ts=before_ts), "FTS5 search failed: %s", "Search failed")
+    recall_info: Dict[str, Any] = {}
+    try:
+        raw_results, err = db.search_messages(
+            query=query, role_filter=role_filter or ["user", "assistant"],
+            exclude_sources=list(_HIDDEN_SESSION_SOURCES), limit=_DISCOVER_SCAN_LIMIT, offset=0, sort=sort,
+            fields=_DISCOVER_SEARCH_FIELDS, after_ts=after_ts, before_ts=before_ts, recall_info=recall_info), None
+    except TimeoutError as e:
+        # The bounded canonical scan stopped before it could rank anything: say so, rather than a
+        # generic failure or an empty "no matches" the caller would read as ground truth.
+        logging.warning("session_search canonical fallback hit its deadline: %s", e)
+        return tool_error(
+            f"Search stopped early: {e}. The search index is unavailable, so this ran a bounded scan of "
+            "stored messages and gave up before finishing. Narrow the query (more specific terms, "
+            "after/before dates) and retry.", success=False, recall=_recall_block(recall_info))
+    except Exception as e:
+        logging.error("FTS5 search failed: %s", e, exc_info=True)
+        raw_results, err = None, tool_error(f"Search failed: {e}", success=False)
     if err:
         return err
+    recall = _recall_block(recall_info)
     # Demote cron rows below interactive ones BEFORE dedup so a high-volume cron corpus
     # can't starve the user's own sessions out of the top `limit`; stable sort keeps BM25
     # order within each class.
     raw_results = sorted(raw_results, key=lambda r: (r.get("source") or "") in _DEMOTED_SESSION_SOURCES)
     # See #19434.
     if not raw_results and not title_result:
-        return _discover_payload(db, query, detail, [], message=(
+        return _discover_payload(db, query, detail, [], recall=recall, message=(
             "No matching sessions found. FTS5 ANDs all terms by default — "
             "broaden with OR (`alpha OR beta`), exact-match with quoted "
             "phrases, exclude with NOT, or prefix-match with `deploy*`."))
@@ -450,7 +487,7 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
             results.append(entry)
     for entry in results:
         entry["link"] = _session_link(entry["session_id"], link_profile)
-    return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions), link_hint=(
+    return _discover_payload(db, query, detail, results, recall=recall, sessions_searched=len(seen_sessions), link_hint=(
         "When referring the user to a session, write its `link` value "
         "verbatim inline mid-sentence (it renders as a titled link) — never "
         "as markdown, in backticks, on its own line, or next to the "
