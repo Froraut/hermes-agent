@@ -12,6 +12,7 @@ These tests pin the due-scan grace gate:
   - beyond grace  -> not due; record retired with a diagnostic
   - within grace  -> still due (legitimate catch-up)
   - beyond grace + stale claim -> exhausted record retired after restart
+  - within grace + stale claim + exhausted -> retired as wedged, never re-fired
   - beyond grace + live claim -> record kept so mark_job_run can land
   - re-triggered  -> due again (the Run button still works)
 """
@@ -96,6 +97,30 @@ class TestOneShotGraceDueScan:
 
         assert get_due_jobs() == []
         assert load_jobs() == []
+
+    @pytest.mark.parametrize("claim_field", ["run_claim", "fire_claim"])
+    def test_exhausted_oneshot_with_stale_claim_within_grace_retires_instead_of_refiring(
+        self, cron_store, monkeypatch, claim_field,
+    ):
+        """Stale crash residue + completed >= times, still INSIDE the one-shot
+        grace window: the grace gate alone would call this schedule fireable,
+        so the exhausted check must run first and retire it as a wedged run,
+        not dispatch it again and not report it as a missed schedule."""
+        monkeypatch.setattr("cron.jobs._job_running_in_this_process", lambda _job_id: False)
+        missed = []
+        monkeypatch.setattr("cron.jobs.record_cron_missed", lambda job: missed.append(job["id"]))
+        run_at = FIXED_NOW - timedelta(seconds=60)  # inside ONESHOT_GRACE_SECONDS
+        claim = {"at": (FIXED_NOW - timedelta(hours=3)).isoformat(), "by": "dead-tick"}
+        save_jobs([_oneshot("wedged", run_at, completed=1, **{claim_field: claim})])
+
+        assert get_due_jobs() == []
+        assert load_jobs() == []
+        assert missed == []
+        diag = list((cron_store / "cron" / "output" / "wedged").glob("*.md"))
+        assert len(diag) == 1
+        text = diag[0].read_text(encoding="utf-8")
+        assert "outside grace window" not in text
+        assert text.startswith("# Cron job removed without producing output")
 
     @pytest.mark.parametrize(
         ("claim_field", "claimed_at", "locally_running"),
