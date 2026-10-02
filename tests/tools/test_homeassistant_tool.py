@@ -157,6 +157,45 @@ class TestHandlerValidation:
         result = json.loads(_handle_call_service({"domain": "", "service": ""}))
         assert "error" in result
 
+    @patch("tools.approval.request_tool_approval")
+    @patch("tools.homeassistant_tool._async_call_service", new_callable=AsyncMock)
+    def test_entityless_service_is_rejected_even_when_policy_allows_it(
+        self, mock_call_service, mock_approval, monkeypatch,
+    ):
+        """scene.turn_on without a target fails closed before policy/approval."""
+        monkeypatch.setenv("HASS_ALLOWED_SERVICES", "scene.*")
+        monkeypatch.setenv("HASS_ALLOWED_TARGETS", "scene.*")
+
+        result = json.loads(_handle_call_service({"domain": "scene", "service": "turn_on"}))
+
+        assert "target entity_id" in result["error"]
+        mock_call_service.assert_not_awaited()
+        mock_approval.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            {"domain": "scene", "service": "turn_on", "entity_id": "scene.movie_night"},
+            {"domain": "scene", "service": "turn_on", "data": '{"entity_id": "scene.movie_night"}'},
+        ],
+    )
+    @patch("tools.approval.request_tool_approval")
+    @patch("tools.homeassistant_tool._async_call_service", new_callable=AsyncMock)
+    def test_scene_targeted_by_its_own_entity_is_allowed(
+        self, mock_call_service, mock_approval, monkeypatch, args,
+    ):
+        """The documented way to activate a scene: target the scene entity."""
+        monkeypatch.setenv("HASS_ALLOWED_SERVICES", "scene.turn_on")
+        monkeypatch.setenv("HASS_ALLOWED_TARGETS", "scene.movie_night")
+        mock_approval.return_value = {"approved": True}
+        mock_call_service.return_value = {"success": True}
+
+        result = json.loads(_handle_call_service(args))
+
+        assert result["result"]["success"] is True
+        mock_call_service.assert_awaited_once()
+        assert "scene.movie_night" in mock_approval.call_args.kwargs["rule_key"]
+
 
 # ---------------------------------------------------------------------------
 # Security: domain blocklist
@@ -334,6 +373,21 @@ class TestGetHeaders:
 # ---------------------------------------------------------------------------
 # Registry integration
 # ---------------------------------------------------------------------------
+
+
+class TestCallServiceSchema:
+    """The schema the model reads must match what the handler enforces."""
+
+    def test_entity_id_is_required_and_not_described_as_optional(self):
+        from tools.homeassistant_tool import HA_CALL_SERVICE_SCHEMA
+
+        params = HA_CALL_SERVICE_SCHEMA["parameters"]
+        assert "entity_id" in params["required"]
+        description = params["properties"]["entity_id"]["description"]
+        assert "may not need" not in description
+        assert "Required" in description
+        assert "HASS_ALLOWED_SERVICES" in HA_CALL_SERVICE_SCHEMA["description"]
+        assert "HASS_ALLOWED_TARGETS" in HA_CALL_SERVICE_SCHEMA["description"]
 
 
 class TestRegistration:

@@ -3,6 +3,11 @@
 Registers ``ha_list_entities``, ``ha_get_state``, ``ha_list_services``, ``ha_call_service``.
 Auth is a Long-Lived Access Token (``HASS_TOKEN``); the instance URL comes from
 ``HASS_URL`` (default http://homeassistant.local:8123).
+
+``ha_call_service`` is fail-closed: every call must name a target entity, the
+``domain.service`` must match ``HASS_ALLOWED_SERVICES`` and the target must match
+``HASS_ALLOWED_TARGETS`` (comma-separated exact names or ``domain.*``; unset means
+deny), and the call then goes through the normal tool-approval prompt.
 """
 
 import asyncio
@@ -311,7 +316,10 @@ HA_CALL_SERVICE_SCHEMA = {
     "name": "ha_call_service",
     "description": (
         "Call a Home Assistant service to control a device. Use ha_list_services "
-        "to discover available services and their parameters for each domain."
+        "to discover available services and their parameters for each domain. "
+        "Every call needs a target entity_id, and the service and target must be "
+        "allowed by the user's HASS_ALLOWED_SERVICES / HASS_ALLOWED_TARGETS policy; "
+        "each call also asks the user for approval."
     ),
     "parameters": {
         "type": "object",
@@ -334,8 +342,10 @@ HA_CALL_SERVICE_SCHEMA = {
             "entity_id": {
                 "type": "string",
                 "description": (
-                    "Target entity ID (e.g. 'light.living_room'). "
-                    "Some services (like scene.turn_on) may not need this."
+                    "Target entity ID (e.g. 'light.living_room'). Required: calls "
+                    "without a target are rejected. For scenes and scripts, target "
+                    "the scene or script entity itself (e.g. 'scene.movie_night' "
+                    "with scene.turn_on)."
                 ),
             },
             "data": {
@@ -348,7 +358,7 @@ HA_CALL_SERVICE_SCHEMA = {
                 ),
             },
         },
-        "required": ["domain", "service"],
+        "required": ["domain", "service", "entity_id"],
     },
 }
 
