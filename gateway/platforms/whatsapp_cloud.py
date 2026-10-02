@@ -60,6 +60,8 @@ DEFAULT_WEBHOOK_HOST = None
 DEFAULT_WEBHOOK_PORT = 8090
 DEFAULT_WEBHOOK_PATH = "/whatsapp/webhook"
 GRAPH_API_BASE = "https://graph.facebook.com"
+# Where Meta's signed media URL (and its redirects) may point. ``*.fbcdn.net`` is a CDN suffix, so
+# this bounds "Meta's CDN", not one tenant; the bearer itself only survives same-origin hops.
 _META_MEDIA_HOSTS = {"lookaside.fbsbx.com"}
 _META_MEDIA_HOST_SUFFIXES = (".fbcdn.net",)
 _MEDIA_REDIRECT_LIMIT = 5
