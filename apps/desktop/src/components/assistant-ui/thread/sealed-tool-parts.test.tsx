@@ -125,3 +125,26 @@ it.each(['main-session', 'child-watch-session'])('renders recovered actual outpu
   fireEvent.click(row)
   await waitFor(() => expect(container.textContent).toContain('actual durable proof'), { timeout: 1000 })
 })
+
+it('renders an explicitly failed native child result without losing its plain-text evidence', async () => {
+  const parts = upsertToolPart(
+    [],
+    {
+      name: 'custom_tool',
+      tool_id: 'native-failed',
+      result: [{ type: 'text', text: 'Operation was declined' }],
+      error: true
+    },
+    'complete',
+    3
+  )
+
+  const view = buildToolView(parts[0] as never, '')
+  expect(view.status).toBe('error')
+  const message = toRuntimeMessage({ id: 'native-failed', role: 'assistant', parts, pending: false })
+  const { container } = render(<Harness message={message} />)
+  const row = await screen.findByText(view.title)
+  fireEvent.click(row)
+  expect(container.textContent).toContain('Operation was declined')
+  expect(screen.queryByText('Result unavailable')).toBeNull()
+})

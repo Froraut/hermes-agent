@@ -308,3 +308,27 @@ def test_connector_child_output_is_redacted_without_parent_owner_mismatch(server
         server._current_runtime_session_record.reset(token)
     completion = next(payload for event, sid, payload in emits if event == "tool.complete" and sid == "live-1")
     assert completion["result"] == {"api_key": "[REDACTED]", "status": "connected"}
+
+
+def test_native_child_failure_signal_survives_actual_bridge_and_mirror(server, emits):
+    from types import SimpleNamespace
+    from agent.codex_runtime import make_codex_app_server_event_bridge
+    from tools.delegate_tool_progress import _build_child_progress_callback
+    from tui_gateway.contracts.events import ToolCompletePayload
+
+    parent = SimpleNamespace(_delegate_spinner=None,
+        tool_progress_callback=lambda *args, **kw: server._on_tool_progress("parent-sid", *args, **kw))
+    server._sessions["parent-sid"] = {"session_key": "parent"}
+    server._sessions["live-1"] = {"session_key": "child-1", "agent": None}
+    relay = _build_child_progress_callback(0, "inspect", parent, session_ref={"session_id": "child-1"})
+    agent = SimpleNamespace(tool_progress_callback=relay)
+    bridge = make_codex_app_server_event_bridge(agent)
+    item = {"type": "dynamicToolCall", "id": "rejected", "tool": "custom_tool", "arguments": {}}
+    bridge({"method": "item/started", "params": {"item": item}})
+    content = [{"type": "text", "text": "Operation was declined"}]
+    bridge({"method": "item/completed", "params": {"item": {**item, "success": False, "contentItems": content}}})
+
+    completion = next(payload for event, sid, payload in emits if event == "tool.complete" and sid == "live-1")
+    ToolCompletePayload.model_validate(completion)
+    assert completion["result"] == content
+    assert completion["error"] is True

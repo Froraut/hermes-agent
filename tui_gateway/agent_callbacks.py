@@ -100,6 +100,8 @@ def _mirror_subagent_to_child(event_type: str, payload: dict, profile_home) -> N
                 completion["result"] = result
             if payload.get("duration") is not None:
                 completion["duration_s"] = payload["duration"]
+            if "is_error" in payload:
+                completion["error"] = bool(payload["is_error"])
             if _tool_progress_enabled(csid) or _tool_lifecycle_required_for_ui(tool["name"]):
                 _emit_child_tool_lifecycle("tool.complete", csid, tool, completion)
             return
