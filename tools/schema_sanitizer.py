@@ -8,6 +8,7 @@ Legacy boolean ``required`` flags are removed from schema positions, lifting pro
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import re
 from typing import Any, Callable
@@ -123,15 +124,62 @@ def _pattern_schemas(schema: dict, key: str) -> list:
     return found
 
 
-def _wire_key(schemas: list[tuple[int, dict]], shown: dict[int, dict[str, set]], key: str) -> str:
+def _shown_wire_keys(schema: dict) -> dict[str, str]:
+    """{key the model was shown: wire key} for *schema*'s own ``properties``."""
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return {}
+    renames = _rename_property_keys(props, "<unrename>")
+    return {renames.get(wire, wire): wire for wire in props}
+
+
+def _loose_equal(sent: Any, expected: Any) -> bool:
+    """*sent* (raw model output, before type coercion) equals schema constant *expected*, also
+    when the model quoted a non-string constant (``"1"`` for ``1``, ``"true"`` for ``true``)."""
+    if (isinstance(sent, bool) == isinstance(expected, bool)) and sent == expected:
+        return True
+    return isinstance(sent, str) and not isinstance(expected, str) and sent == json.dumps(expected)
+
+
+def _fits_args(schema: dict, args: dict) -> bool:
+    """Whether *args* can be the alternative *schema* describes, judged only by what is decidable
+    before coercion: every ``required`` key is present, and every sent property with a ``const``
+    or ``enum`` (a discriminator) holds one of its values. Keys arrive in their shown spelling."""
+    shown = _shown_wire_keys(schema)
+    wire_to_shown = {wire: key for key, wire in shown.items()}
+    required = schema.get("required")
+    if isinstance(required, list) and any(
+            isinstance(name, str) and wire_to_shown.get(name, name) not in args for name in required):
+        return False
+    props = schema.get("properties") or {}
+    for key, wire in shown.items():
+        sub = props.get(wire)
+        if key not in args or not isinstance(sub, dict):
+            continue
+        if "const" in sub and not _loose_equal(args[key], sub["const"]):
+            return False
+        if isinstance(sub.get("enum"), list) and not any(_loose_equal(args[key], v) for v in sub["enum"]):
+            return False
+    return True
+
+
+def _wire_key(schemas: list[tuple[int, dict]], shown: dict[int, dict[str, set]], key: str,
+              args: dict) -> str:
     """Wire name of a key the model sent. The strongest rank that declares it decides: its
-    ``properties`` (one shown key that two of them, e.g. two union alternatives, spell differently
-    on the wire stays as sent, since which one the model meant is not knowable), else a matching
-    ``patternProperties`` / explicit ``additionalProperties``, which keep it as sent. So a weaker
-    conditional never overrides, nor forges over, what the object itself declares."""
+    ``properties``, else a matching ``patternProperties`` / explicit ``additionalProperties``,
+    which keep it as sent. When one shown key is spelled differently on the wire by two schemas of
+    that rank (two union alternatives showing ``$id`` and ``@id`` both as ``_id``), the
+    alternatives *args* fits (``_fits_args``: required keys, ``const``/``enum`` discriminators)
+    decide; if they still leave more than one wire name, the key stays as sent rather than taking
+    another alternative's wire key. So a weaker conditional never overrides, nor forges over, what
+    the object itself declares."""
     for rank in sorted({rank for rank, _ in schemas}):
         if names := shown.get(rank, {}).get(key):
-            return next(iter(names)) if len(names) == 1 else key
+            if len(names) == 1:
+                return next(iter(names))
+            fitting = {wire for level, schema in schemas if level == rank and _fits_args(schema, args)
+                       if (wire := _shown_wire_keys(schema).get(key)) is not None}
+            return next(iter(fitting)) if len(fitting) == 1 else key
         if any(_pattern_schemas(schema, key) or schema.get("additionalProperties", False) is not False
                for level, schema in schemas if level == rank):
             return key
@@ -208,7 +256,7 @@ def _unrename(candidates: list, args: Any, root: Any) -> Any:
                 shown.setdefault(rank, {}).setdefault(renames.get(wire, wire), set()).add(wire)
     out = {}
     for key, value in args.items():
-        orig = _wire_key(schemas, shown, key)
+        orig = _wire_key(schemas, shown, key, args)
         out[orig] = _unrename(_value_candidates(schemas, orig), value, root)
     return out
 

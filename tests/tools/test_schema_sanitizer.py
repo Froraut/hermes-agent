@@ -692,3 +692,38 @@ def test_unrename_never_gives_a_key_another_union_alternatives_wire_name():
 
     sent = {shared_id: "1", "meta": {rev: 2}}
     assert unrename_tool_args(params, {"x": sent}) == {"x": {shared_id: "1", "meta": {"$rev": 2}}}
+
+
+def test_unrename_picks_the_union_alternative_the_args_select():
+    """When two alternatives show one key for different wire keys, the alternative the args select
+    decides: a ``const``/``enum`` discriminator (also when the model quoted a non-string constant)
+    or a ``required`` key only one alternative has. Args that fit both still keep the key as sent."""
+    from tools.schema_sanitizer import unrename_tool_args
+
+    def alternative(kind, id_key, extra=None, required=()):
+        props = {"kind": kind, id_key: {"type": "string"}, **(extra or {})}
+        return {"type": "object", "properties": props, "required": list(required)}
+
+    params = {"type": "object", "properties": {"x": {"oneOf": [
+        alternative({"const": "doc"}, "$id", required=["kind"]),
+        alternative({"enum": ["node", 2]}, "@id", required=["kind"]),
+    ]}}}
+    first, second = sanitize_tool_schemas([_tool("t", params)])[0]["function"]["parameters"][
+        "properties"]["x"]["oneOf"]
+    (shared_id,) = set(first["properties"]) & set(second["properties"]) - {"kind"}
+
+    assert unrename_tool_args(params, {"x": {"kind": "node", shared_id: "a"}}) == {"x": {"kind": "node", "@id": "a"}}
+    assert unrename_tool_args(params, {"x": {"kind": "doc", shared_id: "a"}}) == {"x": {"kind": "doc", "$id": "a"}}
+    assert unrename_tool_args(params, {"x": {"kind": "2", shared_id: "a"}}) == {"x": {"kind": "2", "@id": "a"}}
+    # No discriminator sent, so neither alternative's required keys hold: stays as sent.
+    assert unrename_tool_args(params, {"x": {shared_id: "a"}}) == {"x": {shared_id: "a"}}
+
+    by_required = {"type": "object", "properties": {"x": {"anyOf": [
+        alternative({"type": "string"}, "$id", {"doc_only": {"type": "string"}}, required=["doc_only"]),
+        alternative({"type": "string"}, "@id", {"node_only": {"type": "string"}}, required=["node_only"]),
+    ]}}}
+    assert unrename_tool_args(by_required, {"x": {"node_only": "n", shared_id: "a"}}) == {
+        "x": {"node_only": "n", "@id": "a"}}
+    # Fits both alternatives: which one the model meant is not knowable.
+    both = {"node_only": "n", "doc_only": "d", shared_id: "a"}
+    assert unrename_tool_args(by_required, {"x": both}) == {"x": both}
