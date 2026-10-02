@@ -42,7 +42,12 @@ class InteractionOwner:
         self, *, actor_id: Any, chat_id: Any, channel_id: Any, thread_id: Any,
         prompt_message_id: Any, generation: str,
     ) -> bool:
-        """Require an exact match for every available immutable prompt anchor."""
+        """Require an exact match for every available immutable prompt anchor.
+
+        An anchor the prompt never captured (empty expected value, e.g. no thread, or a
+        system prompt with no originating user) is not enforced: there is nothing to bind
+        to, and the adapter's allowlist gate still runs afterwards. An anchor that WAS
+        captured must match exactly; an empty or different actual value is rejected."""
         actual = {
             "actor_id": str(actor_id or ""),
             "chat_id": str(chat_id or ""),

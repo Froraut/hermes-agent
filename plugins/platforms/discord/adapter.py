@@ -6301,6 +6301,36 @@ def _resolve_exec_approval_admin_gate(config_extra: Optional[dict]) -> Tuple[boo
     return (True, admin_ids)
 
 
+def _discord_interaction_owner_accepts(owner, prompt_message, interaction) -> bool:
+    """Compare a component click against the prompt's captured owner, one anchor at a time.
+
+    ``InteractionOwner.capture`` keeps three independent location anchors: ``chat_id`` (where the
+    prompt was sent: the thread itself for a thread session), ``channel_id`` (``parent_chat_id``
+    when the route carried one, i.e. the thread's parent channel or forum) and ``thread_id``. The
+    click therefore has to be described the same way: the channel it happened in, that channel's
+    parent when it is a thread (a Discord fact about the location, not a client claim) and, when
+    the owner has a thread anchor, the thread it happened in. Passing one id for all three
+    rejected the owner's own click on any thread prompt whose route carried ``parent_chat_id``."""
+    message = getattr(interaction, "message", None)
+    channel = getattr(interaction, "channel", None) or getattr(message, "channel", None)
+    located_in = str(getattr(interaction, "channel_id", "") or getattr(channel, "id", "") or "")
+    parent_id = str(getattr(channel, "parent_id", "") or "")
+    bound = owner.bind_prompt(getattr(prompt_message, "id", ""))
+    channel_anchor = (
+        bound.channel_id
+        if bound.channel_id and bound.channel_id in {located_in, parent_id} - {""}
+        else located_in
+    )
+    return bound.accepts(
+        actor_id=getattr(getattr(interaction, "user", None), "id", ""),
+        chat_id=located_in,
+        channel_id=channel_anchor,
+        thread_id=located_in if bound.thread_id else "",
+        prompt_message_id=getattr(message, "id", ""),
+        generation=bound.generation,
+    )
+
+
 def _define_discord_view_classes() -> None:
     """Register Discord UI view classes as module globals.
     Called at module load and after a lazy install so the classes exist whenever DISCORD_AVAILABLE."""
@@ -6463,12 +6493,7 @@ def _define_discord_view_classes() -> None:
                 t("platform.discord.approval.by_user", label=label, user=interaction.user.display_name) if count else label)
 
         def _owner_accepts(self, interaction):
-            message = getattr(interaction, "message", None)
-            channel_id = str(getattr(interaction, "channel_id", "") or getattr(getattr(message, "channel", None), "id", ""))
-            owner = self._interaction_owner.bind_prompt(getattr(self._message, "id", ""))
-            return owner.accepts(actor_id=getattr(interaction.user, "id", ""), chat_id=channel_id,
-                                 channel_id=channel_id, thread_id=channel_id if owner.thread_id else "",
-                                 prompt_message_id=getattr(message, "id", ""), generation=owner.generation)
+            return _discord_interaction_owner_accepts(self._interaction_owner, self._message, interaction)
 
         # Decorator labels are placeholders; ``_localize_buttons`` in __init__ sets the real text.
         @discord.ui.button(label="Allow Once", style=discord.ButtonStyle.green)
@@ -6880,12 +6905,7 @@ def _define_discord_view_classes() -> None:
                     pass
 
         def _owner_accepts(self, interaction):
-            message = getattr(interaction, "message", None)
-            channel_id = str(getattr(interaction, "channel_id", "") or getattr(getattr(message, "channel", None), "id", ""))
-            owner = self._interaction_owner.bind_prompt(getattr(self._message, "id", ""))
-            return owner.accepts(actor_id=getattr(interaction.user, "id", ""), chat_id=channel_id,
-                                 channel_id=channel_id, thread_id=channel_id if owner.thread_id else "",
-                                 prompt_message_id=getattr(message, "id", ""), generation=owner.generation)
+            return _discord_interaction_owner_accepts(self._interaction_owner, self._message, interaction)
 
         async def _resolve_choice(self, interaction: "discord.Interaction", index: int, choice: str) -> None:
             """Resolve the clarify with a chosen option."""
@@ -6925,6 +6945,9 @@ def _define_discord_view_classes() -> None:
 
         async def _on_other(self, interaction: "discord.Interaction") -> None:
             """Flip the clarify entry into text-capture mode."""
+            if not self._owner_accepts(interaction):
+                await interaction.response.send_message(_unauthorized(), ephemeral=True)
+                return
             if not await self._gate(
                 interaction, resolved_msg=t("platform.discord.prompt.clarify_already_answered"),
                 unauth_msg=_unauthorized(),
