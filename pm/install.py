@@ -526,6 +526,13 @@ def ensure(
     return Runner(name, env_for(name, base_env=base_env))
 
 
+def ensure_tools_for_sync(names: list[str]) -> None:
+    """Verify tool roots together; shared validity lasts only under the publication lock."""
+    with _install_operation() as operation:
+        for name in names:
+            ensure(name, explicit=True, _operation=operation)
+
+
 def env_for(*names: str, base_env: Optional[dict] = None) -> dict[str, str]:
     """Composed env of already-installed packages only. Never installs,
     never raises on missing packages — they contribute nothing."""

@@ -247,8 +247,14 @@ def ensure_tools_for_sync() -> None:
     from pm.lock import Lockfile
     from pm.registry import tool_roots
 
-    for name in tool_roots(Lockfile(paths.lockfile_path()).names()):
-        ensure(name, explicit=True)
+    names = tool_roots(Lockfile(paths.lockfile_path()).names())
+    if names:
+        if is_runtime():
+            from pm.install import ensure_tools_for_sync as direct
+
+            direct(names)
+        else:
+            _request("ensure_tools_for_sync", {"names": names})
     problems = activate(allow_incomplete=True)
     if problems:
         raise RuntimeError(f"tools not on PATH before venv sync: {'; '.join(problems)}")
