@@ -14,7 +14,7 @@ import {
   resetFrozenQueuedTransportsForTests,
   simulateComposerQueueReloadForTests
 } from '@/store/composer-queue'
-import { $daybreakSelections, setDaybreakSelection } from '@/store/daybreak'
+import { $daybreakModelChoices, setDaybreakSelection } from '@/store/daybreak'
 import { $notifications, clearNotifications } from '@/store/notifications'
 import { setSessionsLoading } from '@/store/session'
 
@@ -85,7 +85,7 @@ describe('useComposerQueue park integration', () => {
     vi.restoreAllMocks()
     $queuedPromptsBySession.set({})
     $parkedQueueSessions.set({})
-    $daybreakSelections.set({})
+    $daybreakModelChoices.set({})
     resetFrozenQueuedTransportsForTests()
     clearNotifications()
     clearComposerTerminalSelections()
@@ -160,23 +160,16 @@ describe('useComposerQueue park integration', () => {
     expect(getQueuedPrompts(SESSION_KEY)).toHaveLength(0)
   })
 
-  it('keeps the queued Daybreak choice through a later toggle change and refuses to steer it into another turn', async () => {
+  it('uses the current model choice when steering a queued prompt', async () => {
     setDaybreakSelection(SESSION_KEY, true)
     const entry = enqueueQueuedPrompt(SESSION_KEY, { attachments: [], text: 'review with Daybreak' })!
     setDaybreakSelection(SESSION_KEY, false)
     const onSteer = vi.fn(async () => true)
-    const { hook, onSubmit } = renderQueueHook({ busy: true, onSteer })
+    const { hook } = renderQueueHook({ busy: true, onSteer })
 
-    expect(await hook.result.current.steerQueuedNow(entry.id)).toBe(false)
-    expect(onSteer).not.toHaveBeenCalled()
-
-    hook.rerender({ busy: false })
-    await waitFor(() =>
-      expect(onSubmit).toHaveBeenCalledWith(
-        'review with Daybreak',
-        expect.objectContaining({ daybreakEnabled: true, fromQueue: true })
-      )
-    )
+    expect(await hook.result.current.steerQueuedNow(entry.id)).toBe(true)
+    expect(onSteer).toHaveBeenCalled()
+    expect(getQueuedPrompts(SESSION_KEY)).toHaveLength(0)
   })
 
   it('holds a parked queue at the idle settle (the Stop edge)', async () => {

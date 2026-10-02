@@ -569,13 +569,20 @@ describe('composer queue terminal payload persistence', () => {
 })
 
 describe('isSteerableEntry and the running turn program', () => {
-  const entry = (daybreakEnabled?: boolean) => ({ attachments: [], daybreakEnabled, text: 'follow up' })
+  const entry = () => ({ attachments: [], text: 'follow up' })
 
   it('lets the same program steer and makes only a Standard <-> Daybreak change wait', () => {
     expect(isSteerableEntry(entry())).toBe(true)
-    expect(isSteerableEntry(entry(false), false)).toBe(true)
-    expect(isSteerableEntry(entry(true), true)).toBe(true)
-    expect(isSteerableEntry(entry(true), false)).toBe(false)
-    expect(isSteerableEntry(entry(false), true)).toBe(false)
+    expect(isSteerableEntry(entry(), false, false)).toBe(true)
+    expect(isSteerableEntry(entry(), true, true)).toBe(true)
+    expect(isSteerableEntry(entry(), false, true)).toBe(false)
+    expect(isSteerableEntry(entry(), true, false)).toBe(false)
   })
+})
+
+
+it('never persists a model Daybreak choice with queued content', () => {
+  const entry = enqueueQueuedPrompt('daybreak-queue', { attachments: [], text: 'review' })!
+  updateQueuedPrompt('daybreak-queue', entry.id, { text: 'updated review' })
+  expect(JSON.parse(window.localStorage.getItem(QUEUE_STORAGE_KEY)! )['daybreak-queue'][0]).not.toHaveProperty('daybreakEnabled')
 })

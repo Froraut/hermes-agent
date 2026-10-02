@@ -2,7 +2,6 @@ import { afterEach, expect, it } from 'vitest'
 
 import {
   $daybreakModelChoices,
-  $daybreakSelections,
   adoptDraftDaybreakSelection,
   daybreakKeyFor,
   daybreakModelChoiceFor,
@@ -11,10 +10,9 @@ import {
   setDaybreakSelection
 } from './daybreak'
 import { $activeGatewayProfile, $newChatProfile, $newChatRoute } from './profile'
-import { $connection } from './session'
+import { $connection, $currentModel, $currentProvider } from './session'
 
 afterEach(() => {
-  $daybreakSelections.set({})
   $daybreakModelChoices.set({})
   $newChatProfile.set(null)
   $newChatRoute.set(null)
@@ -46,4 +44,18 @@ it('keeps an unselected model row choice in its conversation until the draft is 
   adoptDraftDaybreakSelection('stored-1', draftKey)
   expect(daybreakModelChoiceFor(null, 'openai-codex::gpt-6-luna')).toBeUndefined()
   expect(daybreakModelChoiceFor('stored-1', 'openai-codex::gpt-6-luna')).toBe(true)
+})
+
+
+it('keeps model choices independent across switches and restores the original model choice', () => {
+  $currentProvider.set('openai-codex')
+  $currentModel.set('gpt-6-sol')
+  setDaybreakSelection(null, true)
+  $currentModel.set('gpt-6-astra')
+  expect(daybreakSelectionFor(null)).toBeUndefined()
+  setDaybreakSelection(null, false)
+  $currentModel.set('gpt-6-sol')
+  expect(daybreakSelectionFor(null)).toBe(true)
+  $currentModel.set('gpt-6-astra')
+  expect(daybreakSelectionFor(null)).toBe(false)
 })

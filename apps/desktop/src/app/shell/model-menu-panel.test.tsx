@@ -4,7 +4,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 import { DropdownMenu, DropdownMenuContent } from '@/components/ui/dropdown-menu'
 import { $customModels } from '@/store/custom-models'
-import { $daybreakModelChoices, $daybreakSelections, daybreakSelectionFor } from '@/store/daybreak'
+import { $daybreakModelChoices, daybreakSelectionFor } from '@/store/daybreak'
 import { $modelPresets, setModelPreset } from '@/store/model-presets'
 import { $collapsedProviders, toggleCollapsedProvider } from '@/store/provider-collapse'
 import {
@@ -64,7 +64,6 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
-  $daybreakSelections.set({})
   $daybreakModelChoices.set({})
   $defaultDaybreak.set(false)
   $selectedStoredSessionId.set(null)
@@ -212,7 +211,10 @@ describe('ModelMenuPanel current selection', () => {
         }
       ]
     })
-    renderPanel()
+    renderPanel(vi.fn(selection => {
+      $currentModel.set(selection.model)
+      $currentProvider.set(selection.provider)
+    }))
     const luna = await screen.findByRole('menuitem', { name: /GPT-6-luna/ })
     fireEvent.pointerMove(luna, { pointerType: 'mouse' })
     const daybreak = await screen.findByRole('switch', { name: 'Daybreak' })
@@ -248,7 +250,10 @@ describe('ModelMenuPanel current selection', () => {
         }
       ]
     })
-    renderPanel()
+    renderPanel(vi.fn(selection => {
+      $currentModel.set(selection.model)
+      $currentProvider.set(selection.provider)
+    }))
     const sol = await screen.findByRole('menuitem', { name: /GPT-6-sol/ })
     fireEvent.pointerMove(sol, { pointerType: 'mouse' })
     const daybreak = await screen.findByRole('switch', { name: 'Daybreak' })

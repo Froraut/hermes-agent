@@ -25,6 +25,7 @@ import {
   updateQueuedPrompt,
   withQueueDrainClaim
 } from '@/store/composer-queue'
+import { daybreakSelectionFor } from '@/store/daybreak'
 import { $runningDaybreak } from '@/store/daybreak-running'
 import { notify } from '@/store/notifications'
 import { $sessionsLoading } from '@/store/session'
@@ -347,7 +348,7 @@ export function useComposerQueue({
           const accepted = await Promise.resolve(
             onSubmit(resolved.transportText, {
               attachments: entry.attachments,
-              ...(entry.daybreakEnabled !== undefined ? { daybreakEnabled: entry.daybreakEnabled } : {}),
+              daybreakEnabled: daybreakSelectionFor(drainQueueSessionKey, drainRuntimeSessionId),
               ...(resolved.displayText ? { displayText: resolved.displayText } : {}),
               ...(entry.displayKind ? { displayKind: entry.displayKind } : {}),
               fromQueue: true,
@@ -436,7 +437,7 @@ export function useComposerQueue({
 
       const entry = getQueuedPrompts(activeQueueSessionKey).find(e => e.id === id)
 
-      if (!entry || !isSteerableEntry(entry, runningDaybreak)) {
+      if (!entry || !isSteerableEntry(entry, runningDaybreak, daybreakSelectionFor(activeQueueSessionKey, sessionId))) {
         return false
       }
 
@@ -487,7 +488,7 @@ export function useComposerQueue({
     async (id: string) => {
       const entry = activeQueueSessionKey ? getQueuedPrompts(activeQueueSessionKey).find(e => e.id === id) : undefined
 
-      if (!busy || !entry || entry.displayKind || entry.displayText || !isSteerableEntry(entry, runningDaybreak)) {
+      if (!busy || !entry || entry.displayKind || entry.displayText || !isSteerableEntry(entry, runningDaybreak, daybreakSelectionFor(activeQueueSessionKey, sessionId))) {
         return sendQueuedNow(id)
       }
 

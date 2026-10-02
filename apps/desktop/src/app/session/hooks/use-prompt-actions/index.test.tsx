@@ -11,7 +11,7 @@ import { createClientSessionState } from '@/lib/chat-runtime'
 import { $compactingSessions, setSessionCompacting } from '@/store/compaction'
 import { $composerAttachments, $composerDraft, type ComposerAttachment, setComposerDraft } from '@/store/composer'
 import { $queuedPromptsBySession, getQueuedPrompts } from '@/store/composer-queue'
-import { $daybreakSelections, setDaybreakSelection } from '@/store/daybreak'
+import { $daybreakModelChoices, setDaybreakSelection } from '@/store/daybreak'
 import { requestGatewayForAgent } from '@/store/gateway'
 import { $goalsBySession, setSessionGoal } from '@/store/goals'
 import { $hudMode } from '@/store/hud'
@@ -337,6 +337,44 @@ describe('usePromptActions /title', () => {
     )
     expect(refreshSessions).not.toHaveBeenCalled()
     expect($sessions.get()[0]?.title).toBe('Old title')
+  })
+})
+
+describe('usePromptActions /browser use', () => {
+  beforeEach(() => setSessions(() => [sessionInfo()]))
+
+  afterEach(() => {
+    cleanup()
+    $connection.set(null)
+    vi.restoreAllMocks()
+  })
+
+  // `use` is offered by the subcommand picker; it once fell to the usage line. It writes the
+  // profile's browser.backend, so it runs on remote backends too (connect stays local-only).
+  it.each([
+    ['/browser use', true],
+    ['/browser use off', false]
+  ])('%s switches Browser Use mode through browser.manage, remote backends included', async (text, enabled) => {
+    $connection.set({ connectionId: 'hermes01', mode: 'remote' } as never)
+    const requestGateway = vi.fn(async () => ({ browser_use: enabled, connected: false }) as never)
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={vi.fn(async () => undefined)}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText(text)
+
+    expect(requestGateway).toHaveBeenCalledWith('browser.manage', {
+      action: 'use',
+      enabled,
+      session_id: RUNTIME_SESSION_ID
+    })
+    expect(requestGateway).not.toHaveBeenCalledWith('slash.exec', expect.anything())
   })
 })
 
@@ -2126,7 +2164,7 @@ describe('usePromptActions submit / queue drain semantics', () => {
   afterEach(() => {
     cleanup()
     $connection.set(null)
-    $daybreakSelections.set({})
+    $daybreakModelChoices.set({})
     $currentProvider.set('')
     vi.mocked(requestGatewayForAgent).mockReset()
     vi.restoreAllMocks()

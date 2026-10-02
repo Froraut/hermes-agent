@@ -15,6 +15,9 @@ from typing import Iterator
 logger = logging.getLogger(__name__)
 
 
+_followup_choice: ContextVar[bool | None] = ContextVar("hermes_daybreak_followup_choice", default=None)
+
+
 _daybreak_requested: ContextVar[bool] = ContextVar("hermes_daybreak_requested", default=False)
 
 
@@ -59,12 +62,9 @@ def requested_program(model: str) -> str | None:
 
 def model_offers_daybreak(model: str, access_token: str, base_url: str = "") -> bool:
     """Whether the account/route catalog lists a Daybreak program for ``model`` (no static guesses)."""
-    try:
-        from agent.model_metadata import codex_access_programs, strip_codex_context_variant_suffix
-        programs = codex_access_programs(access_token or "", base_url or "")
-        return any(p in {"daybreak_blue", "daybreak_red"} for p in programs.get(strip_codex_context_variant_suffix(model), []))
-    except Exception:
-        return False
+    from agent.model_metadata import codex_access_programs, strip_codex_context_variant_suffix
+    programs = codex_access_programs(access_token or "", base_url or "")
+    return any(p in {"daybreak_blue", "daybreak_red"} for p in programs.get(strip_codex_context_variant_suffix(model), []))
 
 
 def profile_daybreak_default(config: dict | None, *, provider: str, api_mode: str, model: str,
@@ -104,3 +104,17 @@ def daybreak_change_needs_own_turn(requested: bool | None, running: bool) -> boo
     """A mid-turn message with an explicit choice must wait for its own turn only when it asks for a
     different program than the running turn (Standard <-> Daybreak); the same program may steer."""
     return requested is not None and bool(requested) != bool(running)
+
+
+@contextmanager
+def followup_daybreak_choice(enabled: bool | None) -> Iterator[None]:
+    """Carry the originating choice through synchronous follow-ups, without changing gateway callback signatures."""
+    token = _followup_choice.set(enabled)
+    try:
+        yield
+    finally:
+        _followup_choice.reset(token)
+
+
+def inherited_daybreak_choice() -> bool | None:
+    return _followup_choice.get()

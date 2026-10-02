@@ -83,3 +83,44 @@ def test_daybreak_access_error_does_not_rotate_to_another_subscription_account(m
             status_code=400, error_context={}, messages=[], api_messages=[],
         )
     assert recovered == (False, False)
+
+
+def test_picker_and_turn_eligibility_only_read_fresh_route_scoped_cache(monkeypatch):
+    import time
+    from agent import model_metadata as metadata
+    from agent.daybreak import model_offers_daybreak
+    from hermes_cli.inventory import _apply_capabilities
+    from hermes_cli import auth_codex
+
+    def unexpected_fetch(*args, **kwargs):
+        raise AssertionError("picker/turn must never refresh the catalog")
+
+    monkeypatch.setattr(metadata, "_fetch_codex_oauth_context_lengths_with_source", unexpected_fetch)
+    monkeypatch.setattr(auth_codex, "resolve_codex_runtime_credentials", lambda **_: {
+        "api_key": "account-a", "base_url": "https://chatgpt.com/backend-api/codex"})
+    key = metadata._codex_oauth_token_fingerprint("account-a", "https://chatgpt.com/backend-api/codex")
+    monkeypatch.setattr(metadata, "_codex_oauth_context_cache", {})
+    monkeypatch.setattr(metadata, "_codex_oauth_access_programs_cache", {})
+    assert metadata.codex_access_programs("account-a", "https://chatgpt.com/backend-api/codex") == {}
+    rows = [{"slug": "openai-codex", "models": ["gpt-6-astra"]}]
+    _apply_capabilities(rows)
+    assert not rows[0]["capabilities"]["gpt-6-astra"]["daybreak"]
+    metadata._codex_oauth_context_cache[key] = ({"gpt-6-astra": 272_000}, time.time())
+    metadata._codex_oauth_access_programs_cache[key] = {"gpt-6-astra": ["daybreak_blue"]}
+    assert model_offers_daybreak("gpt-6-astra-900k", "account-a", "https://chatgpt.com/backend-api/codex")
+    _apply_capabilities(rows)
+    assert rows[0]["capabilities"]["gpt-6-astra"]["daybreak"]
+    assert not model_offers_daybreak("gpt-6-astra", "account-b", "https://chatgpt.com/backend-api/codex")
+    metadata._codex_oauth_context_cache[key] = ({}, 0)
+    assert not model_offers_daybreak("gpt-6-astra", "account-a", "https://chatgpt.com/backend-api/codex")
+
+
+def test_followup_choice_is_scoped_and_restored_without_changing_callbacks():
+    from agent.daybreak import followup_daybreak_choice, inherited_daybreak_choice
+    assert inherited_daybreak_choice() is None
+    with followup_daybreak_choice(True):
+        assert inherited_daybreak_choice() is True
+        with followup_daybreak_choice(False):
+            assert inherited_daybreak_choice() is False
+        assert inherited_daybreak_choice() is True
+    assert inherited_daybreak_choice() is None

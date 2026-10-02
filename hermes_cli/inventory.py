@@ -337,10 +337,11 @@ def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None
         if slug == 'openai-codex' and get_current_runtime(metadata_config or {}) != "codex_app_server":
             try:
                 from hermes_cli.auth_codex import resolve_codex_runtime_credentials
+                from hermes_cli.auth_constants import AuthError
                 from agent.model_metadata import codex_access_programs
                 creds = resolve_codex_runtime_credentials(read_only=True)
                 programs = codex_access_programs(creds.get('api_key') or '', creds.get('base_url') or '')
-            except Exception:
+            except AuthError:
                 pass
 
         for model in row.get("models") or []:

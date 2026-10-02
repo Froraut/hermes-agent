@@ -725,6 +725,8 @@ export const arSettings = {
       defaultsLabel: 'الافتراضيات',
       reasoning: 'الاستدلال',
       reasoningOff: 'إيقاف',
+      ultrafast: 'فائق السرعة',
+      useStandardSpeed: 'استخدام السرعة القياسية',
       speed: 'السرعة',
       speedStandard: 'قياسية',
       daybreakHint: 'طلب Daybreak لنماذج اشتراك ChatGPT المؤهلة ما لم تختر المحادثة غير ذلك',

@@ -437,12 +437,13 @@ def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str
 
 
 def _run_post_turn_followups(
-    rid, sid: str, session: dict, result: Any, goal_followup: str | None,
-    daybreak_enabled: bool | None = None) -> None:
+    rid, sid: str, session: dict, result: Any, goal_followup: str | None) -> None:
     """Chain whatever should run after ``running`` was released.  Order: a mid-turn user
     prompt wins over every auto follow-up (drain it, skip the rest); a leftover /steer is
     requeued first so it isn't dropped; then goal continuation, then completion
     notifications.  Each nested submit re-checks ``running`` under the lock."""
+    from agent.daybreak import inherited_daybreak_choice
+    daybreak_enabled = inherited_daybreak_choice()
     steer = result.get("pending_steer") if isinstance(result, dict) else None
     if isinstance(steer, str) and steer.strip():
         with session["history_lock"]:
@@ -804,11 +805,11 @@ def _invoke_agent(
         from agent.notification_presentation import notification_turn, event_presentation_muted
         daybreak_enabled = resolve_turn_daybreak(
             daybreak_enabled, _load_cfg() if daybreak_enabled is None else None,
-            provider=agent.provider, api_mode=agent.api_mode, model=getattr(agent, "model", ""),
+            provider=getattr(agent, "provider", ""), api_mode=getattr(agent, "api_mode", ""), model=getattr(agent, "model", ""),
             access_token=getattr(agent, "api_key", "") or "", base_url=getattr(agent, "base_url", "") or "",
         )
         with daybreak_turn(
-            daybreak_enabled, provider=agent.provider, api_mode=agent.api_mode, model=getattr(agent, "model", "")
+            daybreak_enabled, provider=getattr(agent, "provider", ""), api_mode=getattr(agent, "api_mode", ""), model=getattr(agent, "model", "")
         ), notification_turn(
             agent, muted=event_presentation_muted("message.delta", sid), session_id=sid
         ):
@@ -1244,7 +1245,9 @@ def _run_prompt_submit(
         with notification_policy_snapshot(agent, "tui", notification_config), notification_turn(agent, muted=muted, session_id=sid):
             followup = run_body()
         if followup is not None:
-            _run_post_turn_followups(rid, sid, session, *followup, daybreak_enabled=daybreak_enabled)
+            from agent.daybreak import followup_daybreak_choice
+            with followup_daybreak_choice(daybreak_enabled):
+                _run_post_turn_followups(rid, sid, session, *followup)
     # The handle is resolved BEFORE _sessions_lock: a profile session opens its own SessionDB through the
     # state registry, and _sessions_lock gates every create/close/prompt on this backend.
     with _routing_provenance_db(session) as routing_db, _sessions_lock:

@@ -1,3 +1,4 @@
+import { daybreakSelectionFor } from '@/store/daybreak'
 import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef, useState } from 'react'
 
@@ -190,7 +191,7 @@ export function useBackgroundQueueDrain({
         const accepted = await Promise.resolve(
           submitTextRef.current(resolved.transportText, {
             attachments: liveEntry.attachments,
-            ...(liveEntry.daybreakEnabled !== undefined ? { daybreakEnabled: liveEntry.daybreakEnabled } : {}),
+            daybreakEnabled: daybreakSelectionFor(sessionKey, runtimeSessionId),
             ...(resolved.displayText ? { displayText: resolved.displayText } : {}),
             fromQueue: true,
             sessionId: runtimeSessionId,

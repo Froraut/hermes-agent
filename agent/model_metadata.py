@@ -1919,8 +1919,11 @@ def _fetch_codex_oauth_context_lengths_with_source(access_token: str, base_url: 
 
 
 def codex_access_programs(access_token: str, base_url: str = '') -> Dict[str, list[str]]:
-    """Account/route-scoped catalog eligibility; no static entitlement guesses."""
-    _fetch_codex_oauth_context_lengths_with_source(access_token, base_url)
+    """Fresh account/route-scoped catalog eligibility, without network I/O.
+
+    Catalog discovery owns refreshes. Picker decoration and turn dispatch only
+    consume evidence already published by that discovery.
+    """
     key = _codex_oauth_token_fingerprint(access_token, base_url)
     cached = _codex_oauth_context_cache.get(key)
     if cached is None or time.time() - cached[1] >= _CODEX_OAUTH_CONTEXT_CACHE_TTL:

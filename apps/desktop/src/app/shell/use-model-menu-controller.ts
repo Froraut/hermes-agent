@@ -11,13 +11,10 @@ import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { currentPickerSelection } from '@/lib/model-status-label'
 import {
   $daybreakModelChoices,
-  $daybreakSelections,
   clearDaybreakSelection,
   daybreakModelChoiceFor,
   daybreakOnlyModel,
-  daybreakSelectionFor,
-  setDaybreakModelChoice,
-  setDaybreakSelection
+  setDaybreakModelChoice
 } from '@/store/daybreak'
 import {
   $modelPresets,
@@ -78,7 +75,6 @@ export function useModelMenuController({
   const view = useSessionView()
   const activeSessionId = useStore(view.$runtimeId)
   const storedSessionId = useStore(view.$storedId)
-  useStore($daybreakSelections)
   useStore($daybreakModelChoices)
   const defaultDaybreak = useStore($defaultDaybreak)
   const currentFastMode = useStore(view.$fast)
@@ -172,46 +168,19 @@ export function useModelMenuController({
   }
 
   const controller: ModelMenuController = {
-    // Daybreak belongs to this conversation. An inactive row shows what selecting
-    // it would send: its own remembered choice, else the conversation's current one.
-    daybreakFor: row => {
-      const selected = daybreakSelectionFor(storedSessionId, activeSessionId)
-
-      const remembered = row.isActive
-        ? undefined
-        : daybreakModelChoiceFor(storedSessionId, modelPresetKey(row.provider, row.model), activeSessionId)
-
-      return {
-        required: daybreakOnlyModel(row.model),
-        checked: daybreakOnlyModel(row.model) || (remembered ?? selected ?? defaultDaybreak)
-      }
-    },
+    // A conversation remembers each model independently; an inactive row
+    // cannot inherit an explicit choice made for another model.
+    daybreakFor: row => ({
+      required: daybreakOnlyModel(row.model),
+      checked: daybreakOnlyModel(row.model) ||
+        (daybreakModelChoiceFor(storedSessionId, modelPresetKey(row.provider, row.model), activeSessionId) ?? defaultDaybreak)
+    }),
     setDaybreak: (enabled, row) => {
-      // Like speed, an inactive row's edit is remembered for that model (in this
-      // conversation only) and applied when it is selected; no model switch.
       setDaybreakModelChoice(storedSessionId, modelPresetKey(row.provider, row.model), enabled, activeSessionId)
-
-      if (row.isActive) {
-        setDaybreakSelection(storedSessionId, enabled, activeSessionId)
-      }
     },
     applyDaybreak: (row, supported) => {
-      // An unsupported model drops the explicit choice; the profile default is
-      // only ever applied to models the account catalog marks eligible.
       if (!supported) {
-        clearDaybreakSelection(storedSessionId, activeSessionId)
-
-        return
-      }
-
-      const remembered = daybreakModelChoiceFor(
-        storedSessionId,
-        modelPresetKey(row.provider, row.model),
-        activeSessionId
-      )
-
-      if (remembered !== undefined) {
-        setDaybreakSelection(storedSessionId, remembered, activeSessionId)
+        clearDaybreakSelection(storedSessionId, activeSessionId, modelPresetKey(row.provider, row.model))
       }
     },
     // Selecting a model row restores that model's remembered preset onto the

@@ -12,7 +12,7 @@ import {
   parkQueuedPrompts,
   resetFrozenQueuedTransportsForTests
 } from '@/store/composer-queue'
-import { $daybreakSelections, setDaybreakSelection } from '@/store/daybreak'
+import { $daybreakModelChoices, setDaybreakSelection } from '@/store/daybreak'
 import { $notifications, clearNotifications } from '@/store/notifications'
 import {
   $sessions,
@@ -90,7 +90,7 @@ describe('useBackgroundQueueDrain', () => {
     vi.useRealTimers()
     $queuedPromptsBySession.set({})
     $parkedQueueSessions.set({})
-    $daybreakSelections.set({})
+    $daybreakModelChoices.set({})
     resetFrozenQueuedTransportsForTests()
     $sessions.set([])
     setSessionsLoading(true)
@@ -169,14 +169,14 @@ describe('useBackgroundQueueDrain', () => {
     const submitText = vi.fn(async () => true)
     setDaybreakSelection('stored-session-a', true)
     enqueueQueuedPrompt('stored-session-a', { text: 'queued review', attachments: [] })
-    $daybreakSelections.set({})
+    $daybreakModelChoices.set({})
 
     render(<Harness runtimeMap={runtimeMap} submitText={submitText} />)
 
     await waitFor(() =>
       expect(submitText).toHaveBeenCalledWith(
         'queued review',
-        expect.objectContaining({ daybreakEnabled: true, fromQueue: true })
+        expect.objectContaining({ daybreakEnabled: undefined, fromQueue: true })
       )
     )
   })
