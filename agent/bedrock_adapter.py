@@ -464,6 +464,8 @@ _CACHE_POINT_PATTERNS = ["anthropic.claude", "amazon.nova"]
 # Converse documents an image inside toolResult.content as "only supported by Amazon Nova and Anthropic
 # Claude 3 and 4 models"; other models reject it with a ValidationException. Later Claude generations get
 # the text note until AWS documents them: a missing image degrades, a rejected request fails the turn.
+# Source (re-check when AWS ships new models):
+# https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolResultContentBlock.html
 _TOOL_RESULT_IMAGE_PATTERNS = [
     "amazon.nova", "anthropic.claude-3", "anthropic.claude-opus-4", "anthropic.claude-sonnet-4", "anthropic.claude-haiku-4",
 ]
