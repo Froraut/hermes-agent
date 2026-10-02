@@ -162,3 +162,21 @@ def test_single_profile_host_fires_overlay_the_live_launch_terminal_policy(
     monkeypatch.setenv("TERMINAL_LOCAL_MEMORY_MAX_MB", "1")
     _fire_in_process((root,))
     assert seen[-1] == ("sk-from-systemd", "docker", "128")
+
+
+def test_run_one_job_callers_that_pass_no_worker_grant(launch_host, monkeypatch):
+    """``worker_terminal_overlay`` is only read by the detached worker that owns the execution
+    (review on #128063). In-process callers (built-in ticker, ``fire_claimed``, cronjob run-now)
+    omit it and the body derives the launch overlay itself; an owner that omitted it would get NO
+    overlay (files only), never the launch residue its env inherited."""
+    root, _coder, seen = launch_host
+
+    with _profile_cron_scope(root):
+        assert scheduler.run_one_job({"id": "job-in-process", "name": "probe"})
+        job = {"id": "job-owner", "name": "probe"}
+        job["execution_id"] = scheduler.create_execution("job-owner", source="direct")["id"]
+        monkeypatch.setenv("_HERMES_CRON_EXTERNAL_WORKER", job["execution_id"])
+        assert scheduler.run_one_job(job)
+
+    # Secret misses still reach os.environ on a single-profile host; terminal policy is the scope.
+    assert seen == [LAUNCH_VIEW, ("sk-from-systemd", "local", "")]

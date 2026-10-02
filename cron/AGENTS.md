@@ -30,18 +30,18 @@ Hardening invariants — each guards a real failure; don't weaken without answer
   that profile's store; never a `~/.hermes/...` literal.
 - **The ticker binds each served profile's scope for the whole tick, including pre-loop code.**
   `scheduler_provider.py::_start_multiplex` is ONE ticker iterating `profiles_to_serve()`
-  sequentially under `_profile_cron_scope(home)` (home override + cron store; each fire then binds
-  that profile's secret + terminal scope in `scheduler.py::_run_one_job_body` through
-  `launch_profile_policy.served_secret_scope` / `served_terminal_overlay`, so the launch profile keeps
-  its env-only policy — the env frozen at activation once the host multiplexes, the live env's
-  `TERMINAL_*` before it, since a bound terminal scope is the whole policy — and every other profile
-  resolves from its files) — never N threads (module globals race). Everything a tick touches lives inside that guard: store open,
+  sequentially under `_profile_cron_scope(home)` (home override + cron store) — never N threads
+  (module globals race). Everything a tick touches lives inside that guard: store open,
   lock path, backoff/failure counters (`_note_tick_failure`), job env construction, and the
   `on_session_end` flush of a finished job. Supervision (`scheduler_thread.py::
   SupervisedTickerThread`; start on gateway boot, stand down for homes another gateway already
   serves, re-enumerate when a profile dir appears or is tombstoned) is per served home, not per
   process. Why: a store opened before the scope was entered wrote a secondary profile's run
   records into the launch profile's `jobs.json`.
+- **Each fire binds its own profile's secret + terminal scope** (`scheduler.py::_install_fire_secret_scope`
+  / `_run_one_job_body`, via `launch_profile_policy.served_secret_scope` / `served_terminal_overlay`).
+  The launch profile keeps its env-only keys and `TERMINAL_*` (live env before multiplex activation,
+  frozen at it); every other profile resolves from its files only (#191).
 - **Cron ownership is not gated on `gateway.multiplex_profiles`.** That flag gates ADAPTERS; one
   host gateway process ticks EVERY profile's store either way (`run.py::_cron_tick_profile_homes`).
   Gating the tick set on it left every non-launch profile's jobs in a store no ticker visited.
