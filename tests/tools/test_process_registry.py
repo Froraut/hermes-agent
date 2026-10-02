@@ -1146,6 +1146,17 @@ class TestSpawnViaEnvCwd:
         assert session.exited
         assert os.path.realpath(session.output_buffer.strip()) == os.path.realpath(requested)
 
+    def test_launch_cwd_does_not_repoint_the_shared_env_cwd(self, registry, env, tmp_path):
+        """The env is shared by every session: a background job's workdir must not become the
+        cwd the next foreground command of any session starts in."""
+        shared_before = env.cwd
+        requested = tmp_path / "requested_workdir"
+        requested.mkdir()
+        session = registry.spawn_via_env(env, "true", cwd=str(requested))
+        assert session.pid is not None
+        assert env.cwd == shared_before
+        assert os.path.realpath(env.execute("pwd")["output"].strip()) == os.path.realpath(shared_before)
+
     def test_missing_cwd_fails_the_launch_instead_of_running_elsewhere(self, registry, env, tmp_path):
         session = registry.spawn_via_env(env, "pwd", cwd=str(tmp_path / "does_not_exist"))
         assert session.completion_reason == "failed_start"
@@ -1251,6 +1262,55 @@ class TestEnvPollerCompletion:
             assert session.exit_code == -1
         finally:
             zombie.wait()
+
+    @pytest.mark.parametrize("answer", [
+        {"output": "Managed Modal exec failed: 404 sandbox not found", "returncode": 1},
+        {"output": "[Command timed out after 5s]", "returncode": 124},
+        {"output": "Error response from daemon: No such container: abc", "returncode": 1},
+    ])
+    def test_dead_backend_answer_ends_the_session_as_lost_not_running_forever(self, registry, tmp_path, answer):
+        """Backends return a dead sandbox as a result (no exception): an answer that is not
+        running/exit/gone must not keep the session ``running`` forever."""
+        from tools.process_registry import _ENV_POLL_MAX_UNREADABLE
+
+        class _DeadBackend:
+            calls = 0
+
+            def execute(self, command, timeout=None, **kwargs):
+                self.calls += 1
+                return dict(answer)
+
+        session = _make_session(sid="proc_dead_backend")
+        self._poll(registry, session, tmp_path, _DeadBackend(), max_polls=_ENV_POLL_MAX_UNREADABLE + 2)
+
+        assert session.exited
+        assert session.exit_code == -1
+        assert (session.completion_reason, session.termination_source) == ("lost", "backend_lost")
+
+    @pytest.mark.platforms("posix")
+    def test_one_unreadable_probe_is_tolerated(self, registry, tmp_path):
+        """A transient blip (one bad answer) does not end a job that is still running."""
+        (tmp_path / "bg.log").write_text("")
+        (tmp_path / "bg.pid").write_text(f"{os.getpid()}\n")  # alive: "running"
+        shell = _ShellEnv()
+        answers = iter([None, {"output": "ssh: connect to host: Connection reset", "returncode": 255}])
+
+        class _Blip:
+            def execute(self, command, timeout=None, **kwargs):
+                override = next(answers, None) if "State:" in command else None
+                if override is not None:
+                    return override
+                if "State:" in command and shell.calls >= 4:
+                    (tmp_path / "bg.exit").write_text("0\n")
+                return shell.execute(command, timeout=timeout)
+
+        session = _make_session(sid="proc_blip")
+        self._poll(registry, session, tmp_path, _Blip(), max_polls=8)
+
+        assert next(answers, "consumed") == "consumed", "the blip was never served"
+        assert session.exited
+        assert session.exit_code == 0
+        assert session.termination_source != "backend_lost"
 
 
 # =========================================================================

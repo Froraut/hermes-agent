@@ -25,6 +25,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 # (not merely "not Windows") so macOS and other POSIX platforms never touch systemd.
 # See #70716.
 _IS_LINUX = platform.system() == "Linux"
+from tools.environments.base import BaseEnvironment
 from tools.environments.local import _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import dataclass, field
@@ -106,6 +107,8 @@ _SYSTEMD_SCOPE_PROBED_AT = 0.0
 # #110803) and reappear after a False (linger enabled later, #104893).
 _SYSTEMD_SCOPE_PROBE_TTL_SECONDS = 60.0
 _MIN_WORKER_MEMORY_MAX_BYTES = 64 * 1024 * 1024
+# Consecutive sandbox status probes with no usable answer (2s apart) before the session is lost.
+_ENV_POLL_MAX_UNREADABLE = 3
 _DEFAULT_WORKER_MEMORY_MAX_BYTES = 1024 * 1024 * 1024
 _WORKER_MEMORY_MAX_CAP_BYTES = 4 * 1024 * 1024 * 1024
 
@@ -1402,11 +1405,15 @@ class ProcessRegistry(ProcessCheckpointMixin):
             f"( nohup bash -lc {q(command)} > {q(log_path)} 2>&1; "
             f"rc=$?; printf '%s\\n' \"$rc\" > {q(exit_path)} ) & "
             f"echo $! > {q(pid_path)} && cat {q(pid_path)}")
+        if cwd:
+            # Launch in the resolved cwd, not env.cwd (the shared cwd of whichever command, any
+            # session, last reported one). The cd runs in a subshell: passing cwd= to execute()
+            # would cd the wrapper itself, whose CWD marker then repoints the shared env.cwd for
+            # every session. A bad cwd exits 126 before the launch, so no PID -> failed_start.
+            quote_cd = getattr(env, "_quote_cwd_for_cd", None) or BaseEnvironment._quote_cwd_for_cd
+            bg_command = f"( builtin cd -- {quote_cd(cwd)} || exit 126; {bg_command} )"
         try:
-            # Launch in the resolved cwd: without it execute() falls back to env.cwd, the
-            # shared cwd of whichever command (any session) last reported one. A bad
-            # cwd makes the wrapper's cd exit 126 before the launch -> failed_start.
-            result = env.execute(bg_command, cwd=cwd or "", timeout=timeout, rewrite_compound_background=False)
+            result = env.execute(bg_command, timeout=timeout, rewrite_compound_background=False)
             output = result.get("output", "").strip()
             session.pid = next((int(ln) for ln in map(str.strip, output.splitlines()) if ln.isdigit()), None)
             # No PID from the wrapper (syntax error, broken redirect): a failed launch,
@@ -1620,14 +1627,29 @@ class ProcessRegistry(ProcessCheckpointMixin):
         q = shlex.quote
         status_command = self._env_status_command(q(pid_path), q(exit_path))
         prev_output_bytes = 0
+        unreadable = 0
         while not session.exited:
             time.sleep(2)
             try:
                 prev_output_bytes = self._ingest_env_log_delta(session, env, q(log_path), prev_output_bytes)
                 status = env.execute(status_command, timeout=5).get("output", "").strip()
                 state, _, code = (status.splitlines() or [""])[-1].strip().partition(" ")
+                if state == "running":
+                    unreadable = 0
+                    continue
                 if state not in ("exit", "gone"):
-                    continue  # running, or no usable answer: poll again
+                    # Backends report a dead sandbox as a result, not an exception (managed Modal
+                    # "exec failed: 404", docker "No such container", a 124 probe timeout), so an
+                    # answer that is none of the three must not mean "running" forever: tolerate a
+                    # transient blip, then finish the session as lost.
+                    unreadable += 1
+                    if unreadable < _ENV_POLL_MAX_UNREADABLE:
+                        continue
+                    logger.warning("background process %s: status probe unreadable %d times in a row "
+                                   "(last answer %r); treating its sandbox as lost",
+                                   session.id, unreadable, status[-200:])
+                    self._finish_backend_lost(session)
+                    return
                 try:
                     exit_code = int(code)
                 except ValueError:
@@ -1643,10 +1665,14 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 return
             except Exception:
                 # Environment might be gone (sandbox reaped, etc.)
-                session.exited, session.exit_code = True, -1
-                session.completion_reason, session.termination_source = "lost", "backend_lost"
-                self._move_to_finished(session)
+                self._finish_backend_lost(session)
                 return
+
+    def _finish_backend_lost(self, session: ProcessSession) -> None:
+        """End a sandbox session whose backend can no longer answer for it."""
+        session.exited, session.exit_code = True, -1
+        session.completion_reason, session.termination_source = "lost", "backend_lost"
+        self._move_to_finished(session)
 
     def _pty_reader_loop(self, session: ProcessSession):
         """Background thread: read output from a PTY process."""
