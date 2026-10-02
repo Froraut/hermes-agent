@@ -322,22 +322,72 @@ class UpdateLock:
     def _payload(self) -> str:
         return f"{os.getpid()}\n{int(time.time())}\n{self._fingerprint}\n"
 
-    def _still_owns(self) -> bool:
+    def _ownership(self) -> str:
+        """``"ours"``, ``"missing"`` (nobody holds the marker), ``"other"`` (a successor or handoff
+        partner rewrote it; it is theirs now) or ``"unknown"`` (unreadable right now)."""
         try:
             lines = self.path.read_text(encoding="utf-8-sig").splitlines()
+        except FileNotFoundError:
+            return "missing"
         except OSError:
-            return False
-        return len(lines) >= 3 and lines[0].strip() == str(os.getpid()) and lines[2].strip() == self._fingerprint
+            return "unknown"
+        if len(lines) >= 3 and lines[0].strip() == str(os.getpid()) and lines[2].strip() == self._fingerprint:
+            return "ours"
+        return "other"
+
+    def _still_owns(self) -> bool:
+        return self._ownership() == "ours"
+
+    def _publish(self, *, replace: bool) -> None:
+        """Write a complete payload beside the marker, fsync it, then publish it in one step.
+
+        ``replace=False`` is the claim: ``link()`` succeeds only while no marker exists
+        (``FileExistsError`` otherwise), so two contenders cannot both win. ``replace=True`` is
+        the renewal: ``os.replace`` swaps the whole file, so a concurrent reader sees the old or
+        the new payload and never the empty file an in-place ``O_TRUNC`` write exposes -- which
+        every reader (here, ``update-marker.ts``, ``update.rs``) treats as dead and deletes.
+        """
+        staged = self.path.with_name(f".{self.path.name}.{self._fingerprint}.{'renew' if replace else 'claim'}")
+        fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as marker:
+                marker.write(self._payload())
+                marker.flush()
+                os.fsync(marker.fileno())
+            if replace:
+                os.replace(staged, self.path)
+            else:
+                os.link(staged, self.path)
+        finally:
+            with suppress(OSError):
+                staged.unlink()
+
+    def _refresh_once(self) -> bool:
+        """One renewal tick. ``False`` once the marker belongs to someone else (stop renewing)."""
+        state = self._ownership()
+        if state == "other":
+            return False  # a handoff partner or successor owns it now; never write over them
+        if state == "unknown":
+            return True  # e.g. a Windows sharing violation; look again next tick
+        try:
+            if state == "missing":
+                # The marker vanished while we still run (deleted by hand, or by an older reader).
+                # Claim it again, atomically: if someone else got there first, link() fails and
+                # the next tick sees "other".
+                self._publish(replace=False)
+            else:
+                self._publish(replace=True)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            # Transient (e.g. a Windows reader holding the file open): retry next tick; the
+            # ceiling allows several misses before the lease goes stale.
+            logger.debug("Could not refresh update marker %s: %s", self.path, exc)
+        return True
 
     def _refresh_loop(self) -> None:
         while not self._stop_refresh.wait(self._refresh_interval_seconds):
-            if not self._still_owns():
-                return
-            try:
-                # Preserve the owner fingerprint while renewing the lease timestamp.
-                self.path.write_text(self._payload(), encoding="utf-8")
-            except OSError as exc:
-                logger.debug("Could not refresh update marker %s: %s", self.path, exc)
+            if not self._refresh_once():
                 return
 
     def _start_refresh(self) -> None:
@@ -370,21 +420,11 @@ class UpdateLock:
             # another live process, so remove it before the atomic fresh claim.
             with suppress(OSError):
                 self.path.unlink()
-        claim_path = self.path.with_name(f".{self.path.name}.{self._fingerprint}.claim")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(claim_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as marker:
-                    marker.write(self._payload())
-                    marker.flush()
-                    os.fsync(marker.fileno())
-                # link() publishes a complete claim iff the marker does not exist. Unlike
-                # check-then-write, two contenders cannot both win or expose partial bytes.
-                os.link(claim_path, self.path)
-            finally:
-                with suppress(OSError):
-                    claim_path.unlink()
+            # link() publishes a complete claim iff the marker does not exist. Unlike
+            # check-then-write, two contenders cannot both win or expose partial bytes.
+            self._publish(replace=False)
         except FileExistsError:
             if not self.path.parent.is_dir():
                 logger.debug("Could not create update marker directory %s", self.path.parent)

@@ -124,6 +124,52 @@ else:
     assert int(renewed) > int(first), "the owner must renew before the stale ceiling"
 
 
+def test_lease_renewal_never_exposes_an_empty_marker(marker):
+    """Every reader deletes a marker it cannot parse, so a renewal must swap the whole file in:
+    an in-place truncating write showed readers 0 bytes once per tick (#129926 review)."""
+    lock = UpdateLock(path=marker, refresh_interval_seconds=0.002)
+    assert lock.acquire()
+    torn: list[str] = []
+    deadline = time.monotonic() + 1.5
+    try:
+        while time.monotonic() < deadline:
+            try:
+                text = marker.read_text(encoding="utf-8-sig")
+            except FileNotFoundError:
+                torn.append("<missing>")
+                continue
+            lines = text.splitlines()
+            if len(lines) < 3 or lines[0] != str(os.getpid()):
+                torn.append(text)
+        assert torn == [], f"{len(torn)} torn reads, e.g. {torn[:3]!r}"
+        assert lock._refresh_thread is not None and lock._refresh_thread.is_alive()
+    finally:
+        lock.release()
+    assert not marker.exists()
+    assert not list(marker.parent.glob(f".{marker.name}.*")), "staged claim/renewal files left behind"
+
+
+def test_a_vanished_marker_is_reclaimed_but_a_successor_is_left_alone(marker, other_pid):
+    """A marker deleted under a running owner is claimed again, not abandoned (abandoning it let a
+    second updater in); one rewritten by someone else ends the renewals and is never overwritten."""
+    lock = UpdateLock(path=marker, refresh_interval_seconds=3600)  # ticks driven by hand below
+    assert lock.acquire()
+    try:
+        fingerprint = marker.read_text().splitlines()[2]
+        marker.unlink()
+        assert lock._refresh_once() is True
+        lines = marker.read_text().splitlines()
+        assert lines[0] == str(os.getpid()) and lines[2] == fingerprint
+        assert int(lines[1]) == pytest.approx(time.time(), abs=5)
+
+        _claim(marker, other_pid)
+        assert lock._refresh_once() is False
+        assert marker.read_text().splitlines()[0] == str(other_pid)
+    finally:
+        lock.release()
+    assert marker.read_text().splitlines()[0] == str(other_pid), "release removed a successor's claim"
+
+
 def test_second_acquire_is_refused_while_the_first_is_live(marker, other_pid):
     """The bug: two updaters mutating one checkout at the same time."""
     _claim(marker, other_pid)
