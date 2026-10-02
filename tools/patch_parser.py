@@ -303,15 +303,35 @@ def apply_v4a_operations(operations: List[PatchOperation], file_ops: Any) -> Pat
     all_diffs: List[str] = []
     # Snapshot every path the transaction can mutate. Validation is not enough: a
     # write can still fail after an earlier operation has landed.
-    paths = {op.file_path for op in operations}
-    paths.update(op.new_path for op in operations if op.new_path)
+    paths = list(dict.fromkeys(
+        path for op in operations for path in (op.file_path, op.new_path) if path))
     snapshots = {path: file_ops.read_file_raw(path) for path in paths}
+    # A read that FAILED (not ``not_found``) captured nothing to restore, and an image read
+    # carries no text (``content`` is ""): applying would leave a path the rollback cannot put
+    # back, or would "restore" it as an empty file, so stop before anything is written.
+    unreadable = [f"{path}: could not snapshot the file before applying — {snap.error}"
+                  for path, snap in snapshots.items()
+                  if snap.error and not getattr(snap, "not_found", False)]
+    unreadable += [f"{path}: binary file — its bytes cannot be snapshotted for rollback; "
+                   "move or delete it with the terminal instead"
+                   for path, snap in snapshots.items()
+                   if not snap.error and getattr(snap, "is_binary", False)]
+    if unreadable:
+        return PatchResult(
+            success=False,
+            error="Patch apply aborted (no files were modified):\n" + _bullets(unreadable))
+    # Paths an operation has started on, in order; rollback restores exactly these, newest first,
+    # so a file the transaction never reached is not rewritten.
+    touched: List[str] = []
 
     def _rollback() -> List[str]:
         rollback_errors = []
-        for path, snapshot in snapshots.items():
+        for path in reversed(touched):
+            snapshot = snapshots[path]
             try:
-                result = (file_ops.delete_file(path) if snapshot.error and getattr(snapshot, "not_found", False)
+                # Every snapshot is restorable here (checked above): not_found means the path
+                # did not exist before the patch.
+                result = (file_ops.delete_file(path) if snapshot.error
                           else file_ops.write_file(path, snapshot.content))
             except Exception as e:  # a raising backend must not abort restoring the other paths
                 rollback_errors.append(f"{path}: {e}")
@@ -325,6 +345,7 @@ def apply_v4a_operations(operations: List[PatchOperation], file_ops: Any) -> Pat
     lint_results: Dict[str, dict] = {}
     for op in operations:
         handler, verb, bucket = _APPLY_DISPATCH[op.operation]
+        touched.extend(path for path in (op.file_path, op.new_path) if path and path not in touched)
         try:
             ok, payload, lsp, lint = handler(op, file_ops)
         except Exception as e:
@@ -335,7 +356,7 @@ def apply_v4a_operations(operations: List[PatchOperation], file_ops: Any) -> Pat
             rollback_errors = _rollback()
             if rollback_errors:
                 errors.extend(f"Rollback failed for {error}" for error in rollback_errors)
-                rollback_note = "rollback was incomplete"
+                rollback_note = "rollback was incomplete — run `git diff` to assess"
             else:
                 rollback_note = "all changes were rolled back"
             return PatchResult(success=False, error=(

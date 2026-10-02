@@ -413,6 +413,106 @@ class TestValidationPhase:
         assert files == {"a.py": "old_a", "b.py": "old_b", "c.py": "old_c"}
         assert ("c.py", "new_c") not in writes
         assert "rolled back" in result.error.lower()
+        # Rollback restores only what the transaction reached, newest first: c.py is never written.
+        assert [path for path, _ in writes] == ["a.py", "b.py", "b.py", "a.py"]
+
+    TWO_FILE_PATCH = """\
+*** Begin Patch
+*** Update File: a.py
+-old_a
++new_a
+*** Update File: b.py
+-old_b
++new_b
+*** End Patch"""
+
+    def _racing_ops(self, files, fail_read_of, after_reads):
+        """Fake backend whose read of ``fail_read_of`` fails once ``after_reads`` reads of it have
+        succeeded (validation reads each path once, the snapshot once more, apply once more)."""
+        reads = {}
+        writes = []
+
+        class RacingOps:
+            def read_file_raw(self, path):
+                reads[path] = reads.get(path, 0) + 1
+                if path == fail_read_of and reads[path] > after_reads:
+                    return SimpleNamespace(content="", error="Failed to read file: transport died")
+                return SimpleNamespace(content=files[path], error=None)
+
+            def write_file(self, path, content, pre_content=None):
+                writes.append(path)
+                files[path] = content
+                return SimpleNamespace(error=None)
+
+            def delete_file(self, path):
+                files.pop(path, None)
+                return SimpleNamespace(error=None)
+
+        return RacingOps(), writes
+
+    def test_failed_snapshot_read_aborts_before_anything_is_written(self):
+        """A failed read is not "the file was empty": a path the rollback could not restore must
+        not be mutated at all (it used to be "restored" as a zero-byte file)."""
+        ops, err = parse_v4a_patch(self.TWO_FILE_PATCH)
+        assert err is None
+        files = {"a.py": "old_a", "b.py": "old_b"}
+        backend, writes = self._racing_ops(files, "b.py", after_reads=1)
+
+        result = apply_v4a_operations(ops, backend)
+
+        assert result.success is False
+        assert files == {"a.py": "old_a", "b.py": "old_b"}
+        assert writes == []
+        assert "no files were modified" in result.error
+        assert "could not snapshot" in result.error and "transport died" in result.error
+
+    def test_failed_apply_read_restores_from_the_snapshot(self):
+        """The snapshot succeeded, the apply-time read of b.py fails: a.py is restored from its
+        snapshot and b.py keeps its real contents."""
+        ops, err = parse_v4a_patch(self.TWO_FILE_PATCH)
+        assert err is None
+        files = {"a.py": "old_a", "b.py": "old_b"}
+        backend, _writes = self._racing_ops(files, "b.py", after_reads=2)
+
+        result = apply_v4a_operations(ops, backend)
+
+        assert result.success is False
+        assert files == {"a.py": "old_a", "b.py": "old_b"}
+        assert "all changes were rolled back" in result.error
+
+    def test_binary_snapshot_aborts_before_anything_is_written(self):
+        """An image read carries no text, so rollback could only "restore" it as an empty file."""
+        patch = """\
+*** Begin Patch
+*** Update File: a.py
+-old_a
++new_a
+*** Delete File: logo.png
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+        files = {"a.py": "old_a"}
+        writes = []
+
+        class ImageOps:
+            def read_file_raw(self, path):
+                if path == "logo.png":
+                    return SimpleNamespace(content="", error=None, is_binary=True, is_image=True)
+                return SimpleNamespace(content=files[path], error=None)
+
+            def write_file(self, path, content, pre_content=None):
+                writes.append(path)
+                return SimpleNamespace(error=None)
+
+            def delete_file(self, path):
+                writes.append(f"rm {path}")
+                return SimpleNamespace(error=None)
+
+        result = apply_v4a_operations(ops, ImageOps())
+
+        assert result.success is False
+        assert writes == []
+        assert "logo.png: binary file" in result.error
 
     def test_validation_failure_writes_nothing(self):
         """If one hunk is invalid, no files should be written."""
@@ -862,6 +962,7 @@ class TestDuckTypedWriteFileCompat:
         # rollback restoring the snapshot, and its failure is reported instead of raised.
         assert len(calls) == 2 and calls[0][0] == "f.py" and calls[1] == ("f.py", "x = 1\n")
         assert "rollback was incomplete" in result.error
+        assert "git diff" in result.error  # the hint applies exactly when the rollback fell short
 
 
 class TestMoveThenUpdateSameFile:
