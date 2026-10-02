@@ -33,7 +33,8 @@ from tools.environments.docker_egress import (
 )
 from tools.environments.path_utils import sanitize_task_id_for_path
 from tools.environments.remote_common import (
-    bash_argv, client_env_with, load_hermes_env_vars, prepend_unset, resolve_passthrough_env, run_capture)
+    bash_argv, client_env_with, launch_remote_kill, load_hermes_env_vars, prepend_unset, resolve_passthrough_env,
+    run_capture)
 
 logger = logging.getLogger(__name__)
 
@@ -599,6 +600,10 @@ _EXEC_GROUP_FORCE_KILL = (
     'kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null; exit 0')
 
 
+# Bound on one in-container kill round trip; enforced by launch_remote_kill's reaper.
+_IN_CONTAINER_KILL_TIMEOUT = 10
+
+
 class DockerEnvironment(BaseEnvironment):
     """Hardened Docker container execution (caps dropped, no-new-privileges, PID limits,
     size-limited tmpfs). The container is the security boundary — its filesystem stays
@@ -1074,28 +1079,22 @@ class DockerEnvironment(BaseEnvironment):
         proc._hermes_exec_pidfile = pidfile
         return proc
 
-    def _kill_in_container(self, proc, script: str, *, wait: bool) -> None:
-        """Run a group-kill ``script`` for ``proc``'s exec'd shell inside the container. ``wait=False``
-        (hard exit) only launches it: the caller must not block, the docker client finishes alone."""
+    def _kill_in_container(self, proc, script: str) -> None:
+        """Run a group-kill ``script`` for ``proc``'s exec'd shell inside the container, without
+        waiting for the ``docker exec`` round trip: this runs on the timeout path under the
+        ``run_bounded_sync`` backstop and once per command on shutdown (``launch_remote_kill``)."""
         pidfile = getattr(proc, "_hermes_exec_pidfile", None)
         if not pidfile or not self._container_id:
             return
         argv = [self._docker_exe, "exec", self._container_id, "bash", "-c", script.format(pf=shlex.quote(pidfile))]
-        try:
-            if wait:
-                run_capture(argv, timeout=10)
-            else:
-                subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, start_new_session=True)
-        except (OSError, subprocess.SubprocessError) as e:
-            logger.debug("in-container kill of %s failed: %s", pidfile, e)
+        launch_remote_kill(argv, timeout=_IN_CONTAINER_KILL_TIMEOUT, label="docker-exec-kill")
 
     def _kill_process(self, proc):
-        self._kill_in_container(proc, _EXEC_GROUP_KILL, wait=True)
+        self._kill_in_container(proc, _EXEC_GROUP_KILL)
         super()._kill_process(proc)
 
     def _force_kill_process(self, proc):
-        self._kill_in_container(proc, _EXEC_GROUP_FORCE_KILL, wait=False)
+        self._kill_in_container(proc, _EXEC_GROUP_FORCE_KILL)
         super()._kill_process(proc)
 
     # --- "No such container" recovery ---

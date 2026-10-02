@@ -17,7 +17,7 @@ import psutil
 import pytest
 
 from tools.environments import ssh as ssh_env
-from tools.environments.base import BaseEnvironment
+from tools.environments.base import _EXECUTE_WAIT_BOUND_GRACE_S, BaseEnvironment
 
 pytestmark = pytest.mark.platforms("posix")
 
@@ -29,6 +29,10 @@ if "-O" in args:  # control-master commands (``-O exit``)
 while args and args[0].startswith("-"):  # every option ssh gets here takes a value
     args = args[2:]
 remote = " ".join(args[1:])  # drop user@host; ssh joins the rest into one remote command string
+delay = os.path.join(os.path.dirname(sys.argv[0]), "kill-delay")
+if ".stop" in remote and os.path.exists(delay):  # a slow link: the kill's round trip takes this long
+    import time
+    time.sleep(float(open(delay).read()))
 pid = os.fork()
 if pid == 0:
     os.setsid()  # sshd runs each session's command as a new session
@@ -106,3 +110,66 @@ def test_interrupt_and_hard_exit_kills_reach_the_remote_command(env, marker, kil
     getattr(env, kill)(proc)
 
     assert _gone_within(marker, 5), f"the command is still running on the remote host after {kill}"
+
+
+def _spy_backstop(env):
+    """Record when the ``run_bounded_sync`` backstop (``_on_timeout``) had to kill."""
+    fired = []
+    real = env._kill_spawned_tree
+    env._kill_spawned_tree = lambda spawned: (fired.append(spawned), real(spawned))
+    return fired
+
+
+def test_slow_remote_kill_does_not_hold_the_timeout_past_the_backstop(env, marker, tmp_path):
+    """The remote kill is a network round trip; the timeout path runs it under a backstop that
+    allows only ``_EXECUTE_WAIT_BOUND_GRACE_S`` past the timeout. A 3s kill must not make a 2s
+    command return late or fire the backstop, and the command must still die."""
+    (tmp_path / "bin" / "kill-delay").write_text("3")
+    fired = _spy_backstop(env)
+
+    started = time.monotonic()
+    result = env.execute(f"sleep {marker}", timeout=2)
+    elapsed = time.monotonic() - started
+
+    assert result["returncode"] == 124
+    assert not fired, "the backstop fired: the inner timeout path was blocked by the remote kill"
+    assert elapsed < 2 + _EXECUTE_WAIT_BOUND_GRACE_S, f"timed-out command returned after {elapsed:.2f}s"
+    assert _gone_within(marker, 3 + 5), "the timed-out command is still running on the remote host"
+
+
+def test_shutdown_kills_of_several_commands_do_not_serialize_on_the_link(env, tmp_path):
+    """``kill_live_foreground_processes`` calls ``_kill_process`` once per live command."""
+    markers = [f"{20 + i}.{os.getpid()}{uuid.uuid4().int % 10000:04d}" for i in range(3)]
+    try:
+        procs = [env._run_bash(f"sleep {m}") for m in markers]
+        deadline = time.monotonic() + 10
+        while not all(_sleeping(m) for m in markers) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        (tmp_path / "bin" / "kill-delay").write_text("2")
+
+        started = time.monotonic()
+        for proc in procs:
+            env._kill_process(proc)
+        assert time.monotonic() - started < 1.0
+
+        for m in markers:
+            assert _gone_within(m, 2 + 5), "a command survived the shutdown kill"
+    finally:
+        for m in markers:
+            for p in _sleeping(m):
+                p.kill()
+
+
+def test_cleanup_lets_in_flight_kills_land_before_closing_the_master(env, marker, tmp_path):
+    """``cleanup`` runs ``ssh -O exit`` right after the shutdown kills; a kill riding the
+    ControlMaster must not be cut off by it."""
+    proc = env._run_bash(f"sleep {marker}")
+    deadline = time.monotonic() + 10
+    while not _sleeping(marker) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    (tmp_path / "bin" / "kill-delay").write_text("1")
+
+    env._kill_process(proc)
+    env.cleanup()
+
+    assert not _sleeping(marker), "cleanup returned before the in-flight remote kill landed"

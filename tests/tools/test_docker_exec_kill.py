@@ -18,7 +18,7 @@ import psutil
 import pytest
 
 from tools.environments import docker as docker_env
-from tools.environments.base import BaseEnvironment
+from tools.environments.base import _EXECUTE_WAIT_BOUND_GRACE_S, BaseEnvironment
 
 pytestmark = pytest.mark.platforms("posix")
 
@@ -29,6 +29,9 @@ while args and args[0] in ("-i", "-e"):
     args = args[2:] if args[0] == "-e" else args[1:]
 argv = args[1:]  # drop the container id
 slow = os.path.join(os.path.dirname(sys.argv[0]), "slow-start")
+delay = os.path.join(os.path.dirname(sys.argv[0]), "kill-delay")
+if ".stop" in " ".join(argv) and os.path.exists(delay):  # a slow daemon: the kill's exec takes this long
+    time.sleep(float(open(delay).read()))
 pid = os.fork()
 if pid == 0:
     os.setsid()
@@ -132,3 +135,22 @@ def test_kill_that_lands_before_the_shell_records_its_pid_still_stops_the_comman
         assert time.monotonic() < deadline, "the late-starting shell ran the command after the kill"
         time.sleep(0.1)
     assert not _sleeping(marker)
+
+
+def test_slow_in_container_kill_does_not_hold_the_timeout_past_the_backstop(env, marker, tmp_path):
+    """The in-container kill is a ``docker exec`` round trip; the timeout path runs it under a
+    backstop that allows only ``_EXECUTE_WAIT_BOUND_GRACE_S`` past the timeout. A 3s kill must not
+    make a 2s command return late or fire the backstop, and the command must still die."""
+    (tmp_path / "kill-delay").write_text("3")
+    fired = []
+    real = env._kill_spawned_tree
+    env._kill_spawned_tree = lambda spawned: (fired.append(spawned), real(spawned))
+
+    started = time.monotonic()
+    result = env.execute(f"sleep {marker}", timeout=2)
+    elapsed = time.monotonic() - started
+
+    assert result["returncode"] == 124
+    assert not fired, "the backstop fired: the inner timeout path was blocked by the in-container kill"
+    assert elapsed < 2 + _EXECUTE_WAIT_BOUND_GRACE_S, f"timed-out command returned after {elapsed:.2f}s"
+    assert _gone_within(marker, 3 + 5), "the timed-out command is still running in the container"

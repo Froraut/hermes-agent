@@ -17,8 +17,8 @@ from tools.environments.base_output import _popen_bash
 from tools.environments.file_sync import (
     FileSyncManager, iter_sync_files, quoted_mkdir_command, quoted_rm_command, unique_parent_dirs)
 from tools.environments.remote_common import (
-    bash_argv, client_env_with, exec_group_kill_script, load_hermes_env_vars, prepend_unset, record_exec_group,
-    resolve_passthrough_env, run_capture)
+    REMOTE_KILL_TIMEOUT_S, bash_argv, client_env_with, exec_group_kill_script, launch_remote_kill,
+    load_hermes_env_vars, prepend_unset, record_exec_group, resolve_passthrough_env, run_capture, wait_remote_kills)
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +30,8 @@ _SSH_MULTIPLEX = os.name != "nt"
 # Module-level binding: tests patch ``ssh._load_hermes_env_vars`` to fake the .env file.
 _load_hermes_env_vars = load_hermes_env_vars
 
-# Bound on the remote kill (its own TERM grace is 1s) so a dead link cannot stall a timeout or /stop.
-_REMOTE_KILL_TIMEOUT = 5
+# Bound on the remote kill (its own TERM grace is 1s) so a dead link cannot leave its client behind.
+_REMOTE_KILL_TIMEOUT = REMOTE_KILL_TIMEOUT_S
 
 
 def _ensure_ssh_available() -> None:
@@ -299,20 +299,18 @@ class SSHEnvironment(BaseEnvironment):
     def _kill_remote_group(self, proc, *, force: bool) -> None:
         """Kill ``proc``'s remote command over a separate ssh (the ControlMaster when one is up).
         Killing the local ``ssh`` client only closes the channel: sshd does not signal a session
-        without a pty, so the command kept running on the host. ``force`` (the host is about to
-        hard-exit) only launches the kill; the caller must not block."""
+        without a pty, so the command kept running on the host. Never waits for the round trip:
+        this runs on the timeout path under the ``run_bounded_sync`` backstop and once per command
+        on shutdown (``launch_remote_kill``). ``force`` (the host is about to hard-exit) skips the
+        TERM grace."""
         pidfile = getattr(proc, "_hermes_exec_pidfile", None)
         if not pidfile:
             return
         argv = self._build_ssh_command() + [shlex.join(bash_argv(exec_group_kill_script(pidfile, force=force)))]
-        try:
-            if force:
-                subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, start_new_session=True)
-            else:
-                run_capture(argv, timeout=_REMOTE_KILL_TIMEOUT)
-        except (OSError, subprocess.SubprocessError) as e:
-            logger.debug("SSH: remote kill of %s failed: %s", pidfile, e)
+        killer = launch_remote_kill(argv, timeout=_REMOTE_KILL_TIMEOUT, label="ssh-remote-kill")
+        if killer is not None:
+            pending = [p for p in getattr(self, "_pending_remote_kills", ()) if p.poll() is None]
+            self._pending_remote_kills = [*pending, killer]
 
     def _kill_process(self, proc):
         self._kill_remote_group(proc, force=False)
@@ -326,6 +324,10 @@ class SSHEnvironment(BaseEnvironment):
         if self._sync_manager:
             logger.info("SSH: syncing files from sandbox...")
             self._sync_manager.sync_back()
+        # Kills still in flight may ride the ControlMaster ``-O exit`` closes below: let them land
+        # first (bounded once for all of them; they were launched concurrently).
+        wait_remote_kills(getattr(self, "_pending_remote_kills", ()), budget=_REMOTE_KILL_TIMEOUT)
+        self._pending_remote_kills = []
         for socket in self._control_sockets():
             if not socket.exists():
                 continue

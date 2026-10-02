@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import os
 import shlex
 import subprocess
+import threading
+import time
 from typing import Callable, Iterable
 
 from tools.environments.base_session_env import _SHELL_ENV_NAME_RE
 from tools.environments.local_env_policy import _is_hermes_internal_secret, _is_provider_env_blocklisted
+
+logger = logging.getLogger(__name__)
 
 
 def load_hermes_env_vars() -> dict[str, str]:
@@ -119,6 +125,50 @@ def exec_group_kill_script(pidfile: str, *, force: bool = False) -> str:
         'kill -TERM -- "$t" 2>/dev/null || { t=$p; kill -TERM "$t" 2>/dev/null; } || exit 0; '
         'for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 -- "$t" 2>/dev/null || exit 0; sleep 0.1; done; '
         'kill -KILL -- "$t" 2>/dev/null; exit 0')
+
+
+# Bound on one remote kill round trip (the script's own TERM grace is 1s). Enforced by a reaper,
+# never by the caller: see launch_remote_kill.
+REMOTE_KILL_TIMEOUT_S = 5.0
+
+
+def launch_remote_kill(argv: list[str], *, timeout: float = REMOTE_KILL_TIMEOUT_S,
+                       label: str = "remote-kill") -> subprocess.Popen | None:
+    """Start ``argv`` (a kill that runs on the far side: ``ssh … bash -c``, ``docker exec …``) and
+    return at once. ``_kill_process`` runs inside the timeout path of ``_wait_for_process``, under
+    the ``run_bounded_sync`` backstop that allows only ``_EXECUTE_WAIT_BOUND_GRACE_S`` past the
+    command's timeout, and ``kill_live_foreground_processes`` calls it once per live command on exit
+    paths, so a kill that waited for its round trip made timeouts late and serialized shutdown.
+    A daemon thread reaps the client and kills it after ``timeout`` so a dead link cannot leave it
+    behind; its own session lets it finish if this host exits first."""
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.debug("%s could not start: %s", label, e)
+        return None
+
+    def _reap() -> None:
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            logger.debug("%s did not finish within %.1fs; abandoning it", label, timeout)
+            with contextlib.suppress(OSError):
+                proc.kill()
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                proc.wait(timeout=1)
+
+    threading.Thread(target=_reap, name=f"hermes-{label}", daemon=True).start()
+    return proc
+
+
+def wait_remote_kills(procs: Iterable[subprocess.Popen], budget: float = REMOTE_KILL_TIMEOUT_S) -> None:
+    """Wait, at most ``budget`` seconds in total, for kills from :func:`launch_remote_kill` to end.
+    For a teardown that is about to close the transport those kills travel over (ssh ``-O exit``)."""
+    deadline = time.monotonic() + budget
+    for proc in procs:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
 
 
 def ensure_lazy_dep(extra: str) -> None:
