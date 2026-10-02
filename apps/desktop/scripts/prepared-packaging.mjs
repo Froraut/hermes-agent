@@ -4,7 +4,21 @@ import { createHash } from 'node:crypto'
 
 /** @typedef {{ path: string, digest: string }} PreparedFile */
 /** @typedef {{ sevenZip: string, icons: string, winCodeSign?: string, appimage?: string, fpm?: string }} PackagingToolsets */
-/** @typedef {{ schema: number, source: string, out: string, identity: string, target: string, formats: string[], electron: string, toolsets: PackagingToolsets, windows: import('./windows-bundle-tools.mjs').WindowsBundleTools | null, dmgbuild: string | null, files: PreparedFile[] }} PreparedPackaging */
+/** @typedef {{ schema: number, source: string, out: string, identity: string, target: string, formats: string[], electron: string, toolsets: PackagingToolsets, windows: import('./windows-bundle-tools.mjs').WindowsBundleTools | null, windowsSigning?: boolean, dmgbuild: string | null, files: PreparedFile[] }} PreparedPackaging */
+
+/** Both Windows signing consumers must agree that a source build is unsigned.
+ * @param {NodeJS.ProcessEnv} [env] @returns {boolean}
+ */
+export function windowsSigningConfigured(env = process.env) {
+  return Boolean(env.AZURE_SIGN_ENDPOINT && (env.AZURE_CLIENT_ID || (env.AZURE_SIGN_ACCOUNT && env.AZURE_SIGN_PROFILE)))
+}
+
+/** @param {{ target: string, formats: string[], windowsSigning?: boolean }} inputs @returns {void} */
+function validateWindowsCapability(inputs) {
+  if (inputs.windowsSigning === false && (!inputs.target.startsWith('win32-') || inputs.formats.length !== 1 || inputs.formats[0] !== 'dir')) {
+    throw preparationRequired('Unsigned Windows tools are restricted to source directory builds')
+  }
+}
 
 /** @param {string} message @returns {Error} */
 export function preparationRequired(message) {
@@ -71,10 +85,11 @@ function assertOwned(root, file) {
 /**
  * Publish only after every selected supplier completed. The receipt is job-local,
  * not a cache attestation; trusted cache writers remain a prerequisite.
- * @param {{ source: string, out: string, target: string, formats: string[], electron: string, toolsets: PackagingToolsets, windows?: import('./windows-bundle-tools.mjs').WindowsBundleTools | null, dmgbuild?: string | null }} inputs
+ * @param {{ source: string, out: string, target: string, formats: string[], electron: string, toolsets: PackagingToolsets, windows?: import('./windows-bundle-tools.mjs').WindowsBundleTools | null, windowsSigning?: boolean, dmgbuild?: string | null }} inputs
  * @returns {Promise<string>}
  */
 export async function publishPackagingInputs(inputs) {
+  validateWindowsCapability(inputs)
   const out = fs.realpathSync(inputs.out)
   const paths = [inputs.electron, ...Object.values(inputs.toolsets)]
   if (inputs.windows?.dotnetRoot) paths.push(inputs.windows.dotnetRoot)
@@ -88,7 +103,7 @@ export async function publishPackagingInputs(inputs) {
     schema: 1, source: fs.realpathSync(inputs.source), out,
     identity: packagingIdentity(inputs.source), target: inputs.target,
     formats: inputs.formats, electron: inputs.electron, toolsets: inputs.toolsets,
-    windows: inputs.windows ?? null, dmgbuild: inputs.dmgbuild ?? null, files,
+    windows: inputs.windows ?? null, windowsSigning: inputs.windowsSigning ?? true, dmgbuild: inputs.dmgbuild ?? null, files,
   }
   const manifest = path.join(out, 'prepared.json')
   fs.writeFileSync(`${manifest}.tmp`, JSON.stringify(result, null, 2) + '\n')
@@ -112,9 +127,15 @@ export function readPackagingInputs(manifest, source, target = `${process.platfo
       throw preparationRequired('Stale or foreign packaging inputs')
     }
     const required = [result.electron, result.toolsets.sevenZip, result.toolsets.icons, ...Object.values(result.toolsets)]
+    validateWindowsCapability(result)
     if (target.startsWith('win32-')) {
-      if (!result.windows || !result.toolsets.winCodeSign || !result.windows.dotnetRoot) throw preparationRequired('Missing Windows tool selection')
-      required.push(result.windows.dotnetRoot)
+      if (!result.windows || !result.toolsets.winCodeSign) throw preparationRequired('Missing Windows tool selection')
+      if (result.windowsSigning === false) {
+        if (result.windows.dlib !== null || result.windows.dotnetRoot !== null) throw preparationRequired('Inconsistent unsigned Windows tool selection')
+      } else {
+        if (!result.windows.dlib || !result.windows.dotnetRoot) throw preparationRequired('Missing Windows signing selection')
+        required.push(result.windows.dotnetRoot)
+      }
     }
     if (result.formats.includes('dmg')) {
       if (!result.dmgbuild) throw preparationRequired('Missing prepared dmgbuild')

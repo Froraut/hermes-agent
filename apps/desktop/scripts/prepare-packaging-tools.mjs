@@ -5,7 +5,7 @@ import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { isMain } from './utils.mjs'
-import { publishPackagingInputs } from './prepared-packaging.mjs'
+import { publishPackagingInputs, windowsSigningConfigured } from './prepared-packaging.mjs'
 import { ensureWindowsBundleTools } from './windows-bundle-tools.mjs'
 import { prepareDmgbuild } from './prepare-dmgbuild.mjs'
 
@@ -45,10 +45,10 @@ function copyTool(from, to) {
 /**
  * Acquire bytes without signing credentials. Builder modules are loaded only
  * after the explicit cache root has been selected, before their lazy state runs.
- * @param {{ source: string, out: string, cache: string, target?: string, formats?: string[], dmgbuild?: string }} options
+ * @param {{ source: string, out: string, cache: string, target?: string, formats?: string[], dmgbuild?: string, unsignedDir?: boolean }} options
  * @returns {Promise<string>}
  */
-async function preparePackagingTools({ source, out, cache, target = `${process.platform}-${process.arch}`, formats, dmgbuild }) {
+async function preparePackagingTools({ source, out, cache, target = `${process.platform}-${process.arch}`, formats, dmgbuild, unsignedDir = false }) {
   source = fs.realpathSync(source)
   out = path.resolve(out)
   cache = path.resolve(cache)
@@ -60,6 +60,10 @@ async function preparePackagingTools({ source, out, cache, target = `${process.p
   const require = createRequire(path.join(source, 'apps/desktop/package.json'))
   const config = require(path.join(source, 'apps/desktop/electron-builder.config.cjs'))
   formats ??= process.platform === 'win32' ? ['msix'] : process.platform === 'darwin' ? ['dmg', 'zip'] : ['AppImage']
+  if (unsignedDir && (process.platform !== 'win32' || formats.length !== 1 || formats[0] !== 'dir' ||
+      windowsSigningConfigured() || config.win?.sign)) {
+    throw new Error('--unsigned-dir requires an unsigned Windows source directory build')
+  }
   if (process.env.CUSTOM_DMGBUILD_PATH) throw new Error('Preparation must select the pinned dmgbuild supplier, not CUSTOM_DMGBUILD_PATH')
   const supported = process.platform === 'win32' ? ['dir', 'msix', 'zip'] : process.platform === 'darwin' ? ['dir', 'dmg', 'zip'] : ['dir', 'AppImage', 'deb', 'rpm', 'zip']
   if (formats.some(format => !supported.includes(format))) throw new Error(`Unsupported prepared package formats: ${formats.join(', ')}`)
@@ -67,7 +71,7 @@ async function preparePackagingTools({ source, out, cache, target = `${process.p
   const previousCache = process.env.ELECTRON_BUILDER_CACHE
   process.env.ELECTRON_BUILDER_CACHE = path.join(cache, 'builder')
   try {
-    return await acquirePackagingTools({ source, out, cache, target, formats, builderRoot, config, dmgbuild: dmg })
+    return await acquirePackagingTools({ source, out, cache, target, formats, builderRoot, config, dmgbuild: dmg, unsignedDir })
   } finally {
     if (previousCache === undefined) delete process.env.ELECTRON_BUILDER_CACHE
     else process.env.ELECTRON_BUILDER_CACHE = previousCache
@@ -75,10 +79,36 @@ async function preparePackagingTools({ source, out, cache, target = `${process.p
 }
 
 /**
- * @param {{ source: string, out: string, cache: string, target: string, formats: string[], builderRoot: string, config: import('app-builder-lib').Configuration, dmgbuild: string | null }} options
+ * Directory updates still need the SDK and resource editor; only ATS and its
+ * paired runtime are unnecessary when no signing consumer will run.
+ * @param {{ out: string, config: import('app-builder-lib').Configuration, resourcesDir: string, builder: import('./windows-bundle-tools.mjs').BuilderWindowsTools & { getRceditBundle: (configuration: NonNullable<import('app-builder-lib').Configuration['toolsets']>['winCodeSign'], resourcesDir: string) => Promise<{ x64: string, x86: string }> }, signing?: boolean }} options
+ * @returns {Promise<{kitRoot: string, windows: import('./windows-bundle-tools.mjs').WindowsBundleTools}>}
+ */
+export async function prepareWindowsPackaging({ out, config, resourcesDir, builder, signing = true }) {
+  const tools = await ensureWindowsBundleTools({ config, resourcesDir, signing, load: async () => builder, prepared: null })
+  const kitRoot = copyTool(path.dirname(path.dirname(tools.makeappx)), path.join(out, 'winCodeSign'))
+  let dotnetRoot = null
+  if (signing) {
+    if (!tools.dlib || !tools.dotnetRoot) throw new Error('Windows preparation requires the ATS dlib and paired .NET runtime')
+    fs.cpSync(path.dirname(tools.dlib), path.join(kitRoot, path.basename(path.dirname(tools.signtool))), { recursive: true })
+    dotnetRoot = copyTool(tools.dotnetRoot, path.join(out, 'dotnet'))
+  }
+  const rcedit = await builder.getRceditBundle(config.toolsets?.winCodeSign, resourcesDir)
+  fs.copyFileSync(rcedit.x64, path.join(kitRoot, 'rcedit-x64.exe'))
+  fs.copyFileSync(rcedit.x86, path.join(kitRoot, 'rcedit-x86.exe'))
+  const kit = path.join(kitRoot, path.basename(path.dirname(tools.makeappx)))
+  return { kitRoot, windows: {
+    makeappx: path.join(kit, 'makeappx.exe'), signtool: path.join(kit, 'signtool.exe'),
+    dlib: signing ? path.join(kit, 'Azure.CodeSigning.Dlib.dll') : null,
+    dotnetRoot,
+  } }
+}
+
+/**
+ * @param {{ source: string, out: string, cache: string, target: string, formats: string[], builderRoot: string, config: import('app-builder-lib').Configuration, dmgbuild: string | null, unsignedDir: boolean }} options
  * @returns {Promise<string>}
  */
-async function acquirePackagingTools({ source, out, cache, target, formats, builderRoot, config, dmgbuild }) {
+async function acquirePackagingTools({ source, out, cache, target, formats, builderRoot, config, dmgbuild, unsignedDir }) {
   /** @param {string} relative */
   const load = (relative) => import(pathToFileURL(path.join(builderRoot, 'dist', relative)).href)
   const [electronGet, sevenZip, icons] = await Promise.all([
@@ -99,16 +129,8 @@ async function acquirePackagingTools({ source, out, cache, target, formats, buil
   let windows = null
   if (process.platform === 'win32') {
     const builder = await load('toolsets/winCodeSign.js')
-    const tools = await ensureWindowsBundleTools({ config, resourcesDir, signing: true, load: async () => builder, prepared: null })
-    const kitRoot = copyTool(path.dirname(path.dirname(tools.makeappx)), path.join(out, 'winCodeSign'))
-    if (!tools.dlib || !tools.dotnetRoot) throw new Error('Windows preparation requires the ATS dlib and paired .NET runtime')
-    fs.cpSync(path.dirname(tools.dlib), path.join(kitRoot, path.basename(path.dirname(tools.signtool))), { recursive: true })
-    const rcedit = await builder.getRceditBundle(config.toolsets?.winCodeSign, resourcesDir)
-    fs.copyFileSync(rcedit.x64, path.join(kitRoot, 'rcedit-x64.exe'))
-    fs.copyFileSync(rcedit.x86, path.join(kitRoot, 'rcedit-x86.exe'))
-    const kit = path.join(kitRoot, path.basename(path.dirname(tools.makeappx)))
-    windows = { makeappx: path.join(kit, 'makeappx.exe'), signtool: path.join(kit, 'signtool.exe'),
-      dlib: path.join(kit, 'Azure.CodeSigning.Dlib.dll'), dotnetRoot: copyTool(tools.dotnetRoot, path.join(out, 'dotnet')) }
+    const { kitRoot, windows: preparedWindows } = await prepareWindowsPackaging({ out, config, resourcesDir, builder, signing: !unsignedDir })
+    windows = preparedWindows
     toolsets.winCodeSign = kitRoot
   }
   if (formats.includes('AppImage')) {
@@ -121,14 +143,14 @@ async function acquirePackagingTools({ source, out, cache, target, formats, buil
     const fpm = await load('toolsets/fpm.js')
     toolsets.fpm = copyTool(path.dirname(await fpm.getFpmPath(config.toolsets?.fpm, resourcesDir)), path.join(out, 'fpm'))
   }
-  return publishPackagingInputs({ source, out, target, formats, electron, toolsets, windows, dmgbuild })
+  return publishPackagingInputs({ source, out, target, formats, electron, toolsets, windows, dmgbuild, windowsSigning: !unsignedDir })
 }
 
 if (isMain(import.meta.url)) {
   const { values } = parseArgs({ options: {
     source: { type: 'string' }, out: { type: 'string' }, cache: { type: 'string' }, target: { type: 'string' },
-    format: { type: 'string', multiple: true }, dmgbuild: { type: 'string' },
+    format: { type: 'string', multiple: true }, dmgbuild: { type: 'string' }, 'unsigned-dir': { type: 'boolean' },
   } })
-  if (!values.source || !values.out || !values.cache) throw new Error('Usage: prepare-packaging-tools.mjs --source REPO --out WORK/packager --cache CACHE/packager [--target same-OS-target] [--format FORMAT] [--dmgbuild PM_BINARY]')
-  console.log(await preparePackagingTools({ source: values.source, out: values.out, cache: values.cache, target: values.target, formats: values.format, dmgbuild: values.dmgbuild }))
+  if (!values.source || !values.out || !values.cache) throw new Error('Usage: prepare-packaging-tools.mjs --source REPO --out WORK/packager --cache CACHE/packager [--target same-OS-target] [--format FORMAT] [--dmgbuild PM_BINARY] [--unsigned-dir]')
+  console.log(await preparePackagingTools({ source: values.source, out: values.out, cache: values.cache, target: values.target, formats: values.format, dmgbuild: values.dmgbuild, unsignedDir: values['unsigned-dir'] }))
 }

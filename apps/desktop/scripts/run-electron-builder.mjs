@@ -4,7 +4,7 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { isMain } from './utils.mjs'
-import { readPackagingInputs, preparationRequired } from './prepared-packaging.mjs'
+import { readPackagingInputs, preparationRequired, windowsSigningConfigured } from './prepared-packaging.mjs'
 import { readNativeInputs } from './prepared-native-deps.mjs'
 import { pinnedPackageRoot } from './prepare-packaging-tools.mjs'
 
@@ -41,6 +41,9 @@ function takeOption(args, name) {
 /** @param {string[]} args @param {import('./prepared-packaging.mjs').PreparedPackaging} inputs @returns {void} */
 export function validatePreparedBuilderArgs(args, inputs) {
   const requested = sourceFormats(args)
+  if (inputs.windowsSigning === false && windowsSigningConfigured()) {
+    throw preparationRequired('Windows signing was enabled after unsigned directory preparation')
+  }
   if (requested.some(format => format !== 'dir' && !inputs.formats.includes(format))) {
     throw preparationRequired(`Package formats were not prepared: ${requested.join(', ')}`)
   }
@@ -94,6 +97,8 @@ function toolsetArguments(inputs) {
  */
 function runSourceBuilds(args, nativeDeps, spawn) {
   const platform = selectedPlatform(args)
+  const formats = sourceFormats(args)
+  const unsignedDir = platform === 'win32' && formats.length === 1 && formats[0] === 'dir' && !windowsSigningConfigured()
   const requested = [...new Set(args.filter(arg => architectures.includes(arg)))]
   if (requested.includes('--universal')) throw new Error('No prepared universal native payload; use --x64 --arm64 for separate packages')
   if (nativeDeps && requested.length > 1) throw new Error('--native-deps selects one architecture, not multiple source targets')
@@ -110,7 +115,7 @@ function runSourceBuilds(args, nativeDeps, spawn) {
     }
     commands.push([path.join(import.meta.dirname, 'prepare-packaging-tools.mjs'),
       '--source', source, '--out', out, '--target', target, '--cache', path.join(source, '.cache/desktop-inputs/packager'),
-      ...sourceFormats(args).flatMap(format => ['--format', format])])
+      ...formats.flatMap(format => ['--format', format]), ...(unsignedDir ? ['--unsigned-dir'] : [])])
     commands.push([path.join(import.meta.dirname, 'run-electron-builder.mjs'),
       '--prepared', path.join(out, 'prepared.json'), '--native-deps', native,
       ...args.filter(arg => !architectures.includes(arg)), flag])
