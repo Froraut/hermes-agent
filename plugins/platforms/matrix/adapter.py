@@ -1509,8 +1509,48 @@ class MatrixAdapter(BasePlatformAdapter):
     async def stop_typing(self, chat_id: str) -> None:
         await self._set_typing(chat_id, 0)
 
-    async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False) -> SendResult:
+    async def edit_message(
+        self, chat_id: str, message_id: str, content: str, *, finalize: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Edit a sent message. An ``m.replace`` event carries the text twice (top-level fallback and
+        ``m.new_content``) and cannot be split, so the text is first bounded to one chunk of
+        ``max_message_length`` UTF-8 bytes -- the same unit and budget ``send()`` uses.
+
+        Oversized text must neither truncate silently nor fail (the consumer would re-send a
+        duplicate): mid-stream the original keeps a truncated preview (splitting would move the edit
+        target every tick, the Telegram #48648 lesson); ``finalize=True`` edits chunk 1 in place and
+        sends chunks 2..N as continuations, returning the last id as the next edit target."""
         formatted = self.format_message(content)
+        chunks = self.truncate_message(formatted, self.max_message_length, len_fn=self.message_len_fn)
+        if len(chunks) <= 1 or not finalize:
+            return await self._send_content_event(chat_id, self._build_edit_content(message_id, chunks[0]))
+        first = await self._send_content_event(chat_id, self._build_edit_content(message_id, chunks[0]))
+        if not first.success:
+            return first
+        continuation_ids: list[str] = []
+        previous = message_id
+        for index, chunk in enumerate(chunks[1:], start=2):
+            msg_content = self._build_text_message_content(chunk)
+            # Without routing metadata, anchor the continuation to the message it continues.
+            self._apply_relation_metadata(
+                msg_content, reply_to=None if (metadata or {}).get("thread_id") else previous, metadata=metadata)
+            try:
+                previous = str(await self._send_room_message(chat_id, msg_content))
+            except Exception as exc:
+                logger.warning("Matrix: edit overflow stopped at %d/%d chunks: %s", index - 1, len(chunks), exc)
+                last_id = continuation_ids[-1] if continuation_ids else message_id
+                return SendResult(
+                    success=True, message_id=last_id, continuation_message_ids=tuple(continuation_ids),
+                    raw_response={"partial_overflow": True, "delivered_chunks": index - 1,
+                                  "total_chunks": len(chunks), "last_message_id": last_id,
+                                  "continuation_message_ids": tuple(continuation_ids)})
+            continuation_ids.append(previous)
+        return SendResult(success=True, message_id=continuation_ids[-1],
+                          continuation_message_ids=tuple(continuation_ids))
+
+    def _build_edit_content(self, message_id: str, formatted: str) -> Dict[str, Any]:
+        """``m.replace`` content for one chunk, kept under ``_MAX_CONTENT_BYTES`` as a whole."""
         new_content = self._build_text_message_content(formatted)
         msg_content: Dict[str, Any] = {"msgtype": "m.text", "body": f"* {formatted}", "m.new_content": new_content}
         if "m.mentions" in new_content:
@@ -1519,21 +1559,27 @@ class MatrixAdapter(BasePlatformAdapter):
             msg_content["format"] = "org.matrix.custom.html"
             msg_content["formatted_body"] = f'* {new_content["formatted_body"]}'
         msg_content["m.relates_to"] = {"rel_type": "m.replace", "event_id": message_id}
+        if _content_bytes(msg_content) <= _MAX_CONTENT_BYTES:
+            return msg_content
+        # The top-level copy is only the fallback for clients without edit support (edit-aware
+        # clients render m.new_content); shorten it rather than double the event past the cap.
+        msg_content.pop("format", None)
+        msg_content.pop("formatted_body", None)
+        msg_content["body"] = ""
         if _content_bytes(msg_content) > _MAX_CONTENT_BYTES:
-            # The top-level copy is only the fallback for clients without edit support (edit-aware
-            # clients render m.new_content); shorten it rather than double the event past the cap.
-            msg_content.pop("format", None)
-            msg_content.pop("formatted_body", None)
-            msg_content["body"] = ""
-            if _content_bytes(msg_content) > _MAX_CONTENT_BYTES:
-                # Many distinct mentions: the top-level list only drives this edit's notifications,
-                # while m.new_content keeps the full list, so the duplicate goes rather than the edit.
-                msg_content.pop("m.mentions", None)
-            room = _MAX_CONTENT_BYTES - _content_bytes(msg_content)
-            # JSON escaping grows a character at most sixfold (\u00XX).
-            fallback = formatted.encode("utf-8")[: max(0, room // 6)].decode("utf-8", "ignore")
-            msg_content["body"] = f"* {fallback}…"
-        return await self._send_content_event(chat_id, msg_content)
+            # Many distinct mentions: the top-level list only drives this edit's notifications,
+            # while m.new_content keeps the full list, so the duplicate goes rather than the edit.
+            msg_content.pop("m.mentions", None)
+        if _content_bytes(msg_content) > _MAX_CONTENT_BYTES and "formatted_body" in new_content:
+            # m.new_content itself is what renders; HTML of an escape-heavy chunk is the part that
+            # can still overflow, so the replacement falls back to plain text like send() does.
+            new_content.pop("format", None)
+            new_content.pop("formatted_body", None)
+        room = _MAX_CONTENT_BYTES - _content_bytes(msg_content)
+        # JSON escaping grows a character at most sixfold (\u00XX).
+        fallback = formatted.encode("utf-8")[: max(0, room // 6)].decode("utf-8", "ignore")
+        msg_content["body"] = f"* {fallback}…"
+        return msg_content
 
     async def send_image(
         self, chat_id: str, image_url: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
@@ -1841,7 +1887,18 @@ class MatrixAdapter(BasePlatformAdapter):
             if audio_metadata:
                 msg_content["org.matrix.msc1767.audio"] = audio_metadata
         self._apply_relation_metadata(msg_content, reply_to=reply_to, metadata=metadata)
-        return await self._send_content_event(room_id, msg_content)
+        overflow_caption = None
+        if caption and _content_bytes(msg_content) > _MAX_CONTENT_BYTES:
+            # A media event cannot be split; ship it with its filename and deliver the caption as
+            # ordinary (byte-chunked) text right after it instead of an M_TOO_LARGE rejection.
+            msg_content["body"] = filename
+            overflow_caption = caption
+        result = await self._send_content_event(room_id, msg_content)
+        if overflow_caption and result.success:
+            caption_result = await self.send(room_id, overflow_caption, reply_to=reply_to, metadata=metadata)
+            if not caption_result.success:
+                logger.warning("Matrix: media sent but its long caption failed: %s", caption_result.error)
+        return result
 
     async def _room_needs_encrypted_upload(self, room_id: str) -> bool:
         """E2EE on, Olm machine loaded, and the state store says the room is encrypted."""
