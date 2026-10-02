@@ -1055,3 +1055,90 @@ class TestRpcTokenAuthorization(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.platforms("posix")
+def test_young_crash_leftover_is_reaped_once_it_ages_past_retention(tmp_path, monkeypatch):
+    """A leftover owner dir kept at the first root scan must not survive forever.
+
+    Crash leftovers are never registered in ``_records``, so the first scan used to be
+    the only chance to remove them: a 1h-old orphan at that scan stayed until the next
+    process restart. The reaper pass and the rate-limited write path now rescan.
+    """
+    import os
+    import time as real_time
+    import types
+
+    import tools.code_execution_artifacts as artifacts
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    clock = {"now": real_time.time()}
+    fake_time = types.SimpleNamespace(
+        time=lambda: clock["now"], monotonic=lambda: clock["now"],
+        time_ns=real_time.time_ns, sleep=real_time.sleep,
+    )
+    monkeypatch.setattr(artifacts, "time", fake_time)
+    monkeypatch.setattr(artifacts, "_local_root_scans", {})
+    monkeypatch.setattr(artifacts, "_records", {})
+    monkeypatch.setattr(artifacts, "_reaper_started", True)  # drive passes by hand
+
+    root = tmp_path / "cache" / "exec"
+    root.mkdir(parents=True)
+    orphan = root / "owner-crashed000000"
+    orphan.mkdir()
+    (orphan / "output-1.txt").write_text("left behind by a crashed process")
+    young = clock["now"] - 60 * 60
+    os.utime(orphan, (young, young))
+
+    first = artifacts.retain_artifact("live-owner", "first retained output")
+    assert first is not None
+    assert orphan.exists(), "a 1h-old leftover must survive the first scan"
+
+    # Same process, 25h later: the orphan is now past the 24h window.
+    clock["now"] += 25 * 60 * 60
+    fresh = root / "owner-fresh0000000"
+    fresh.mkdir()
+    recent = clock["now"] - 60 * 60
+    os.utime(fresh, (recent, recent))
+
+    artifacts.cleanup_expired_artifacts()  # what the background reaper runs
+
+    assert not orphan.exists(), "aged crash leftover survived the reaper pass"
+    assert fresh.exists(), "a leftover still inside the window was removed"
+
+
+@pytest.mark.platforms("posix")
+def test_write_path_rescans_local_root_at_most_once_per_reaper_interval(tmp_path, monkeypatch):
+    import os
+    import time as real_time
+    import types
+
+    import tools.code_execution_artifacts as artifacts
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    clock = {"now": real_time.time()}
+    monkeypatch.setattr(artifacts, "time", types.SimpleNamespace(
+        time=lambda: clock["now"], monotonic=lambda: clock["now"],
+        time_ns=real_time.time_ns, sleep=real_time.sleep,
+    ))
+    monkeypatch.setattr(artifacts, "_local_root_scans", {})
+    monkeypatch.setattr(artifacts, "_records", {})
+    monkeypatch.setattr(artifacts, "_reaper_started", True)
+
+    root = tmp_path / "cache" / "exec"
+    root.mkdir(parents=True)
+    orphan = root / "owner-crashed000000"
+    orphan.mkdir()
+    almost = clock["now"] - artifacts.ARTIFACT_MAX_AGE_SECONDS + 30
+    os.utime(orphan, (almost, almost))
+
+    assert artifacts.retain_artifact("owner", "one") is not None
+    assert orphan.exists()
+
+    clock["now"] += 60  # past 24h, but inside the rescan interval: no rescan yet
+    assert artifacts.retain_artifact("owner", "two") is not None
+    assert orphan.exists()
+
+    clock["now"] += artifacts._REAPER_INTERVAL_SECONDS
+    assert artifacts.retain_artifact("owner", "three") is not None
+    assert not orphan.exists()

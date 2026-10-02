@@ -44,7 +44,8 @@ class _Artifact:
 
 _lock = threading.Lock()
 _records: dict[tuple[str, str], list[_Artifact]] = {}
-_pruned_local_roots: set[str] = set()
+# Local profile roots seen by this process -> monotonic time of their last crash-leftover scan.
+_local_root_scans: dict[str, float] = {}
 _reaper_started = False
 
 
@@ -82,16 +83,25 @@ def _local_root() -> Path:
         raise OSError(f"execute_code artifact directory escapes HERMES_HOME: {error}")
     ensure_spill_dir(root, private=True)
     _prune_stale_local_root(root)
+    _ensure_reaper()
     return root
 
 
-def _prune_stale_local_root(root: Path) -> None:
-    """Reclaim crash leftovers once per concrete profile root."""
+def _prune_stale_local_root(root: Path, *, force: bool = False) -> None:
+    """Reclaim crash-leftover ``owner-*`` dirs older than the retention window.
+
+    Unregistered dirs (left by a crashed process) are invisible to ``_records``, so the
+    root itself is rescanned: on first use, at most once per reaper interval from the
+    write path, and on every reaper pass (``force``). A leftover that was still young at
+    the first scan is therefore removed once it ages past the window, without a restart.
+    """
     root_key = str(root)
+    now = time.monotonic()
     with _lock:
-        if root_key in _pruned_local_roots:
+        last = _local_root_scans.get(root_key)
+        if not force and last is not None and now - last < _REAPER_INTERVAL_SECONDS:
             return
-        _pruned_local_roots.add(root_key)
+        _local_root_scans[root_key] = now
     cutoff = time.time() - ARTIFACT_MAX_AGE_SECONDS
     try:
         candidates = list(root.glob("owner-*"))
@@ -152,18 +162,22 @@ def retain_artifact(owner: str, text: str, *, env: Any | None = None,
 
 
 def _register(record: _Artifact) -> None:
-    global _reaper_started
     with _lock:
         _records.setdefault(record.scope, []).append(record)
         doomed = _pop_excess_locked(time.time())
-        start_reaper = not _reaper_started
-        if start_reaper:
-            _reaper_started = True
     for old in doomed:
         _delete(old)
-    if start_reaper:
-        threading.Thread(target=_reaper_loop, name="hermes-exec-artifact-reaper",
-                         daemon=True).start()
+    _ensure_reaper()
+
+
+def _ensure_reaper() -> None:
+    global _reaper_started
+    with _lock:
+        if _reaper_started:
+            return
+        _reaper_started = True
+    threading.Thread(target=_reaper_loop, name="hermes-exec-artifact-reaper",
+                     daemon=True).start()
 
 
 def _pop_excess_locked(now: float) -> list[_Artifact]:
@@ -211,11 +225,18 @@ def _delete(record: _Artifact) -> None:
 
 
 def cleanup_expired_artifacts() -> int:
-    """Delete registered artifacts past their bounded retention window."""
+    """Delete registered artifacts past their bounded retention window.
+
+    Also rescans every local profile root this process has used, so unregistered
+    crash leftovers are held to the same age bound as registered records.
+    """
     with _lock:
         doomed = _pop_excess_locked(time.time())
+        local_roots = list(_local_root_scans)
     for record in doomed:
         _delete(record)
+    for root in local_roots:
+        _prune_stale_local_root(Path(root), force=True)
     return len(doomed)
 
 
