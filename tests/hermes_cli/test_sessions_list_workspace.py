@@ -81,3 +81,25 @@ def test_a_session_archived_mid_listing_does_not_hide_a_match(db, capsys, monkey
     ids, _out = _listed(db, 20, "projb", capsys)
 
     assert ids == ["s_b2", "s_b1", "s_b0"]
+
+
+def test_large_workspace_outside_the_recent_window_needs_at_most_two_reads(db, capsys, monkeypatch):
+    # >200 matching sessions, none of them among the newest 200: the first (windowed) read finds
+    # no match at all, and the single fallback read over every session must still list them.
+    projb = [(f"s_b{i}", "/w/projb") for i in range(250)]
+    proja = [(f"s_a{i}", "/w/proja") for i in range(200)]
+    _seed(db, projb + proja)
+    read = db.list_sessions_rich
+    windows = []
+
+    def counting_read(**kwargs):
+        windows.append(kwargs["limit"])
+        return read(**kwargs)
+
+    monkeypatch.setattr(db, "list_sessions_rich", counting_read)
+
+    ids, out = _listed(db, 3, "projb", capsys)
+
+    assert ids == ["s_b249", "s_b248", "s_b247"]
+    assert "more not shown" in out
+    assert windows == [200, -1]
