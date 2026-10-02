@@ -51,3 +51,27 @@ def test_v4a_context_lines_keep_their_bytes_among_repeated_lines(tmp_path):
 
     assert result.success, result.error
     assert target.read_bytes() == b"c\n" + b"b\r\n" + b"b\n" + b"c\r\n"
+
+
+@pytest.mark.parametrize("before, after", [
+    # CRLF file, last line terminated: the insertion goes after the existing CRLF.
+    (b"alpha\r\nbravo\r\n", b"alpha\r\nbravo\r\nAPPENDED\r\n"),
+    # CRLF file, last line unterminated: the break the insertion adds takes the file's CRLF.
+    (b"alpha\r\nbravo", b"alpha\r\nbravo\r\nAPPENDED\r\n"),
+    # LF file, last line unterminated.
+    (b"alpha\nbravo", b"alpha\nbravo\nAPPENDED\n"),
+    # CRLF file whose last line ends in a bare LF: that LF is the file's own byte and stays.
+    (b"alpha\r\nbravo\n", b"alpha\r\nbravo\nAPPENDED\r\n"),
+])
+def test_v4a_eof_append_line_break_matches_the_file(tmp_path, before, after):
+    """An addition-only hunk with no @@ hint appends at EOF. The break before the appended text is
+    the last line's own terminator when it has one, else the file's ending — never a bare LF the
+    file did not have."""
+    target = tmp_path / "data.txt"
+    target.write_bytes(before)
+    ops = ShellFileOperations(LocalEnvironment(cwd=str(tmp_path)), cwd=str(tmp_path))
+
+    result = ops.patch_v4a(f"*** Begin Patch\n*** Update File: {target}\n+APPENDED\n*** End Patch")
+
+    assert result.success, result.error
+    assert target.read_bytes() == after
