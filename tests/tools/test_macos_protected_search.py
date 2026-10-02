@@ -384,3 +384,49 @@ def test_other_spellings_of_a_broad_root_still_prune_and_keep_their_spelling(tmp
             assert "Skipped macOS protected folders" in result.warning
         hint = ops.search("NEEDLE", path=root, target="content").warning
         assert f"{root}/Code/keep.txt" in hint and "private.txt" not in hint, hint
+
+
+_DATA_VOLUME = Path("/System/Volumes/Data")
+
+
+@pytest.mark.platforms("macos")
+@pytest.mark.parametrize("home_spelled_on_data_volume", [False, True])
+@pytest.mark.parametrize("native", ["0", "1"])
+def test_user_facing_and_data_volume_spellings_prune_alike_even_through_symlinks(
+        tmp_path, monkeypatch, native, home_spelled_on_data_volume):
+    """The same home reached as its user-facing path, as its /System/Volumes/Data
+    firmlink alias, or through a symlink to either spelling must prune the same
+    protected folders, and hits come back under the root as the caller spelled it.
+    Whichever spelling $HOME itself uses must not matter."""
+    home = tmp_path.resolve() / "home"
+    (home / "Code").mkdir(parents=True)
+    data_home = _DATA_VOLUME / home.relative_to("/")
+    if not (data_home.exists() and data_home.samefile(home)):
+        pytest.skip("temp dir is not on the firmlinked APFS Data volume")
+    (home / "Code" / "keep.txt").write_text("needle\n")
+    protected = home / "Downloads"
+    protected.mkdir()
+    (protected / "private.txt").write_text("needle\n")
+    to_user = tmp_path.resolve() / "link-to-user-path"
+    to_user.symlink_to(home, target_is_directory=True)
+    to_data = tmp_path.resolve() / "link-to-data-alias"
+    to_data.symlink_to(data_home, target_is_directory=True)
+    monkeypatch.setattr(file_operations, "_HOME", str(data_home if home_spelled_on_data_volume else home))
+    monkeypatch.setenv("HERMES_NATIVE_FILE_READ", native)
+    ops = ShellFileOperations(LocalEnvironment(cwd=str(home / "Code")))
+    assert ops._has_command("rg"), "real ripgrep required"
+
+    protected.chmod(0)  # any descent would surface as a permission error
+    try:
+        for root in (str(home), str(data_home), str(to_user), str(to_data)):
+            for target, pattern in (("files", "*.txt"), ("content", "needle")):
+                result = ops.search(pattern, path=root, target=target)
+                assert not result.error, (root, result.to_dict())
+                paths = result.files if target == "files" else [m.path for m in result.matches]
+                assert paths == [f"{root}/Code/keep.txt"], (root, result.to_dict())
+                assert "Skipped macOS protected folders" in result.warning, (root, result.warning)
+                assert "Downloads" in result.warning
+            hint = ops.search("NEEDLE", path=root, target="content").warning
+            assert f"{root}/Code/keep.txt" in hint and "private.txt" not in hint, (root, hint)
+    finally:
+        protected.chmod(0o700)
