@@ -311,8 +311,9 @@ class SessionMaintenanceMixin:
         and fenced.  A compression ancestor is deleted only together with every continuation after it
         (``whole_lineages``)."""
         where, where_params = self._prune_where(older_than_days, source, filters, whole_lineages=True)
-        removed_ids: list[str] = []
-        def _do(conn):
+        # _execute_write re-runs _do after a rollback; only the committed attempt's ids may drive file
+        # cleanup, so they are returned, never accumulated outside the callback.
+        def _do(conn) -> list:
             cursor = conn.execute(f"SELECT s.id FROM sessions s WHERE {where}", where_params)
             session_ids = {row["id"] for row in cursor.fetchall()}
             if exclude_active_write_guards:
@@ -320,26 +321,31 @@ class SessionMaintenanceMixin:
                 session_ids -= guarded_ids
                 # Guard filtering changes the candidate set after its SQL lineage closure. Re-close it:
                 # every continuation ancestor of a protected row must stay with that row.
+                spared: set = set()
                 for chunk in _id_chunks(guarded_ids):
                     ph = _placeholders(chunk)
-                    ancestors = conn.execute(
-                        _continued_ancestors_sql(f"c.id IN ({ph})"), chunk).fetchall()
-                    session_ids.difference_update(row["id"] for row in ancestors)
+                    spared.update(row["id"] for row in conn.execute(
+                        _continued_ancestors_sql(f"c.id IN ({ph})"), chunk).fetchall())
+                spared &= session_ids
+                session_ids -= spared
+                if guarded_ids:
+                    logger.debug("Session prune kept %d guarded session(s) and %d of their compression ancestor(s)",
+                                 len(guarded_ids), len(spared))
             if not session_ids:
-                return 0
+                return []
+            removed_ids = list(session_ids)
             # Batched: a cron-heavy store prunes tens of thousands of ids in one call.
-            for chunk in _id_chunks(session_ids):
+            for chunk in _id_chunks(removed_ids):
                 ph = _placeholders(chunk)
                 conn.execute(f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk)
                 conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
                 conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
-                removed_ids.extend(chunk)
             self._delete_unreferenced_system_prompts(conn)
-            return len(session_ids)
-        count = self._execute_write(_do)
+            return removed_ids
+        removed_ids = self._execute_write(_do) or []
         for sid in removed_ids:
             self._remove_session_files(sessions_dir, sid)
-        return count
+        return len(removed_ids)
 
     def _page_pragmas(self, names: Tuple[str, ...], fail_msg: str) -> Optional[list]:
         """Integer PRAGMAs over the existing connection (never a byte probe); None + debug log on failure."""
