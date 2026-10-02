@@ -488,7 +488,8 @@ def test_malformed_optional_changelog_and_cache_do_not_hide_the_update(installat
 
 
 @pytest.mark.parametrize("repository,heals", [("NousResearch/hermes-agent", True), ("fixture/fork", False)])
-def test_official_ssh_healing_uses_public_https_without_retargeting_forks(installation, monkeypatch, repository, heals):
+@pytest.mark.parametrize("api_status", [200, 503])
+def test_official_ssh_healing_uses_public_https_without_retargeting_forks(installation, monkeypatch, repository, heals, api_status):
     from hermes_cli.source_check import check_for_updates
     root, linked, home, base, head, responses, requests, git = installation
     git("remote", "set-url", "origin", f"git@github.com:{repository}.git")
@@ -496,7 +497,7 @@ def test_official_ssh_healing_uses_public_https_without_retargeting_forks(instal
     monkeypatch.setenv("GIT_SSH_COMMAND", "false")
     branch_file = home / "desktop-update.json"
     branch_file.write_text(json.dumps({"branch": "deleted"}))
-    responses[f"/repos/{repository}/commits/main"] = (200, head)
+    responses[f"/repos/{repository}/commits/main"] = (api_status, head if api_status == 200 else {})
     status = check_for_updates(install_root=linked, home=home, branch_config_path=branch_file)
     assert status["branch"] == ("main" if heals else "deleted")
     assert json.loads(branch_file.read_text())["branch"] == status["branch"]
@@ -542,3 +543,42 @@ def test_branch_tip_failure_names_the_cause(installation):
     status = check_for_updates(install_root=root, home=home, force=True)
     assert status["error"] == "fetch-failed"
     assert "HTTP 503" in status["message"]
+
+
+@pytest.mark.parametrize("origin,repository", [
+    ("git@github.com:NousResearch/hermes-agent.git", "NousResearch/hermes-agent"),
+    ("https://github.com/fixture/fork.git", "fixture/fork"),
+])
+def test_main_api_outage_recovers_from_read_only_git_advertisement(installation, monkeypatch, origin, repository):
+    from hermes_cli.source_check import check_for_updates
+
+    root, linked, home, base, head, responses, requests, git = installation
+    remote = home / "remote.git"
+    git("clone", "--bare", str(root), str(remote))
+    git("commit", "--allow-empty", "-m", "upstream update")
+    target = git("rev-parse", "HEAD")
+    git("push", str(remote), "main")
+    git("reset", "--hard", head)
+    git("remote", "set-url", "origin", origin)
+    monkeypatch.setenv("GIT_SSH_COMMAND", "false")
+    original = subprocess.run
+
+    def local_advertisement(args, **kwargs):
+        if "ls-remote" in args:
+            args = [args[0], "-c", f"url.{remote.as_uri()}.insteadOf=https://github.com/{repository}.git", *args[1:]]
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", local_advertisement)
+    responses[MAIN_CHANNEL] = (200, source_channel("main", repository))
+    api = f"/repos/{repository}/commits/main"
+    responses[api] = (503, {})
+
+    status = check_for_updates(install_root=root, home=home, force=True)
+
+    assert "error" not in status
+    assert status["targetSha"] == target
+    assert status["updateAvailable"] is True
+    assert status["behind"] == -1  # An unavailable compare API does not hide the update.
+    assert api in requests
+    assert git("rev-parse", "HEAD") == head
+    assert git("remote", "get-url", "origin") == origin
