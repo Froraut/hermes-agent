@@ -4,14 +4,16 @@ import json
 import os
 import pytest
 import stat
+import threading
 from argparse import Namespace
 
 from hermes_cli.webhook import (
     webhook_command,
     _get_webhook_base_url,
     _load_subscriptions,
-    _save_subscriptions,
+    _mutate_subscriptions,
     _subscriptions_path,
+    WebhookSubscriptionsError,
 )
 
 @pytest.fixture(autouse=True)
@@ -91,6 +93,108 @@ class TestSubscribe:
 
         assert _load_subscriptions()["notifier"]["secret"] == "original"
 
+    def test_stale_update_cannot_restore_concurrently_removed_or_disabled_route(self, monkeypatch):
+        import hermes_cli.webhook as webhook_module
+
+        webhook_command(_make_args(
+            webhook_action="subscribe", name="notifier", secret="original"
+        ))
+        original_load = _load_subscriptions
+        pause = {"loaded": threading.Event(), "allow": threading.Event()}
+        errors = []
+
+        def load_with_paused_update():
+            subscriptions = original_load()
+            if threading.current_thread().name == "stale-webhook-update":
+                pause["loaded"].set()
+                if not pause["allow"].wait(timeout=5):
+                    raise AssertionError("timed out waiting to resume stale update")
+            return subscriptions
+
+        monkeypatch.setattr("hermes_cli.webhook._load_subscriptions", load_with_paused_update)
+
+        def update_route():
+            try:
+                webhook_command(_make_args(
+                    webhook_action="subscribe", name="notifier", description="stale update"
+                ))
+            except BaseException as exc:  # surfaced in the test thread below
+                errors.append(exc)
+
+        def start_stale_update():
+            worker = threading.Thread(target=update_route, name="stale-webhook-update")
+            worker.start()
+            assert pause["loaded"].wait(timeout=5)
+            return worker
+
+        worker = start_stale_update()
+        webhook_command(_make_args(webhook_action="remove", name="notifier"))
+        pause["allow"].set()
+        worker.join(timeout=5)
+
+        assert not worker.is_alive()
+        assert errors == []
+        assert "notifier" not in original_load()
+
+        webhook_command(_make_args(
+            webhook_action="subscribe", name="notifier", secret="replacement"
+        ))
+        pause = {"loaded": threading.Event(), "allow": threading.Event()}
+        worker = start_stale_update()
+
+        def disable(subscriptions):
+            subscriptions["notifier"]["enabled"] = False
+
+        webhook_module._mutate_subscriptions(disable)
+        pause["allow"].set()
+        worker.join(timeout=5)
+
+        assert not worker.is_alive()
+        assert errors == []
+        assert original_load()["notifier"]["enabled"] is False
+
+    def test_profile_rebind_rotates_secret_without_exposing_mixed_record(
+        self, tmp_path, monkeypatch
+    ):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.webhook import WebhookAdapter
+
+        profile_dir = tmp_path / "profiles" / "compta"
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "config.yaml").write_text("{}\n")  # identity marker
+        monkeypatch.setattr("hermes_cli.webhook.time.strftime", lambda *_a: "2026-01-01T00:00:00Z")
+        # One char shorter than the rotated secret: "default" -> "compta" then keeps the file size equal.
+        webhook_command(_make_args(
+            webhook_action="subscribe", name="notifier", secret="old-profile-secret-ab"
+        ))
+
+        old_record = _load_subscriptions()["notifier"]
+        adapter = WebhookAdapter(PlatformConfig(enabled=True, extra={"secret": "global"}))
+        adapter._reload_dynamic_routes()
+        initial_stat = _subscriptions_path().stat()
+        monkeypatch.setattr("hermes_cli.webhook.secrets.token_urlsafe", lambda _n: "rotated-profile-secret")
+        webhook_command(_make_args(
+            webhook_action="subscribe", name="notifier", route_profile="compta"
+        ))
+
+        new_record = _load_subscriptions()["notifier"]
+        new_state = (new_record["profile"], new_record["secret"])
+        # Same size + restored mtime: only the rename's new inode reveals the change to the gateway.
+        os.utime(
+            _subscriptions_path(),
+            ns=(initial_stat.st_atime_ns, initial_stat.st_mtime_ns),
+        )
+        assert _subscriptions_path().stat().st_size == initial_stat.st_size
+        adapter._reload_dynamic_routes()
+        _subscriptions_path().write_text("{torn")  # unreadable file must keep the last good routes
+        adapter._reload_dynamic_routes()
+        assert new_state == ("compta", "rotated-profile-secret")
+        assert new_record["secret"] != old_record["secret"]
+        assert (
+            adapter._routes["notifier"]["profile"],
+            adapter._routes["notifier"]["secret"],
+        ) == new_state
+
 class TestCronJobSubscribe:
     """--cron-job: event-triggered cron jobs."""
 
@@ -139,26 +243,35 @@ class TestRemove:
 class TestPersistence:
 
     @pytest.mark.parametrize("content", ['{"a": {"secret": "s"},}', "broken{{{", "[]"])
-    def test_subscribe_refuses_to_overwrite_an_unreadable_store(self, capsys, content):
+    def test_unreadable_store_raises_instead_of_reading_empty(self, content):
         """Only a MISSING store is empty. An unreadable one (a typo from the documented hand edit
         for ``toolsets``) must not be read as {} and written back holding just the new route —
         that silently destroys every other route and its HMAC secret."""
         path = _subscriptions_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        with pytest.raises(WebhookSubscriptionsError):
+            _load_subscriptions()
+
+    @pytest.mark.parametrize("content", ['{"github-prs": {"secret": "s"},}', "broken{{{", "[]"])
+    def test_subscribe_refuses_to_overwrite_an_unreadable_store(self, capsys, content):
+        """The CLI create path exits 1 and leaves the file byte-identical instead of reading the
+        store as {} and publishing one that holds only the new route."""
+        path = _subscriptions_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
 
         with pytest.raises(SystemExit) as exc:
-            webhook_command(_make_args(webhook_action="subscribe", name="new-hook"))
-
-        assert exc.value.code != 0
+            webhook_command(_make_args(webhook_action="subscribe", name="todoist"))
+        assert exc.value.code == 1
         assert path.read_text(encoding="utf-8") == content
-        assert "webhook_subscriptions.json" in capsys.readouterr().out
+        assert "refusing to overwrite" in capsys.readouterr().out
 
     @pytest.mark.platforms("posix")  # POSIX mode bits are platform-specific
     def test_save_creates_secret_file_owner_only_under_permissive_umask(self):
         old_umask = os.umask(0o022)
         try:
-            _save_subscriptions({"demo": {"secret": "TOPSECRET", "prompt": "x"}})
+            _mutate_subscriptions(lambda s: s.update(demo={"secret": "TOPSECRET", "prompt": "x"}))
         finally:
             os.umask(old_umask)
 
@@ -174,7 +287,7 @@ class TestPersistence:
         path.write_text(json.dumps({"old": {"secret": "stale", "prompt": "x"}}))
         path.chmod(0o644)
 
-        _save_subscriptions({"demo": {"secret": "FRESH", "prompt": "x"}})
+        _mutate_subscriptions(lambda s: s.update(demo={"secret": "FRESH", "prompt": "x"}))
 
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert "FRESH" in path.read_text(encoding="utf-8")

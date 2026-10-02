@@ -13,6 +13,11 @@ import hermes_cli.webhook as wh
 from gateway.config import Platform, load_gateway_config
 
 
+@pytest.fixture(autouse=True)
+def _home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+
 @pytest.mark.parametrize("yaml", ["", "platforms:\n  webhook:\n    enabled: false\n"],
                          ids=["env-enabled", "yaml-explicit-disable"])
 def test_cli_gate_and_url_follow_the_gateway_resolution(monkeypatch, yaml):

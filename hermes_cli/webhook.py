@@ -6,10 +6,12 @@ import json
 import re
 import secrets
 import sys
+import threading
 import time
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict
+from typing import Any, Callable, Dict
 
 from hermes_constants import display_hermes_home
 from utils import atomic_json_write
@@ -17,6 +19,17 @@ from utils import atomic_json_write
 
 _SUBSCRIPTIONS_FILENAME = "webhook_subscriptions.json"
 _SUBSCRIPTIONS_FILE_MODE = 0o600
+_SUBSCRIPTIONS_LOCK_FILENAME = ".webhook_subscriptions.lock"
+_SUBSCRIPTIONS_THREAD_LOCK = threading.Lock()
+_MISSING_SUBSCRIPTION = object()
+
+
+class SubscriptionMutationConflict(RuntimeError):
+    """The route changed after a caller took the snapshot it intended to replace."""
+
+
+class WebhookSubscriptionsError(ValueError):
+    """The subscriptions store exists but cannot be read as a JSON object."""
 
 
 def _subscriptions_path() -> Path:
@@ -24,20 +37,38 @@ def _subscriptions_path() -> Path:
     return get_hermes_home() / _SUBSCRIPTIONS_FILENAME
 
 
-class WebhookSubscriptionsError(ValueError):
-    """The subscriptions store exists but cannot be read as a JSON object."""
+def _subscriptions_lock_path() -> Path:
+    return _subscriptions_path().with_name(_SUBSCRIPTIONS_LOCK_FILENAME)
 
 
-def _load_subscriptions() -> Dict[str, dict]:
-    """Routes by name; {} only when the store does not exist. An unreadable store raises: read as
-    empty, the next subscribe/create would write it back holding only the new route — every other
-    route and its HMAC secret gone (the docs send users into this file to add ``toolsets``)."""
+@contextmanager
+def _subscriptions_lock():
+    """Serialize subscription snapshots and mutations across threads and processes."""
+    from hermes_cli.active_sessions import _FileLock
+
+    with _SUBSCRIPTIONS_THREAD_LOCK:
+        with _FileLock(_subscriptions_lock_path()):
+            yield
+
+
+def _load_subscriptions_unlocked() -> Dict[str, dict]:
+    """Read one complete store snapshot; only a MISSING store reads as empty.
+
+    An unreadable or malformed one raises: read as {}, the next create would publish a store
+    holding only its own route — every other route and its HMAC secret gone (the docs send
+    users into this file to hand-edit ``toolsets``)."""
     path = _subscriptions_path()
-    if not path.exists():
-        return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError) as exc:  # JSONDecodeError / UnicodeDecodeError are ValueErrors
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise WebhookSubscriptionsError(
+            f"{display_hermes_home()}/{_SUBSCRIPTIONS_FILENAME} is not readable ({exc}); "
+            "fix it or move it aside — refusing to overwrite it") from exc
+    try:
+        data = json.loads(raw.decode("utf-8-sig"))
+    except ValueError as exc:  # JSONDecodeError / UnicodeDecodeError are ValueErrors
         data = exc
     if not isinstance(data, dict):
         reason = data if isinstance(data, Exception) else f"top level is {type(data).__name__}, not an object"
@@ -47,19 +78,59 @@ def _load_subscriptions() -> Dict[str, dict]:
     return data
 
 
-def _save_subscriptions(subs: Dict[str, dict]) -> None:
+def _load_subscriptions() -> Dict[str, dict]:
+    """Lock-free read: writers publish by atomic rename, so a reader always sees one whole
+    snapshot, and read-only homes (no lock file can be created) keep working."""
+    return _load_subscriptions_unlocked()
+
+
+def _save_subscriptions_unlocked(subs: Dict[str, dict]) -> None:
     # The file holds per-route HMAC secrets: atomic_json_write fchmods the temp file 0o600 BEFORE the
     # rename (no umask window) and re-asserts the mode on the destination afterwards.
     atomic_json_write(_subscriptions_path(), subs, mode=_SUBSCRIPTIONS_FILE_MODE)
+
+
+def _mutate_subscriptions(mutate: Callable[[Dict[str, dict]], Any]) -> Any:
+    """Lock, re-read, mutate and atomically publish one complete store snapshot."""
+    with _subscriptions_lock():
+        subscriptions = _load_subscriptions_unlocked()
+        result = mutate(subscriptions)
+        _save_subscriptions_unlocked(subscriptions)
+        return result
+
+
+def _replace_subscription(name: str, route: dict, expected: object) -> dict:
+    """CAS one route so a stale update cannot recreate a removed or disabled record.
+
+    A general update is not an enable operation: an explicit ``enabled: False`` on the
+    replaced record survives (only the dashboard's dedicated enabled endpoint lifts it).
+    Returns the route as published.
+    """
+    def replace(subscriptions: Dict[str, dict]) -> dict:
+        current = subscriptions.get(name, _MISSING_SUBSCRIPTION)
+        expected_missing = expected is _MISSING_SUBSCRIPTION
+        if (current is _MISSING_SUBSCRIPTION) != expected_missing or (
+            not expected_missing and current != expected
+        ):
+            raise SubscriptionMutationConflict(
+                f"Webhook subscription '{name}' changed concurrently; retry the operation."
+            )
+        published = route
+        if isinstance(current, dict) and current.get("enabled") is False:
+            published = {**route, "enabled": False}
+        subscriptions[name] = published
+        return published
+
+    return _mutate_subscriptions(replace)
 
 
 def _get_webhook_config() -> dict:
     """The webhook platform as the gateway resolves it (``{"enabled", "extra"}``), else {}.
 
     Resolved through ``load_gateway_config`` — not config.yaml alone — so WEBHOOK_ENABLED /
-    WEBHOOK_PORT (what ``hermes gateway setup`` and the dashboard write to .env) enable the CLI and
-    set its URLs exactly as they enable and bind the adapter; an explicit yaml ``enabled: false``
-    still wins, as it does for the gateway."""
+    WEBHOOK_PORT (what ``hermes gateway setup`` and the dashboard write to .env) enable the CLI
+    and set its URLs exactly as they enable and bind the adapter; an explicit yaml ``enabled:
+    false`` still wins, as it does for the gateway."""
     try:
         from gateway.config import Platform, load_gateway_config
         pc = load_gateway_config().platforms.get(Platform.WEBHOOK)
@@ -138,8 +209,9 @@ def _cmd_subscribe(args):
         return
 
     subs = _load_subscriptions()
-    is_update = name in subs
-    existing = subs.get(name, {})
+    expected = subs.get(name, _MISSING_SUBSCRIPTION)
+    is_update = expected is not _MISSING_SUBSCRIPTION
+    existing = expected if isinstance(expected, dict) else {}
     profile_arg = getattr(args, "route_profile", None)
     if profile_arg is None:
         profile = existing.get("profile", "default")
@@ -154,7 +226,15 @@ def _cmd_subscribe(args):
         if not profile_exists(profile):
             print(f"Error: Profile '{profile}' does not exist.")
             return
-    secret = args.secret or existing.get("secret") or secrets.token_urlsafe(32)
+    existing_profile = existing.get("profile", "default")
+    profile_changed = is_update and profile != existing_profile
+    if profile_changed and args.secret and args.secret == existing.get("secret"):
+        print(
+            "Error: Rebinding a webhook route requires a new HMAC secret. "
+            "Omit --secret to generate one automatically, or provide a different secret."
+        )
+        return
+    secret = args.secret or (None if profile_changed else existing.get("secret")) or secrets.token_urlsafe(32)
     events = [e.strip() for e in args.events.split(",")] if args.events else []
     route = {
         "description": args.description or f"Agent-created subscription: {name}",
@@ -201,8 +281,11 @@ def _cmd_subscribe(args):
         route["script"] = script
     if args.deliver_chat_id:
         route["deliver_extra"] = {"chat_id": args.deliver_chat_id}
-    subs[name] = route
-    _save_subscriptions(subs)
+    try:
+        route = _replace_subscription(name, route, expected)
+    except SubscriptionMutationConflict as exc:
+        print(f"Error: {exc}")
+        return
 
     print(f"\n  {'Updated' if is_update else 'Created'} webhook subscription: {name}")
     print(f"  URL:    {_route_url(name, route)}")
@@ -257,13 +340,18 @@ def _cmd_list(args):
 
 def _cmd_remove(args):
     name = args.name.strip().lower()
-    subs = _load_subscriptions()
-    if name not in subs:
+
+    def remove(subscriptions: Dict[str, dict]) -> None:
+        if name not in subscriptions:
+            raise KeyError(name)
+        del subscriptions[name]
+
+    try:
+        _mutate_subscriptions(remove)
+    except KeyError:
         print(f"  No subscription named '{name}'.")
         print("  Note: Static routes from config.yaml cannot be removed here.")
         return
-    del subs[name]
-    _save_subscriptions(subs)
     print(f"  Removed webhook subscription: {name}")
 
 
