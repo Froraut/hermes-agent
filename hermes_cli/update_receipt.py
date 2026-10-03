@@ -139,6 +139,12 @@ class UpdateReceipt:
         # Stage END marks: a stage's duration is the gap since the previous mark (or started_at).
         self.data.setdefault("stages", []).append({"name": name, "outcome": outcome, "at": _utc_now_iso(), **facts})
 
+    def duration(self, name: str, outcome: str, duration_ms: float) -> None:
+        # Local operation measurements do not alter the legacy stage end marks or metrics.
+        self.data.setdefault("durations", []).append({
+            "name": name, "outcome": outcome, "duration_ms": round(max(0.0, duration_ms), 3),
+        })
+
     def fact(self, key: str, value: Any) -> None:
         self.data[key] = value
 
@@ -254,6 +260,36 @@ def record_skip(name: str, reason: str) -> None:
 def record_stage(name: str, outcome: str, **facts: str) -> None:
     """Mark the END of a pipeline stage (``success``/``failed``/``skipped``) with a timestamp."""
     _record("stage", f"update stage {name}", name, outcome, **facts)
+
+
+def record_duration(name: str, outcome: str, duration_ms: float) -> None:
+    """Append a local operation duration; no-op without an active receipt, never raises."""
+    _record("duration", f"update duration {name}", name, outcome, duration_ms)
+
+
+@contextmanager
+def measure_duration(name: str):
+    """Measure actual work with a monotonic clock, without changing its outcome.
+
+    Set the yielded ``span[\"outcome\"]`` when a failed operation returns normally.
+    Exceptions record failure and propagate unchanged. Timing and receipt failures
+    are best-effort; a span cannot be attributed to a different enclosing update.
+    """
+    span = {"outcome": "success"}
+    started, update_id = None, None
+    with suppress(Exception):
+        update_id = current_correlation_id()
+        if update_id is not None:
+            started = time.monotonic()
+    try:
+        yield span
+    except BaseException:
+        span["outcome"] = "failed"
+        raise
+    finally:
+        with suppress(Exception):
+            if started is not None and current_correlation_id() == update_id:
+                record_duration(name, span["outcome"], (time.monotonic() - started) * 1000)
 
 
 def record_fact(key: str, value: Any) -> None:

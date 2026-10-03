@@ -104,16 +104,19 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
     # Both current updates and historical takeover reach this in a fresh target
     # interpreter, never in the updater's pre-sync import graph.
     from hermes_cli.main_install_repair import _install_configured_features_missing_deps
+    from hermes_cli.update_receipt import measure_duration
     from hermes_cli.update_stage import publish_stage
 
     _install_configured_features_missing_deps(project_root)
     frontends = source_frontends(project_root)
     if not frontends:
         return
-    env = source_build_env(explicit=True)
+    with measure_duration("node_tools"):
+        env = source_build_env(explicit=True)
     workspaces = frontends + (("apps/desktop",) if desktop else ())
     publish_stage("Updating Node dependencies")
-    prepare_source_dependencies(project_root, workspaces, env=env, explicit=True)
+    with measure_duration("node_deps"):
+        prepare_source_dependencies(project_root, workspaces, env=env, explicit=True)
     # An update that changed no TUI/web input reuses the receipted output, as the
     # launch path already does; recompiling it produces the same bytes. Desktop
     # additionally needs the packaged app to name HEAD (its baked stamp carries the
@@ -124,13 +127,15 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
             print("  ✓ TUI is up to date")
         else:
             publish_stage("Building the TUI")
-            build_source_tui(project_root, env=env)
+            with measure_duration("tui_build"):
+                build_source_tui(project_root, env=env)
     if "web" in frontends:
         if source_product_current(project_root, "web", project_root / "hermes_cli/web_dist"):
             print("  ✓ Web UI is up to date")
         else:
             publish_stage("Building the web UI")
-            build_source_web(project_root, env=env)
+            with measure_duration("web_build"):
+                build_source_web(project_root, env=env)
     if desktop:
         from hermes_cli.main_desktop import (
             _packaged_desktop_current_for_head, _refresh_installed_desktop_apps, build_prepared_desktop)
@@ -148,17 +153,20 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
             from hermes_cli.desktop_build_lock import DesktopBuildLock
 
             build_lock = DesktopBuildLock(project_root)
-            build_lock.acquire(wait=True)
+            with measure_duration("desktop_build_wait"):
+                build_lock.acquire(wait=True)
             try:
-                build_prepared_desktop(
-                    desktop_dir, source_mode=False,
-                    npm=shutil.which("npm", path=env["PATH"]), env=env, icons=project_root,
-                )
+                with measure_duration("desktop_build"):
+                    build_prepared_desktop(
+                        desktop_dir, source_mode=False,
+                        npm=shutil.which("npm", path=env["PATH"]), env=env, icons=project_root,
+                    )
             finally:
                 build_lock.release()
         # A current release/ can still sit beside a stale installed copy (an earlier
         # update rebuilt but never installed); healing must not wait for the next build.
-        _refresh_installed_desktop_apps(desktop_dir)
+        with measure_duration("desktop_install"):
+            _refresh_installed_desktop_apps(desktop_dir)
     # A configured memory provider that no longer ships in core is installed from the
     # catalog for every profile home sharing this venv (config, data and tool names
     # unchanged). The update must finish even if the migration blows up.

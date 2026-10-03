@@ -278,20 +278,21 @@ def _git_run(git_cmd, args, cwd=None, *, check=False, network=False):
     # calls, so layer them instead of passing the keyword twice.
     spawn_kwargs = {"timeout": NETWORK_GIT_TIMEOUT_SECONDS, **_no_prompt_git_kwargs()} if network else {}
     spawn_kwargs.setdefault("creationflags", windows_hide_flags())
-    try:
-        return subprocess.run(
-            git_cmd + args, cwd=_m().PROJECT_ROOT if cwd is None else cwd, capture_output=True,
-            text=True, encoding="utf-8", errors="replace", check=check,
-            **spawn_kwargs)
-    except subprocess.TimeoutExpired as exc:
-        # subprocess.run already killed the child; the checkout stays consistent because
-        # fetch writes to tmp_pack_* and only renames on success. Report as a failed run
-        # so every caller's existing stderr path prints one clear line.
-        result = subprocess.CompletedProcess(
-            exc.cmd, 124, stdout="",
-            stderr=f"git {args[0]} timed out after {NETWORK_GIT_TIMEOUT_SECONDS}s (a stalled remote, or a transfer too large for the limit)")
-        if check:
-            raise subprocess.CalledProcessError(124, exc.cmd, output="", stderr=result.stderr) from exc
+    with _completion_receipt.measure_duration(f"git_{args[0]}") as span:
+        try:
+            result = subprocess.run(
+                git_cmd + args, cwd=_m().PROJECT_ROOT if cwd is None else cwd, capture_output=True,
+                text=True, encoding="utf-8", errors="replace", check=check,
+                **spawn_kwargs)
+        except subprocess.TimeoutExpired as exc:
+            # Fetch writes to tmp_pack_* and only renames on success. Return a failed
+            # run so every caller's existing stderr path prints one clear line.
+            result = subprocess.CompletedProcess(
+                exc.cmd, 124, stdout="",
+                stderr=f"git {args[0]} timed out after {NETWORK_GIT_TIMEOUT_SECONDS}s (a stalled remote, or a transfer too large for the limit)")
+            if check:
+                raise subprocess.CalledProcessError(124, exc.cmd, output="", stderr=result.stderr) from exc
+        span["outcome"] = "failed" if result.returncode else "success"
         return result
 
 
@@ -760,6 +761,15 @@ def _complete_source_update(request: dict | None) -> None:
     _write_fleet_restart_pending_marker(expected_sha=request.get("expected_sha") or _current_checkout_sha() or "")
     result = run_completion(request)
     _accept_completion_pm_receipt(result.get("pm_receipt"), request["receipt"]["update_id"])
+    # Failed bootstrap timing is nonterminal: preserve the parent's identity and
+    # finalization obligation, accepting only durations from this exact update.
+    preparation = result.get("preparation_receipt")
+    current = _completion_receipt._current.get()
+    if (isinstance(preparation, dict) and current is not None
+            and preparation.get("update_id") == current.data.get("update_id")
+            and not preparation.get("finished_at") and isinstance(preparation.get("durations"), list)):
+        with _best_effort('Preparation timing adoption failed: %s'):
+            current.data["durations"] = deepcopy(preparation["durations"])
     token = request["windows_resume"]
     if token is not None and result.get("windows_resume") is not None:
         resumed = dict(result["windows_resume"])
@@ -1548,7 +1558,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
             print("  (removed %d aborted-fetch pack temp file(s))" % len(swept))
         # A partial clone's on-demand fetches strand one small packfile each and never
         # consolidate on their own (#129712); fold them before this run's fetch adds more.
-        _check.fold_lazy_fetch_packs(_m().PROJECT_ROOT)
+        with _completion_receipt.measure_duration("git_pack_maintenance"):
+            _check.fold_lazy_fetch_packs(_m().PROJECT_ROOT)
         # Shallow installer checkouts collect one `.git/shallow` graft per past depth-1 fetch
         # (#105951); stale grafts break merge-base and push this run into the divergence path.
         from hermes_cli.gitlock import repair_broken_shallow_boundaries, prune_stale_shallow_grafts
@@ -1610,13 +1621,14 @@ def _cmd_update_impl(args, gateway_mode: bool):
             print("→ Updates available (commit count unknown on this shallow checkout)")
 
         print("→ Pulling updates...")
-        movement_baseline = _pull_updates(
-            git_cmd, branch, _plan.auto_stash_ref, prompt_for_restore=_plan.prompt_for_restore,
-            gw_input_fn=gw_input_fn, discard_local_changes=opts.discard_local_changes,
-            keep_stash=opts.keep_stash, target_ref=target_ref, pre_sync_sha=_plan.pre_sync_sha,
-            rollback_branch=_plan.rollback_branch,
-            sync_upstream=is_fork and branch == "main" and not release_sha, assume_yes=assume_yes,
-            in_place_update=_plan.in_place_update, _windows_gateway_resume=_windows_gateway_resume)
+        with _completion_receipt.measure_duration("source_materialize"):
+            movement_baseline = _pull_updates(
+                git_cmd, branch, _plan.auto_stash_ref, prompt_for_restore=_plan.prompt_for_restore,
+                gw_input_fn=gw_input_fn, discard_local_changes=opts.discard_local_changes,
+                keep_stash=opts.keep_stash, target_ref=target_ref, pre_sync_sha=_plan.pre_sync_sha,
+                rollback_branch=_plan.rollback_branch,
+                sync_upstream=is_fork and branch == "main" and not release_sha, assume_yes=assume_yes,
+                in_place_update=_plan.in_place_update, _windows_gateway_resume=_windows_gateway_resume)
         _apply_pulled_update(
             git_cmd, branch, movement_baseline, _plan,
             _windows_gateway_resume=_windows_gateway_resume, completion_request=completion_request)

@@ -31,6 +31,7 @@ def _failed_result(request: dict, result_path: Path, code: int) -> int:
     _write_json(result_path, {
         "schema": 1, "update_id": request["receipt"]["update_id"], "exit_code": code,
         "receipt": None, "windows_resume": None, "pm_receipt": request.get("pm_receipt"),
+        "preparation_receipt": request["receipt"],
     })
     return code
 
@@ -97,6 +98,13 @@ def run_completion(request: dict) -> dict:
                 raise ValueError("completion response identity mismatch")
             if result["exit_code"] != code:
                 raise ValueError("completion response disagrees with process exit")
+            preparation_receipt = result.get("preparation_receipt")
+            if preparation_receipt is not None and (
+                not isinstance(preparation_receipt, dict)
+                or preparation_receipt.get("update_id") != request["receipt"]["update_id"]
+                or preparation_receipt.get("finished_at")
+            ):
+                raise ValueError("completion preparation receipt identity mismatch")
             receipt = result.get("receipt")
             if receipt is not None and (
                 receipt.get("update_id") != request["receipt"]["update_id"]
@@ -134,6 +142,7 @@ def _read_terminal_receipt(request: dict) -> dict | None:
 
 def _prepare(request: dict, request_path: Path, result_path: Path) -> int:
     import pm
+    from hermes_cli import update_receipt
     from pm import receipt
     from pm.client import ensure_tools_for_sync
     from pm.environments import activation_environment, project_python
@@ -146,17 +155,24 @@ def _prepare(request: dict, request_path: Path, result_path: Path) -> int:
 
     refuse_foreign_owned_venv(root)
     arm_completion(root)
-    with receipt.worker_context(update_id):
-        try:
-            # This file runs from the new tree, so its lockfile carries the new
-            # pins; tools (incl. bumped uv/python) land before the sync uses them.
-            ensure_tools_for_sync()
-            # An update never fails because of a plugin: misfits are disabled and reported.
-            pm.sync_venv(explicit=True, project_root=root, evict_incompatible_plugins=True)
-            collect_superseded_generations(root)
-        finally:
-            request["pm_receipt"] = receipt.last_for_update(update_id)
-            _write_json(request_path, request)
+    with update_receipt.update_receipt_scope():
+        _resume_receipt(request["receipt"])
+        with receipt.worker_context(update_id):
+            try:
+                # This file runs from the new tree, so its lockfile carries the new
+                # pins; tools (incl. bumped uv/python) land before the sync uses them.
+                with update_receipt.measure_duration("pm_tools"):
+                    ensure_tools_for_sync()
+                # An update never fails because of a plugin: misfits are disabled and reported.
+                with update_receipt.measure_duration("python_deps"):
+                    pm.sync_venv(explicit=True, project_root=root, evict_incompatible_plugins=True)
+                collect_superseded_generations(root)
+            finally:
+                request["pm_receipt"] = receipt.last_for_update(update_id)
+                current = update_receipt._current.get()
+                if current is not None:
+                    request["receipt"] = current.data
+                _write_json(request_path, request)
     command = [str(project_python(root)),
                "-I", "-S", "-u", "-X", f"pycache_prefix={request['bytecode_cache']}",
                str(root / "hermes_cli/update_completion.py"),

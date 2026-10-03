@@ -106,6 +106,9 @@ def transition(tmp_path):
     # modules its imports reach: update_lock (the tail claims the shared update lock) and
     # _subprocess_compat (it exposes PM's git for the builds) — neither exists in the OLD
     # tree, and a bare copy of source_completion.py would die on ModuleNotFoundError.
+    # Preserve the real package startup's UTF-8 repair in isolated Windows children.
+    shutil.copy2(Path(update_completion.__file__).with_name("__init__.py"),
+                 package / "__init__.py")
     shutil.copy2(Path(update_completion.__file__).with_name("source_completion.py"),
                  package / "source_completion.py")
     shutil.copy2(Path(update_completion.__file__).with_name("update_lock.py"),
@@ -148,7 +151,10 @@ def transition(tmp_path):
     )
     (package / "update_receipt.py").write_text(
         "import contextvars, json, os, pathlib\n"
+        "from contextlib import nullcontext\n"
         "_current = contextvars.ContextVar('receipt', default=None)\n"
+        "update_receipt_scope = lambda: nullcontext()\n"
+        "measure_duration = lambda name: nullcontext({'outcome': 'success'})\n"
         "class UpdateReceipt: pass\n"
         "def record_stage(*args, **kwargs): pass\n"
         "def finalize_pending_update_receipt(code, reason):\n"
