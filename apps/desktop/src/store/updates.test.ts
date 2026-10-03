@@ -700,6 +700,8 @@ describe('explicit update targets', () => {
 describe('applyEverythingUpdate', () => {
   const applyClientMock = vi.fn()
   const checkClientMock = vi.fn()
+  const prepareClientMock = vi.fn()
+  const cancelPreparationMock = vi.fn()
   const updateAllMock = vi.fn()
 
   beforeEach(() => {
@@ -708,6 +710,8 @@ describe('applyEverythingUpdate', () => {
     dismissSpy.mockClear()
     applyClientMock.mockReset().mockResolvedValue({ ok: true, handedOff: true })
     checkClientMock.mockReset().mockResolvedValue(status({ behind: 0, updateAvailable: false }))
+    prepareClientMock.mockReset().mockResolvedValue({ ok: true, prepared: false })
+    cancelPreparationMock.mockReset().mockResolvedValue(undefined)
     updateAllMock.mockReset().mockResolvedValue({ ok: true, results: [] })
     updateHermesSpy.mockReset().mockResolvedValue({ ok: true, name: 'update' })
     checkHermesUpdateSpy.mockReset().mockResolvedValue({
@@ -727,7 +731,12 @@ describe('applyEverythingUpdate', () => {
     $mockConnectionsRegistry.set(null)
     ;(globalThis as unknown as { window: unknown }).window = {
       hermesDesktop: {
-        updates: { apply: applyClientMock, check: checkClientMock },
+        updates: {
+          apply: applyClientMock,
+          check: checkClientMock,
+          prepare: prepareClientMock,
+          cancelPreparation: cancelPreparationMock
+        },
         connections: { updateAll: updateAllMock }
       }
     }
@@ -872,6 +881,122 @@ describe('applyEverythingUpdate', () => {
     await applyEverythingUpdate()
 
     expect(applyClientMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('overlaps client preparation with backend work, then applies the prepared selection after every dispatch', async () => {
+    setRemote(true)
+    $mockConnectionsRegistry.set(registryOf(['local', 'vps']))
+    $updateStatus.set(status({ behind: 0, updateAvailable: false, targetSha: 'selected-client' }))
+    let finishPreparation!: (value: { ok: boolean; prepared: boolean }) => void
+    const preparation = new Promise(resolve => {
+      finishPreparation = resolve
+    })
+    let finishBackend!: (value: { ok: boolean; name: string }) => void
+    const backend = new Promise(resolve => {
+      finishBackend = resolve
+    })
+    let finishFanout!: (value: { ok: boolean; results: unknown[] }) => void
+    const fanout = new Promise(resolve => {
+      finishFanout = resolve
+    })
+    prepareClientMock.mockReturnValue(preparation)
+    updateHermesSpy.mockReturnValue(backend)
+    updateAllMock.mockReturnValue(fanout)
+
+    const pending = applyEverythingUpdate()
+
+    try {
+      expect(prepareClientMock).toHaveBeenCalledTimes(1)
+      expect(updateHermesSpy).toHaveBeenCalledTimes(1)
+      expect(applyClientMock).not.toHaveBeenCalled()
+      finishBackend({ ok: true, name: 'update' })
+      await vi.waitFor(() => expect(updateAllMock).toHaveBeenCalledTimes(1), { timeout: 5000 })
+      // Backend completion must not force a new selection while preparation owns it.
+      expect(checkClientMock).not.toHaveBeenCalled()
+      finishPreparation({ ok: true, prepared: true })
+      await Promise.resolve()
+      expect(applyClientMock).not.toHaveBeenCalled()
+      finishFanout({ ok: true, results: [] })
+      await pending
+      expect(applyClientMock).toHaveBeenCalledTimes(1)
+      expect(checkClientMock).not.toHaveBeenCalled()
+      expect($updateStatus.get()?.targetSha).toBe('selected-client')
+      expect(cancelPreparationMock).not.toHaveBeenCalled()
+    } finally {
+      finishBackend({ ok: true, name: 'update' })
+      finishPreparation({ ok: true, prepared: false })
+      finishFanout({ ok: true, results: [] })
+      await pending
+    }
+  })
+
+  it('keeps checks download-free and retains fresh fallback after rejected or unsupported preparation', async () => {
+    setRemote(false)
+    $mockConnectionsRegistry.set(registryOf(['local', 'vps']))
+    prepareClientMock.mockRejectedValue(new Error('download failed'))
+    checkClientMock.mockResolvedValue(status({ behind: 2, updateAvailable: true }))
+    await checkUpdates()
+    await checkUpdates({ force: true })
+    expect(prepareClientMock).not.toHaveBeenCalled()
+    checkClientMock.mockClear()
+    let finishFanout!: (value: { ok: boolean; results: unknown[] }) => void
+    updateAllMock.mockReturnValue(new Promise(resolve => {
+      finishFanout = resolve
+    }))
+    const pending = applyEverythingUpdate()
+
+    try {
+      await vi.waitFor(() => expect(updateAllMock).toHaveBeenCalledTimes(1))
+      expect(checkClientMock).not.toHaveBeenCalled()
+      expect(applyClientMock).not.toHaveBeenCalled()
+      finishFanout({ ok: true, results: [] })
+      await pending
+      expect(prepareClientMock).toHaveBeenCalledTimes(1)
+      expect(checkClientMock).toHaveBeenCalledTimes(1)
+      expect(checkClientMock).toHaveBeenCalledWith({ force: true })
+      expect(applyClientMock).toHaveBeenCalledTimes(1)
+    } finally {
+      finishFanout({ ok: true, results: [] })
+      await pending
+    }
+    prepareClientMock.mockResolvedValue({ ok: true, prepared: false })
+    checkClientMock.mockClear()
+    applyClientMock.mockClear()
+    await applyEverythingUpdate()
+    expect(prepareClientMock).toHaveBeenCalledTimes(2)
+    expect(checkClientMock).toHaveBeenCalledTimes(1)
+    expect(checkClientMock).toHaveBeenCalledWith({ force: true })
+    expect(applyClientMock).toHaveBeenCalledTimes(1)
+    expect(cancelPreparationMock).not.toHaveBeenCalled()
+  })
+
+  it('waits for preparation and releases its owner when the backend flow exits before client apply', async () => {
+    setRemote(false)
+    $mockConnectionsRegistry.set({ ...registryOf(['local']), connections: [null] })
+    let finishPreparation!: (value: { ok: boolean; prepared: boolean }) => void
+    prepareClientMock.mockReturnValue(new Promise(resolve => {
+      finishPreparation = resolve
+    }))
+    const pending = applyEverythingUpdate().catch(error => error)
+
+    try {
+      await Promise.resolve()
+      expect($updateEverything.get().running).toBe(true)
+      expect(cancelPreparationMock).not.toHaveBeenCalled()
+      finishPreparation({ ok: true, prepared: true })
+      expect(await pending).toBeInstanceOf(TypeError)
+      expect(cancelPreparationMock).toHaveBeenCalledTimes(1)
+      expect(applyClientMock).not.toHaveBeenCalled()
+      expect($updateEverything.get().running).toBe(false)
+    } finally {
+      finishPreparation({ ok: true, prepared: true })
+      await pending
+    }
+    $mockConnectionsRegistry.set(null)
+    prepareClientMock.mockResolvedValue({ ok: true, prepared: true })
+    applyClientMock.mockResolvedValue({ ok: false, error: 'apply-failed' })
+    await applyEverythingUpdate()
+    expect(cancelPreparationMock).toHaveBeenCalledTimes(2)
   })
 
   it('requestActiveUpdate routes through the everything-flow when EITHER target is behind', async () => {

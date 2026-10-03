@@ -1011,13 +1011,13 @@ const CLIENT_BEHIND_TOAST_ID = 'client-update-after-backend'
  *  itself is still behind, with a one-click client update. Silent when the
  *  client is current, so aligned installs never see it. */
 async function maybeNudgeClientAfterBackendUpdate(): Promise<void> {
-  if (typeof window === 'undefined') {
+  if (typeof window === 'undefined' || $updateEverything.get().running) {
     return
   }
 
   const status = (await checkUpdates({ force: true }).catch((): null => null)) ?? $updateStatus.get()
 
-  if (!status || status.error || (!status.updateAvailable && (status.behind ?? 0) <= 0)) {
+  if ($updateEverything.get().running || !status || status.error || (!status.updateAvailable && (status.behind ?? 0) <= 0)) {
     return
   }
 
@@ -1070,17 +1070,34 @@ export function applyEverythingUpdate(): Promise<void> {
 async function runEverythingUpdate(): Promise<void> {
   $updateEverything.set({ running: true })
 
-  // Snapshot the client status before any leg runs: the backend leg's own
-  // post-update nudge re-checks the client and overwrites `$updateStatus`,
-  // including with an error row when the bridge is unreachable. Step 3 needs a
-  // pre-flow value to fall back on when its own live check can't answer.
+  // Keep a pre-flow fallback when a strategy cannot prepare and its later
+  // live check cannot answer.
   const cachedClientStatus = $updateStatus.get()
+  let updatesBridge: Window['hermesDesktop']['updates'] | undefined
+  let clientPreparation = Promise.resolve(false)
+  let handedOff = false
 
   try {
+    updatesBridge = window.hermesDesktop?.updates
+    // Explicit preparation overlaps backend work; catch immediately because
+    // the backend legs may take minutes before the client joins this promise.
+    clientPreparation = (async (): Promise<boolean> => {
+      try {
+        const result = await updatesBridge?.prepare?.()
+
+        if (result?.ok && result.prepared && result.status) {
+          $updateStatus.set(result.status)
+        }
+
+        return result?.ok === true && result.prepared === true
+      } catch {
+        return false
+      }
+    })()
+
     // 1. Active backend first (remote mode), with the detailed overlay flow.
-    //    Its own finish path re-checks and nudges, but the everything-flow
-    //    continues regardless of the outcome: one unreachable backend must
-    //    not strand the other machines or the client.
+    //    The everything-flow continues regardless of the outcome: one
+    //    unreachable backend must not strand the other machines or the client.
     if (isRemoteMode()) {
       $updateOverlayTarget.set('backend')
 
@@ -1132,22 +1149,33 @@ async function runEverythingUpdate(): Promise<void> {
 
     // 3. The client last — its apply relaunches or hands off the app, so it
     //    must come after every dispatch above. Skipped when already current.
-    //    Re-check rather than trusting `$updateStatus`: the cached value can be
-    //    up to a poll interval (24h) old and was captured BEFORE the backend
-    //    update above, so a cached `behind: 0` would skip the client leg and
-    //    leave the app stale — the exact failure this flow exists to prevent.
-    //    `checkUpdates()` resolves with an error-status rather than rejecting,
-    //    so fall back to the pre-flow snapshot when the live check can't answer.
-    const freshClientStatus = await checkUpdates({ force: true }).catch((): null => null)
-    const clientStatus = freshClientStatus?.error ? cachedClientStatus : (freshClientStatus ?? cachedClientStatus)
+    //    Prepared packages retain their selected identity: a new force check
+    //    could retarget after downloading. Other strategies keep the live
+    //    check, with the pre-flow status as fallback if it cannot answer.
+    const prepared = await clientPreparation
+    let clientStatus = cachedClientStatus
 
-    if ((clientStatus?.behind ?? 0) > 0 || clientStatus?.updateAvailable) {
+    if (!prepared) {
+      const freshClientStatus = await checkUpdates({ force: true }).catch((): null => null)
+      clientStatus = freshClientStatus?.error ? cachedClientStatus : (freshClientStatus ?? cachedClientStatus)
+    }
+
+    if (prepared || (clientStatus?.behind ?? 0) > 0 || clientStatus?.updateAvailable) {
       $updateOverlayTarget.set('client')
       $updateOverlayOpen.set(true)
-      await applyUpdates()
+      const result = await applyUpdates()
+      handedOff = result.handedOff === true
     }
   } finally {
-    $updateEverything.set({ running: false })
+    try {
+      if (await clientPreparation && !handedOff) {
+        await updatesBridge?.cancelPreparation?.()
+      }
+    } catch {
+      // IPC cleanup failure must not replace the update's original outcome.
+    } finally {
+      $updateEverything.set({ running: false })
+    }
   }
 }
 

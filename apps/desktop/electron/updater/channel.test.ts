@@ -671,6 +671,7 @@ test('reuses a native adapter for identical validated targets while polling curr
   let factories = 0
   let checked = 0
   let applied = 0
+  let released = 0
   const strategy = new ChannelStrategy({
     resolver: new ChannelResolver({ build: f.build, platform: 'darwin', arch: 'arm64', signer: 'ABCDE12345' }),
     build: f.build,
@@ -685,6 +686,7 @@ test('reuses a native adapter for identical validated targets while polling curr
 
           return { supported: true, updateAvailable: true }
         },
+        releasePreparation: () => { released += 1 },
         apply: async () => {
           applied += 1
 
@@ -699,6 +701,7 @@ test('reuses a native adapter for identical validated targets while polling curr
   expect(f.requests.filter(request => request === `/releases/channels/${f.record.name}.json`)).toHaveLength(2)
   expect(checked).toBe(2)
   expect(factories).toBe(1)
+  expect(released).toBe(0)
   expect(await strategy.apply()).toMatchObject({ ok: true })
   expect(applied).toBe(1)
 })
@@ -706,6 +709,7 @@ test('reuses a native adapter for identical validated targets while polling curr
 test('recreates the native adapter when a validated artifact changes at the same version', async (): Promise<void> => {
   const f = await fixture()
   const selected: string[] = []
+  const released: string[] = []
   let applied = ''
   const strategy = new ChannelStrategy({
     resolver: new ChannelResolver({ build: f.build, platform: 'darwin', arch: 'arm64', signer: 'ABCDE12345' }),
@@ -718,6 +722,7 @@ test('recreates the native adapter when a validated artifact changes at the same
       return {
         mechanism: 'electron-updater',
         check: async () => ({ supported: true, updateAvailable: true }),
+        releasePreparation: () => { released.push(digest) },
         apply: async () => {
           applied = digest
 
@@ -734,6 +739,89 @@ test('recreates the native adapter when a validated artifact changes at the same
   await strategy.check()
   expect(f.manifest.packages[0].version).toBe(version)
   expect(selected).toEqual(['d'.repeat(64), 'e'.repeat(64)])
+  expect(released).toEqual(['d'.repeat(64)])
+  await strategy.apply()
+  expect(applied).toBe('e'.repeat(64))
+  f.objects.clear()
+  await expect(strategy.check()).rejects.toThrow('404')
+  strategy.releasePreparation()
+  expect(released).toEqual(['d'.repeat(64), 'e'.repeat(64)])
+})
+
+test('explicit preparation reserves its complete target until apply, and release resumes fresh polling', async (): Promise<void> => {
+  const f = await fixture()
+  const applied: string[] = []
+  const prepared: string[] = []
+  const released: string[] = []
+  const strategy = new ChannelStrategy({
+    resolver: new ChannelResolver({ build: f.build, platform: 'darwin', arch: 'arm64', signer: 'ABCDE12345' }),
+    build: f.build,
+    mechanism: 'electron-updater',
+    nativeFactory: target => ({
+      mechanism: 'electron-updater',
+      check: async () => ({ supported: true, updateAvailable: true }),
+      prepare: async () => {
+        prepared.push(target.package.artifact.sha256)
+
+        return true
+      },
+      releasePreparation: () => { released.push(target.package.artifact.sha256) },
+      apply: async () => {
+        applied.push(target.package.artifact.sha256)
+
+        return { ok: true }
+      }
+    })
+  })
+  expect(await strategy.prepare()).toBe(true)
+  const admission = await strategy.check()
+  f.manifest.packages[0].artifact.sha256 = 'e'.repeat(64)
+  f.publish()
+  expect(await strategy.check()).toEqual(admission)
+  await strategy.apply()
+  expect(applied).toEqual(['d'.repeat(64)])
+  expect(await strategy.prepare()).toBe(true)
+  expect(prepared).toEqual(['d'.repeat(64), 'e'.repeat(64)])
+  strategy.releasePreparation()
+  strategy.releasePreparation()
+  expect(released).toEqual(['d'.repeat(64), 'e'.repeat(64)])
+  f.manifest.packages[0].artifact.sha256 = 'f'.repeat(64)
+  f.publish()
+  await strategy.check()
+  await strategy.apply()
+  expect(applied).toEqual(['d'.repeat(64), 'f'.repeat(64)])
+})
+
+test('failed preparation invalidates the selection and the next explicit attempt admits current metadata', async (): Promise<void> => {
+  const f = await fixture()
+  let fail: boolean = true
+  let applied: string = ''
+  const strategy = new ChannelStrategy({
+    resolver: new ChannelResolver({ build: f.build, platform: 'darwin', arch: 'arm64', signer: 'ABCDE12345' }),
+    build: f.build,
+    mechanism: 'electron-updater',
+    nativeFactory: target => ({
+      mechanism: 'electron-updater',
+      check: async () => ({ supported: true, updateAvailable: true }),
+      prepare: async () => {
+        if (fail) {
+          throw new Error('signature rejected')
+        }
+
+        return true
+      },
+      apply: async () => {
+        applied = target.package.artifact.sha256
+
+        return { ok: true }
+      }
+    })
+  })
+  await expect(strategy.prepare()).rejects.toThrow('signature rejected')
+  f.manifest.packages[0].artifact.sha256 = 'e'.repeat(64)
+  f.publish()
+  fail = false
+  expect(await strategy.prepare()).toBe(true)
   await strategy.apply()
   expect(applied).toBe('e'.repeat(64))
 })

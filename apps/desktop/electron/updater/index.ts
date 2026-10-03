@@ -87,5 +87,8 @@ export interface UpdaterApplyResultWire {
 export interface UpdaterStrategy {
   readonly mechanism: UpdaterMechanism
   check(opts?: { force?: boolean }): Promise<UpdaterStatusWire>
+  /** Explicit update requests may stage an immutable package without teardown. */
+  prepare?(): Promise<boolean>
+  releasePreparation?(): void
   apply(): Promise<UpdaterApplyResultWire>
 }

@@ -83,3 +83,44 @@ test('apply ownership precedes async resolution, survives restoration, and retai
   })
   await expect(operation.apply(async () => ({ ok: true }))).rejects.toThrow('already in progress')
 })
+
+test('explicit preparation coalesces for its window and owns the selection until apply or cancellation', async (): Promise<void> => {
+  const operation = new UpdateOperation(async () => strategy())
+  const ready = deferred<boolean>()
+  let preparations: number = 0
+  let applications: number = 0
+  const prepare = (): Promise<boolean> => {
+    preparations += 1
+
+    return ready.promise
+  }
+  const first = operation.prepare(prepare, 1)
+  expect(operation.prepare(prepare, 1)).toBe(first)
+  await expect(operation.prepare(prepare, 2)).rejects.toThrow('already in progress')
+  await expect(operation.apply(async () => ({ ok: true }), 2)).rejects.toThrow('already in progress')
+  const apply = operation.apply(async () => {
+    applications += 1
+
+    return { ok: true }
+  }, 1)
+  await Promise.resolve()
+  expect(applications).toBe(0)
+  ready.resolve(true)
+  expect(await first).toBe(true)
+  await apply
+  expect(preparations).toBe(1)
+  expect(applications).toBe(1)
+  expect(await operation.prepare(async () => true, 1)).toBe(true)
+  await expect(operation.apply(async () => ({ ok: true }), 2)).rejects.toThrow('already in progress')
+  let released: boolean = false
+  await operation.cancelPreparation(1, (): void => { released = true })
+  expect(released).toBe(true)
+  await expect(operation.apply(async () => ({ ok: true }), 2)).resolves.toEqual({ ok: true })
+})
+
+test('failed preparation releases window ownership and permits a new explicit attempt', async (): Promise<void> => {
+  const operation = new UpdateOperation(async () => strategy())
+  await expect(operation.prepare(async () => { throw new Error('download rejected') }, 1)).rejects.toThrow('download rejected')
+  expect(await operation.prepare(async () => false, 2)).toBe(false)
+  await expect(operation.apply(async () => ({ ok: true }), 3)).resolves.toEqual({ ok: true })
+})

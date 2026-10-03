@@ -4,6 +4,8 @@ import type { UpdaterApplyResultWire, UpdaterStrategy } from './index'
 export class UpdateOperation {
   private strategy: Promise<UpdaterStrategy | null> | undefined
   private applying: boolean = false
+  private preparation: Promise<boolean> | undefined
+  private preparationOwner: number | undefined
 
   constructor(private readonly initialize: () => Promise<UpdaterStrategy | null>) {}
 
@@ -16,8 +18,58 @@ export class UpdateOperation {
     return this.strategy
   }
 
-  async apply(run: () => Promise<UpdaterApplyResultWire>): Promise<UpdaterApplyResultWire> {
-    if (this.applying) {
+  prepare(run: () => Promise<boolean>, owner?: number): Promise<boolean> {
+    if (this.applying || (this.preparationOwner !== undefined && this.preparationOwner !== owner)) {
+      return Promise.reject(new Error('An update is already in progress.'))
+    }
+
+    if (this.preparation) {
+      return this.preparation
+    }
+
+    this.preparationOwner = owner
+    this.preparation = Promise.resolve().then(run).then(
+      (prepared: boolean): boolean => {
+        if (!prepared) {
+          this.preparationOwner = undefined
+        }
+
+        return prepared
+      },
+      (error: unknown): never => {
+        this.preparationOwner = undefined
+        throw error
+      }
+    ).finally((): void => {
+      this.preparation = undefined
+    })
+
+    return this.preparation
+  }
+
+  async waitForPreparation(): Promise<void> {
+    // The preparation caller reports errors; a later explicit Apply may retry.
+    await this.preparation?.catch((): boolean => false)
+  }
+
+  async cancelPreparation(owner: number, release: () => void): Promise<void> {
+    if (this.applying || this.preparationOwner !== owner) {
+      return
+    }
+
+    await this.waitForPreparation()
+
+    if (!this.applying && this.preparationOwner === owner) {
+      try {
+        release()
+      } finally {
+        this.preparationOwner = undefined
+      }
+    }
+  }
+
+  async apply(run: () => Promise<UpdaterApplyResultWire>, owner?: number): Promise<UpdaterApplyResultWire> {
+    if (this.applying || (this.preparationOwner !== undefined && this.preparationOwner !== owner)) {
       throw new Error('An update is already in progress.')
     }
 
@@ -25,6 +77,7 @@ export class UpdateOperation {
     let handedOff: boolean = false
 
     try {
+      await this.waitForPreparation()
       const result: UpdaterApplyResultWire = await run()
       handedOff = result.handedOff === true
 
@@ -32,6 +85,7 @@ export class UpdateOperation {
     } finally {
       if (!handedOff) {
         this.applying = false
+        this.preparationOwner = undefined
       }
     }
   }

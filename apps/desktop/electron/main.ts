@@ -3745,6 +3745,7 @@ async function checkUpdates(opts: { force?: boolean } = {}): Promise<UpdaterStat
   let strategy: UpdaterStrategy | null = null
 
   try {
+    await updateOperation.waitForPreparation()
     strategy = await resolvePackagedUpdateStrategy()
 
     if (strategy) {
@@ -3780,6 +3781,49 @@ const desktopMetrics: DesktopSharedMetrics = registerDesktopSharedMetrics()
 
 function resolvePackagedUpdateStrategy(): Promise<UpdaterStrategy | null> {
   return updateOperation.resolve()
+}
+
+const preparedUpdateWindows: WeakSet<Electron.WebContents> = new WeakSet()
+
+async function prepareUpdates(owner: Electron.WebContents): Promise<{
+  ok: boolean
+  prepared: boolean
+  status?: UpdaterStatusWire
+}> {
+  const ownerId: number = owner.id
+  let strategy: UpdaterStrategy | null = null
+  const prepared = await updateOperation.prepare(async (): Promise<boolean> => {
+    strategy = await resolvePackagedUpdateStrategy()
+    const prepare = strategy?.prepare?.bind(strategy)
+
+    if (!strategy || !prepare || owner.isDestroyed()) {
+      return false
+    }
+
+    const selected = strategy
+
+    if (!preparedUpdateWindows.has(owner)) {
+      preparedUpdateWindows.add(owner)
+      owner.once('destroyed', (): void => {
+        void updateOperation.cancelPreparation(ownerId, (): void => selected.releasePreparation?.())
+          .catch(error => rememberLog(`[update] preparation cleanup failed: ${String(error)}`))
+      })
+    }
+
+    const started = performance.now()
+
+    try {
+      return await prepare()
+    } finally {
+      rememberLog(`[update] ${selected.mechanism} preparation took ${Math.round(performance.now() - started)}ms`)
+    }
+  }, ownerId)
+
+  // ChannelStrategy returns the reserved admission, including its original
+  // timestamp. The renderer must not apply an older cached retirement status.
+  const status = prepared ? await (await resolvePackagedUpdateStrategy())?.check() : undefined
+
+  return { ok: true, prepared, ...(status ? { status } : {}) }
 }
 
 async function createPackagedUpdateStrategy(): Promise<UpdaterStrategy | null> {
@@ -4811,7 +4855,7 @@ async function releaseBackendLock(updateRoot: string, tag: string): Promise<{ un
 //
 // Detection (checkUpdates / commit changelog / "N behind") stays in the UI;
 // only this apply action changed.
-async function applyUpdates(): Promise<UpdaterApplyResultWire> {
+async function applyUpdates(owner?: number): Promise<UpdaterApplyResultWire> {
   return updateOperation.apply(async (): Promise<UpdaterApplyResultWire> => {
     updateInFlight = true
     let handedOff: boolean = false
@@ -4834,10 +4878,19 @@ async function applyUpdates(): Promise<UpdaterApplyResultWire> {
       return result
     } finally {
       if (!handedOff) {
-        updateInFlight = false
+        // This also covers failures before strategy.apply (for example while
+        // waiting for managed updates). Release before clearing window ownership.
+        try {
+          const packaged = await resolvePackagedUpdateStrategy()
+          packaged?.releasePreparation?.()
+        } catch (error) {
+          rememberLog(`[update] preparation cleanup failed: ${String(error)}`)
+        } finally {
+          updateInFlight = false
+        }
       }
     }
-  })
+  }, owner)
 }
 
 async function handOffWindowsBootstrapRecovery(reason) {
@@ -18674,8 +18727,21 @@ ipcMain.handle(
     }))
 )
 
-ipcMain.handle('hermes:updates:apply', async (_event, payload) =>
-  applyUpdates().catch(error => ({
+ipcMain.handle('hermes:updates:prepare', async (event: Electron.IpcMainInvokeEvent) =>
+  prepareUpdates(event.sender).catch(error => ({
+    ok: false,
+    prepared: false,
+    message: error?.message || String(error)
+  }))
+)
+
+ipcMain.handle('hermes:updates:cancel-preparation', async (event: Electron.IpcMainInvokeEvent): Promise<void> => {
+  const strategy = await resolvePackagedUpdateStrategy()
+  await updateOperation.cancelPreparation(event.sender.id, (): void => strategy?.releasePreparation?.())
+})
+
+ipcMain.handle('hermes:updates:apply', async (event: Electron.IpcMainInvokeEvent) =>
+  applyUpdates(event.sender.id).catch(error => ({
     ok: false,
     error: 'apply-failed',
     message: error?.message || String(error)

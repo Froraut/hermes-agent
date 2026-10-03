@@ -12,29 +12,46 @@ export interface MacStrategyDeps {
   appVersion: string
   /** Squirrel verifies the signed app before any backend is stopped. */
   prepareInstall: () => Promise<void>
+  /** The operation owner joins preparation before releasing its native resources. */
+  releaseNativeResources?: () => void
   beforeInstall: () => Promise<void>
   onInstallFailure: () => Promise<void>
   emitProgress: (payload: { stage: string; message: string; percent: number | null }) => void
+}
+
+interface PreparedMacUpdate {
+  version: string
+  status: UpdaterStatusWire
+  files: string[]
 }
 
 export class MacStrategy implements UpdaterStrategy {
   readonly mechanism = 'electron-updater' as const
   private applying = false
   private checkedPinnedRelease: UpdaterStatusWire | null = null
+  private preparation: Promise<PreparedMacUpdate | null> | null = null
+  private prepared: PreparedMacUpdate | null = null
 
   constructor(private readonly deps: MacStrategyDeps) {}
 
   async check(): Promise<UpdaterStatusWire> {
-    if (this.applying) {
+    if (this.applying || this.preparation) {
       throw new Error('An update is already in progress.')
     }
 
-    return this.checkRelease()
+    try {
+      return await this.checkRelease()
+    } catch (error) {
+      this.releasePreparation()
+      throw error
+    }
   }
 
   private async checkRelease(): Promise<UpdaterStatusWire> {
     // A failed or unavailable recheck cannot authorize an older selection.
     this.checkedPinnedRelease = null
+    const prepared = this.prepared
+    this.prepared = null
     const result = await this.deps.updater.checkForUpdates()
 
     if (!result) {
@@ -57,9 +74,74 @@ export class MacStrategy implements UpdaterStrategy {
 
     if (this.deps.expectedVersion && status.updateAvailable) {
       this.checkedPinnedRelease = status
+
+      if (prepared?.version === this.deps.expectedVersion) {
+        this.prepared = prepared
+      }
     }
 
     return status
+  }
+
+  private pinnedStatus(): UpdaterStatusWire | null {
+    return this.deps.expectedVersion && this.checkedPinnedRelease?.latestTag === `v${this.deps.expectedVersion}`
+      ? this.checkedPinnedRelease
+      : null
+  }
+
+  /** Explicit update intent may prepare a pinned package while Hermes stays usable. */
+  async prepare(): Promise<boolean> {
+    if (this.applying) {
+      throw new Error('An update is already in progress.')
+    }
+
+    const version = this.deps.expectedVersion
+
+    // Moving feeds have no admitted immutable artifact to stage ahead of Apply.
+    if (!version || !this.deps.verifyDownload) {
+      return false
+    }
+
+    if (this.prepared?.version === version) {
+      return true
+    }
+
+    this.preparation ??= this.preparePinned(version)
+      .then((prepared: PreparedMacUpdate | null): PreparedMacUpdate | null => {
+        this.prepared = prepared
+
+        return prepared
+      })
+      .catch((error: unknown): never => {
+        this.releasePreparation()
+        throw error
+      })
+      .finally((): void => {
+        this.preparation = null
+      })
+
+    return (await this.preparation) !== null
+  }
+
+  /** Called after the owner has joined preparation, or by this operation's failure path. */
+  releasePreparation(): void {
+    this.checkedPinnedRelease = null
+    this.prepared = null
+    this.deps.releaseNativeResources?.()
+  }
+
+  private async preparePinned(version: string): Promise<PreparedMacUpdate | null> {
+    const status = this.pinnedStatus() ?? (await this.checkRelease())
+
+    if (!status.updateAvailable) {
+      return null
+    }
+
+    const files = await this.deps.updater.downloadUpdate()
+    await this.deps.verifyDownload!(files)
+    await this.deps.prepareInstall()
+
+    return { version, status, files }
   }
 
   async apply(): Promise<UpdaterApplyResultWire> {
@@ -83,21 +165,27 @@ export class MacStrategy implements UpdaterStrategy {
           emitProgress: this.deps.emitProgress
         },
         async (stop: () => Promise<void>): Promise<UpdaterApplyResultWire> => {
+          const preparation = this.preparation ? await this.preparation : this.prepared
+          const prepared = preparation?.version === this.deps.expectedVersion ? preparation : null
           // The channel pins this native instance to one immutable build. Its
           // admitted metadata already selects the download; legacy feeds move.
-          const status =
-            (this.deps.expectedVersion && this.checkedPinnedRelease?.latestTag === `v${this.deps.expectedVersion}`
-              ? this.checkedPinnedRelease
-              : null) ?? (await this.checkRelease())
+          const status = prepared?.status ?? this.pinnedStatus() ?? (await this.checkRelease())
 
           if (!status.updateAvailable) {
             return { ok: true, mechanism: this.mechanism }
           }
 
-          const files = await this.deps.updater.downloadUpdate()
-          await this.deps.verifyDownload?.(files)
-          this.deps.emitProgress({ stage: 'prepare', message: 'Verifying the signed macOS update.', percent: null })
-          await this.deps.prepareInstall()
+          if (prepared) {
+            // Staging can precede remote work by minutes; reread the admitted
+            // file before stopping anything, even after native preparation.
+            this.deps.emitProgress({ stage: 'prepare', message: 'Verifying the prepared macOS update.', percent: null })
+            await this.deps.verifyDownload!(prepared.files)
+          } else {
+            const files = await this.deps.updater.downloadUpdate()
+            await this.deps.verifyDownload?.(files)
+            this.deps.emitProgress({ stage: 'prepare', message: 'Verifying the signed macOS update.', percent: null })
+            await this.deps.prepareInstall()
+          }
           await stop()
           this.deps.emitProgress({
             stage: 'restart',
@@ -110,7 +198,7 @@ export class MacStrategy implements UpdaterStrategy {
         }
       )
     } catch (error) {
-      this.checkedPinnedRelease = null
+      this.releasePreparation()
       throw error
     } finally {
       this.deps.updater.removeListener('download-progress', progress)

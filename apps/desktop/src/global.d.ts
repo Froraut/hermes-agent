@@ -623,6 +623,10 @@ declare global {
       getRemoteDisplayReason?: () => Promise<string | null>
       updates: {
         check: (opts?: { force?: boolean }) => Promise<DesktopUpdateStatus>
+        /** Explicitly stage the selected package without stopping the app. */
+        prepare?: () => Promise<{ ok: boolean; prepared: boolean; status?: DesktopUpdateStatus }>
+        /** Release this renderer's preparation if installation was not handed off. */
+        cancelPreparation?: () => Promise<void>
         apply: (opts?: DesktopUpdateApplyOptions) => Promise<DesktopUpdateApplyResult>
         getBranch: () => Promise<{ branch: string }>
         setBranch: (name: string) => Promise<{ branch: string }>

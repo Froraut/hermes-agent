@@ -1,7 +1,12 @@
+import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { verifyChannelDownload } from './channel-native'
 import { MacStrategy, type MacStrategyDeps, prepareMacInstall } from './mac'
 
 function fixture() {
@@ -50,6 +55,7 @@ describe('macOS strategy', () => {
   it('reuses only the pinned release check and still verifies before teardown', async () => {
     const legacy = fixture()
     await legacy.strategy.check()
+    expect(await legacy.strategy.prepare()).toBe(false)
     await legacy.strategy.apply()
     expect(legacy.events).toEqual(['check', 'check', 'download', 'verify', 'stop', 'install'])
 
@@ -93,6 +99,90 @@ describe('macOS strategy', () => {
     expect(deps.updater.checkForUpdates).toHaveBeenCalledTimes(6)
     expect(deps.updater.downloadUpdate).toHaveBeenCalledOnce()
     expect(events.slice(-4)).toEqual(['download', 'verify', 'stop', 'install'])
+  })
+
+  it('joins explicit preparation without downloading twice or stopping the usable backend early', async () => {
+    const { deps, strategy, events } = fixture()
+    deps.expectedVersion = '0.29.0'
+    deps.verifyDownload = vi.fn(async () => {
+      events.push('hash')
+    })
+    let completeDownload!: (files: string[]) => void
+    vi.mocked(deps.updater.downloadUpdate).mockImplementation(() => {
+      events.push('download')
+
+      return new Promise(resolve => {
+        completeDownload = resolve
+      })
+    })
+
+    await strategy.check()
+    const first = strategy.prepare()
+    const second = strategy.prepare()
+    await vi.waitFor(() => expect(deps.updater.downloadUpdate).toHaveBeenCalledOnce())
+    expect(deps.beforeInstall).not.toHaveBeenCalled()
+    expect(deps.emitProgress).not.toHaveBeenCalled()
+    await expect(strategy.check()).rejects.toThrow('already in progress')
+
+    const applying = strategy.apply()
+    completeDownload(['pinned.zip'])
+    expect(await first).toBe(true)
+    expect(await second).toBe(true)
+    expect(await applying).toMatchObject({ ok: true, handedOff: true })
+    expect(deps.updater.downloadUpdate).toHaveBeenCalledOnce()
+    expect(events).toEqual(['check', 'download', 'hash', 'verify', 'hash', 'stop', 'install'])
+  })
+
+  it('rereads prepared artifact bytes before stopping and refreshes preparation after rejection', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'hermes-mac-prepared-'))
+
+    try {
+      const file = path.join(directory, 'pinned.zip')
+      const bytes = Buffer.from('accept')
+      await writeFile(file, bytes)
+      const { deps, strategy } = fixture()
+      deps.expectedVersion = '0.29.0'
+      deps.releaseNativeResources = vi.fn()
+      deps.verifyDownload = files =>
+        verifyChannelDownload(files, {
+          key: 'pinned.zip',
+          size: bytes.length,
+          sha256: createHash('sha256').update(bytes).digest('hex')
+        })
+      vi.mocked(deps.updater.downloadUpdate).mockResolvedValue([file])
+
+      expect(await strategy.prepare()).toBe(true)
+      expect(deps.prepareInstall).toHaveBeenCalledOnce()
+      expect(deps.beforeInstall).not.toHaveBeenCalled()
+      await writeFile(file, 'reject')
+      await expect(strategy.apply()).rejects.toThrow('digest mismatch')
+      expect(deps.releaseNativeResources).toHaveBeenCalledOnce()
+      expect(deps.beforeInstall).not.toHaveBeenCalled()
+      expect(deps.updater.quitAndInstall).not.toHaveBeenCalled()
+
+      await writeFile(file, bytes)
+      expect(await strategy.apply()).toMatchObject({ ok: true, handedOff: true })
+      expect(deps.updater.checkForUpdates).toHaveBeenCalledTimes(2)
+      expect(deps.updater.downloadUpdate).toHaveBeenCalledTimes(2)
+      expect(deps.prepareInstall).toHaveBeenCalledTimes(2)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('releases prepared admission on cancellation and prepares afresh before retry', async () => {
+    const { deps, strategy } = fixture()
+    deps.expectedVersion = '0.29.0'
+    deps.verifyDownload = vi.fn(async () => {})
+    deps.releaseNativeResources = vi.fn()
+    expect(await strategy.prepare()).toBe(true)
+    strategy.releasePreparation()
+    expect(deps.releaseNativeResources).toHaveBeenCalledOnce()
+    expect(deps.beforeInstall).not.toHaveBeenCalled()
+    expect(await strategy.apply()).toMatchObject({ ok: true, handedOff: true })
+    expect(deps.updater.checkForUpdates).toHaveBeenCalledTimes(2)
+    expect(deps.updater.downloadUpdate).toHaveBeenCalledTimes(2)
+    expect(deps.prepareInstall).toHaveBeenCalledTimes(2)
   })
 
   it.each(['downloadUpdate', 'prepareInstall'] as const)('keeps backends alive on %s failure', async failure => {

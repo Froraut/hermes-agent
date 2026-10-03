@@ -1,3 +1,7 @@
+import { EventEmitter, once } from 'node:events'
+import { createServer } from 'node:http'
+
+import type { MacUpdater } from 'electron-updater'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const { client } = vi.hoisted(() => ({
@@ -9,13 +13,17 @@ const { client } = vi.hoisted(() => ({
     allowPrerelease: true,
     allowDowngrade: true,
     currentVersion: { version: '9.9.9' },
+    squirrelDownloadedUpdate: false,
     on: vi.fn(),
+    removeListener: vi.fn(),
+    downloadUpdate: vi.fn(async () => []),
+    quitAndInstall: vi.fn(),
     setFeedURL: vi.fn(),
     checkForUpdates: vi.fn(async () => null)
   }
 }))
 
-vi.mock('electron', () => ({ autoUpdater: {} }))
+vi.mock('electron', () => ({ autoUpdater: { rawListeners: () => [], on: vi.fn(), removeListener: vi.fn() } }))
 vi.mock('electron-updater', () => ({
   default: {
     MacUpdater: class {
@@ -26,7 +34,7 @@ vi.mock('electron-updater', () => ({
   }
 }))
 
-import { createMacStrategy } from './mac-client'
+import { createMacStrategy, createOwnedMacUpdater } from './mac-client'
 
 afterEach((): void => {
   vi.clearAllMocks()
@@ -51,6 +59,63 @@ function deps(
 }
 
 describe('macOS client wiring', () => {
+  it('closes only its proxy and constructor listeners, and reattaches its own handlers for retry', async () => {
+    const native = new EventEmitter()
+    const unrelatedError = vi.fn()
+    const unrelatedReady = vi.fn()
+    const laterError = vi.fn()
+    native.on('error', unrelatedError)
+    native.on('update-downloaded', unrelatedReady)
+    const server = createServer((_request, response) => response.end('owned proxy'))
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const logError = vi.fn()
+    const updater = Object.assign(new EventEmitter(), {
+      server,
+      squirrelDownloadedUpdate: true,
+      checkForUpdates: vi.fn(async () => null)
+    })
+    const ownedError = (error: Error): void => { updater.emit('error', error) }
+    const ownedReady = (): void => { updater.squirrelDownloadedUpdate = true }
+    const owner = createOwnedMacUpdater(native, () => {
+      native.on('error', ownedError)
+      native.on('update-downloaded', ownedReady)
+
+      return updater as unknown as MacUpdater
+    }, logError)
+
+    try {
+      native.on('error', laterError)
+      const closed = once(server, 'close')
+      owner.release()
+      await closed
+      expect(server.listening).toBe(false)
+      expect(updater.server).toBeUndefined()
+      expect(updater.squirrelDownloadedUpdate).toBe(false)
+      expect(native.listeners('error')).toEqual([unrelatedError, laterError])
+      expect(native.listeners('update-downloaded')).toEqual([unrelatedReady])
+      native.emit('error', new Error('unrelated native event'))
+      expect(logError).not.toHaveBeenCalled()
+
+      await owner.checkForUpdates()
+      native.emit('update-downloaded')
+      expect(updater.squirrelDownloadedUpdate).toBe(true)
+      native.emit('error', new Error('retry native event'))
+      expect(logError).toHaveBeenCalledOnce()
+      expect(unrelatedError).toHaveBeenCalledTimes(2)
+      expect(laterError).toHaveBeenCalledTimes(2)
+      owner.release()
+      expect(native.listeners('error')).toEqual([unrelatedError, laterError])
+    } finally {
+      owner.release()
+      if (server.listening) {
+        const closed = once(server, 'close')
+        server.close()
+        await closed
+      }
+    }
+  })
+
   it('uses the generated provider by default and forbids implicit installs or downgrades', async () => {
     const strategy = createMacStrategy(deps())
     expect(client.setFeedURL).not.toHaveBeenCalled()

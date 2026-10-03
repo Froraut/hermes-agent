@@ -652,6 +652,8 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   },
   updates: {
     check: opts => ipcRenderer.invoke('hermes:updates:check', opts),
+    prepare: () => ipcRenderer.invoke('hermes:updates:prepare'),
+    cancelPreparation: () => ipcRenderer.invoke('hermes:updates:cancel-preparation'),
     apply: opts => ipcRenderer.invoke('hermes:updates:apply', opts),
     getBranch: () => ipcRenderer.invoke('hermes:updates:branch:get'),
     setBranch: name => ipcRenderer.invoke('hermes:updates:branch:set', name),
