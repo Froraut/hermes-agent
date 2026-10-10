@@ -493,12 +493,16 @@ def _is_auth_error(exc: BaseException) -> bool:
 
 
 # Lower-cased substrings meaning the transport session expired / was GC'd (OAuth token still valid).
-# Substrings (lower-cased match) that indicate the MCP server rejected the request because its server-side
-# transport session expired / was garbage-collected. See #13383.
+# Session markers are what a Streamable-HTTP server ANSWERS with when it GC'd our session (#13383), so they
+# count even inside a JSON-RPC error reply.
 _SESSION_EXPIRED_MARKERS: tuple = (
     "invalid or expired session", "expired session", "session expired", "session not found",
-    "unknown session", "session terminated", "closedresourceerror", "closed resource",
-    "transport is closed", "connection closed", "broken pipe", "end of file")
+    "unknown session", "session terminated")
+# Network-error names only describe OUR side of the pipe: a server that answered with a JSON-RPC error
+# proved the transport alive, so "broken pipe" in that reply is the tool's own failure text.
+_TRANSPORT_CLOSED_MARKERS: tuple = (
+    "closedresourceerror", "closed resource", "transport is closed", "connection closed", "broken pipe",
+    "end of file")
 
 
 def _is_session_expired_error(exc: BaseException, *, stdio: bool = False) -> bool:
@@ -510,7 +514,8 @@ def _is_session_expired_error(exc: BaseException, *, stdio: bool = False) -> boo
 
     ``stdio``: a stdio child has no server-side session, so a JSON-RPC error it answered with is the tool's
     real error however it reads ("Browser session not found", "unexpected end of file") and proves the pipe
-    is alive; only the SDK's synthesized connection-closed code still counts as a closure."""
+    is alive; only the SDK's synthesized connection-closed code still counts as a closure. On HTTP an answered
+    error still counts when it names the SESSION, never when it merely contains a network-error name."""
     # AnyIO stream exceptions are often message-less, so type checks complement marker matching.
     transport_error_types = tuple(_optional_types("anyio", "BrokenResourceError", "ClosedResourceError", "EndOfStream"))
     found = False
@@ -518,9 +523,11 @@ def _is_session_expired_error(exc: BaseException, *, stdio: bool = False) -> boo
         if isinstance(current, InterruptedError):
             return False
         code = getattr(getattr(current, "error", None), "code", None)
-        if stdio and code is not None and code != _JSONRPC_CONNECTION_CLOSED:
+        answered = code is not None and code != _JSONRPC_CONNECTION_CLOSED
+        if stdio and answered:
             return False
         # Messages vary across SDK versions/servers: a narrow allow-list of stable substrings avoids false positives.
         msg = str(current).lower()
-        found = found or isinstance(current, transport_error_types) or any(m in msg for m in _SESSION_EXPIRED_MARKERS)
+        markers = _SESSION_EXPIRED_MARKERS if answered else _SESSION_EXPIRED_MARKERS + _TRANSPORT_CLOSED_MARKERS
+        found = found or isinstance(current, transport_error_types) or any(m in msg for m in markers)
     return found
